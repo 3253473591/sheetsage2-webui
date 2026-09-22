@@ -7,6 +7,9 @@
 <!-- 空 data URI 图标：避免浏览器请求 /favicon.ico 产生 404 控制台噪音 -->
 <link rel="icon" href="data:,">
 <script src="./vendor/abcjs/abcjs-basic-min.js"></script>
+<!-- 钢琴卷帘：独立文件，无构建步骤。见 web/pianoroll.js 顶部注释。
+     走 /assets（本项目自己的前端脚本），不是 /vendor（那是第三方库）。 -->
+<script src="/assets/pianoroll.js"></script>
 <style>
 :root{
   --bg-app:#fff; --bg-subtle:#f5f4fa; --bg-card:#fff;
@@ -250,6 +253,109 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .toast.err{background:#b91c1c}
 .toast.ok{background:#15803d}
 body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
+/* ==================== ③ 钢琴卷帘 ==================== */
+.pr-host{margin-top:10px}
+.pr{outline:none}
+.pr-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-bottom:8px}
+.pr-lab{font-size:12px;color:var(--text-2)}
+.pr-grid-pick,.pr-lyr,.pr-view,.pr-tracks{display:flex;align-items:center;gap:6px}
+/* 曲目切换：一次只编一条轨（与导出的 SVP 一致，一轨一条单声部线） */
+.pr-trackbtns{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.pr-track{border:1px solid var(--border);background:#fff;color:var(--text-2);font:inherit;
+  font-size:12px;padding:3px 9px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.pr-track:hover{border-color:#cfcbdd;color:var(--text-1)}
+.pr-track.on{border-color:var(--primary);background:var(--primary-weak);color:var(--primary);font-weight:600}
+.pr-trackbtns .pr-chk{margin-left:6px;font-size:11px;color:var(--text-2)}
+/* 非当前轨：淡显作对照，不可点（一次只编一条轨） */
+.pr-note.pr-ghost{opacity:.22;pointer-events:none}
+.pr-btn{border:1px solid var(--border);background:#fff;color:var(--text-2);font:inherit;
+  font-size:12px;padding:3px 8px;border-radius:var(--radius-ctl);cursor:pointer;white-space:nowrap}
+.pr-btn:hover:not(:disabled){border-color:#cfcbdd;color:var(--text-1)}
+.pr-btn:disabled{opacity:.45;cursor:not-allowed}
+.pr-btn.mono{font-size:14px;min-width:30px;padding:2px 6px;text-align:center}
+.pr select{font:inherit;font-size:12px;padding:3px 6px;border:1px solid var(--border);
+  border-radius:var(--radius-ctl);background:#fff;color:var(--text-1);max-width:210px}
+.pr-lyr-input{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--border);
+  border-radius:var(--radius-ctl);width:180px;color:var(--text-1)}
+.pr-lyr-input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-weak)}
+/* 多选时输入框是"待铺开的整段歌词"，用颜色提示它现在的语义变了 */
+.pr-lyr-input.bulk{border-color:var(--primary);background:var(--primary-weak)}
+.pr-lyr-input.bad{border-color:var(--warn);background:#fffaf0}
+.pr-legend{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--text-2);width:100%}
+.pr-lg::before{content:"\25A0";margin-right:3px}
+.pr-lg-0::before{color:#7c4dff}.pr-lg-1::before{color:#0fa98f}
+.pr-lg-2::before{color:#e0409b}.pr-lg-3::before{color:#f59e0b}
+.pr-lg-chord::before{color:#b9b6c9}
+.pr-lg-hint{color:var(--text-3)}
+.pr-body{display:flex;align-items:flex-start;border:1px solid var(--border);
+  border-radius:var(--radius-ctl);overflow:auto;max-height:440px;background:#fff;min-height:220px}
+.pr-keys-wrap{flex:0 0 auto;position:sticky;left:0;z-index:3;background:#fff;
+  border-right:1px solid var(--border);width:58px}
+.pr-key{font-size:9px;line-height:1;padding-left:4px;display:flex;align-items:center;
+  color:#5b5870;background:#fff;border-bottom:1px solid #f0eef7;cursor:pointer;box-sizing:border-box}
+.pr-key.black{background:#f3f2f8;color:#8a8798}
+.pr-key:hover{background:var(--primary-weak)}
+.pr-scroll{flex:1 1 auto;overflow-x:auto;overflow-y:hidden}
+.pr-canvas{position:relative}
+.pr-ruler{position:relative;height:24px;background:var(--bg-subtle);
+  border-bottom:1px solid var(--border);overflow:hidden;cursor:ew-resize}
+.pr-ruler-ticks{position:absolute;left:0;top:0;right:0;bottom:0}
+.pr-tick{position:absolute;top:0;height:24px;border-left:1px solid var(--border);
+  font-size:10px;color:var(--text-2);padding-left:3px;line-height:24px;pointer-events:none}
+/* 播放头在标尺上的**抓手**：没有它用户根本看不出进度条能拖 */
+.pr-head-grab{position:absolute;top:0;height:24px;width:15px;margin-left:-7.5px;
+  cursor:ew-resize;z-index:6;
+  background:linear-gradient(180deg,#e0409b 0,#e0409b 15px,transparent 15px)}
+.pr-head-grab::after{content:"";position:absolute;left:3px;top:15px;
+  border-left:4.5px solid transparent;border-right:4.5px solid transparent;
+  border-top:7px solid #e0409b}
+.pr-head-grab:hover{filter:brightness(1.12)}
+.pr-lanes{position:relative;overflow:hidden}
+.pr-gridsvg{position:absolute;left:0;top:0;pointer-events:none}
+.pr-row-black{fill:#faf9fd}
+.pr-gl{stroke:#eeecf6;stroke-width:1}
+.pr-gl-trip{stroke:#e6e0f7;stroke-dasharray:2 3}
+.pr-gl-bar{stroke:#d9d5e8;stroke-width:1}
+.pr-notes{position:absolute;left:0;top:0;right:0;bottom:0}
+.pr-note{position:absolute;border-radius:3px;box-sizing:border-box;display:flex;
+  align-items:center;overflow:hidden;cursor:grab;border:1px solid rgba(0,0,0,.14);
+  user-select:none;touch-action:none}
+.pr-note .pr-note-ly{font-size:10px;line-height:1;padding:0 3px;color:#fff;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+/* 音符右边缘的拉伸手柄：原来 4px 半透明白几乎看不见 */
+.pr-note .pr-grip{position:absolute;right:0;top:0;bottom:0;width:6px;cursor:ew-resize;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.8));
+  border-left:1px solid rgba(255,255,255,.85)}
+.pr-note:hover .pr-grip{background:linear-gradient(90deg,transparent,#fff)}
+.pr-v0{background:#7c4dff}.pr-v1{background:#0fa98f}
+.pr-v2{background:#e0409b}.pr-v3{background:#f59e0b}
+.pr-note.sel{outline:2px solid #1b1730;outline-offset:-2px}
+.pr-note.act{box-shadow:inset 0 0 0 2px #fff}
+.pr-note.playing{filter:brightness(1.4);box-shadow:0 0 8px rgba(224,64,155,.75)}
+.pr-chord{background:#c9c6d8;opacity:.7;border-radius:2px}
+.pr-playhead{position:absolute;top:0;bottom:0;width:3px;margin-left:-1px;background:#e0409b;
+  pointer-events:none;z-index:4;box-shadow:0 0 4px rgba(224,64,155,.45)}
+/* 框选矩形：原来太淡，看不出在框 */
+.pr-marquee{position:absolute;border:1.5px dashed var(--primary);background:rgba(124,77,255,.18);
+  display:none;pointer-events:none;z-index:5;border-radius:2px}
+.pr-empty{position:absolute;left:0;right:0;top:70px;text-align:center;
+  color:var(--text-3);font-size:13px;pointer-events:none}
+
+/* ==================== 通用居中弹窗 ==================== */
+.modal-mask{position:fixed;inset:0;background:rgba(28,24,45,.45);display:flex;
+  align-items:center;justify-content:center;z-index:200;padding:20px}
+.modal-mask[hidden]{display:none}
+.modal{background:#fff;border-radius:var(--radius-card);box-shadow:0 18px 50px rgba(0,0,0,.25);
+  width:min(580px,92vw);max-height:86vh;overflow:auto;padding:20px 22px}
+.modal h3{margin:0 0 10px;font-size:16px}
+.modal-body{font-size:13px;color:var(--text-1);line-height:1.75}
+.modal-body textarea{width:100%;min-height:130px;font:inherit;font-size:13px;padding:8px;
+  border:1px solid var(--border);border-radius:var(--radius-ctl);box-sizing:border-box;resize:vertical}
+.modal-body .opt-row{margin-top:10px}
+.pr-chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-1);cursor:pointer}
+.pr-chk input{margin:0}
+.modal-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+
 </style>
 </head>
 <body data-state="idle">
@@ -351,12 +457,12 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
     </div>
   </section>
 
-  <!-- ③ 乐谱编辑 -->
+  <!-- ③ 钢琴卷帘 -->
   <section class="card collapsed" id="scoreCard">
     <div class="card-head">
-      <span class="num">3</span><h2>乐谱编辑</h2>
+      <span class="num">3</span><h2>钢琴卷帘</h2>
       <span class="spacer"></span>
-      <span class="ghost">左侧可编辑 ABC，失焦后右侧重新渲染</span>
+      <span class="ghost" id="prHint">扒谱完成后，在这里编辑音符与歌词</span>
       <button class="fold" data-fold="scoreCard">展开 ▸</button>
     </div>
     <div class="card-body">
@@ -365,25 +471,16 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
         <button class="filter-chip" data-voice="vocal">人声主旋律</button>
         <button class="filter-chip" data-voice="ins">器乐旋律</button>
         <button class="filter-chip" data-voice="chords">和弦</button>
-        <span class="filters-hint">勾什么就导什么；即时作用于左侧 ABC，无需重跑推理</span>
+        <span class="filters-hint">勾什么就导什么；卷帘上改完点「保存」即刻重生成导出，无需重跑推理</span>
       </div>
-      <div class="editor">
-        <div class="pane">
-          <div class="pane-head">
-            <span>ABC</span>
-            <span class="dirty" id="abcDirty">● 已修改，需重新生成导出</span>
-            <span class="spacer"></span>
-            <button class="btn sm" id="abcReset" disabled>还原</button>
-            <button class="btn sm primary" id="abcSave" disabled>保存并重新生成</button>
-          </div>
-          <textarea class="abc-area" id="abcArea" spellcheck="false" placeholder="扒谱完成后，这里显示可编辑的 ABC"></textarea>
-        </div>
-        <div class="pane">
-          <div class="pane-head">
-            <span>乐谱</span><span class="spacer"></span><span id="scoreInfo">—</span>
-          </div>
-          <div class="score-body" id="scoreBody"><div class="empty">上传音频并完成扒谱后，这里显示乐谱</div></div>
-        </div>
+      <div class="pr-host" id="prHost"></div>
+      <div class="export-row" style="margin-top:10px">
+        <button class="btn primary sm" id="prSave" disabled>保存并重新生成</button>
+        <button class="btn sm" id="prRevert" disabled>还原</button>
+        <button class="btn sm" id="lyrImport" disabled>导入歌词…</button>
+        <button class="btn sm" id="lrcDownload" disabled>导出 LRC</button>
+        <span class="dirty" id="prDirty">● 已修改，需重新生成导出</span>
+        <span class="ghost" id="prStats">—</span>
       </div>
       <div class="transport">
         <button class="tp-btn" id="tpPlay" disabled title="播放/暂停">▶</button>
@@ -396,55 +493,9 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
     </div>
   </section>
 
-  <!-- ④ 歌词填充 -->
-  <section class="card collapsed" id="lyricsCard">
-    <div class="card-head">
-      <span class="num">4</span><h2>歌词填充</h2>
-      <span class="ghost" id="lyrState">未填充 · 音符歌词为 “la”</span>
-      <span class="spacer"></span>
-      <button class="fold" data-fold="lyricsCard">展开 ▸</button>
-    </div>
-    <div class="card-body">
-      <div class="lyr-drop" id="lyrDrop">
-        <div class="big">拖入 <b>.lrc</b> 或 <b>.txt</b> 歌词文件，或点击选择</div>
-        <div class="hint">LRC 带时间戳 → 按时间对齐到音符；纯文本 → 按顺序一字一音</div>
-        <input type="file" id="lyrFile" accept=".lrc,.txt,.text,text/plain" hidden>
-      </div>
-      <textarea class="lyr-text" id="lyrText" spellcheck="false"
-        placeholder="也可以直接在这里粘贴歌词。&#10;&#10;LRC 例：[00:14.64]这里是第一行测试歌词&#10;纯文本例：这里是第一行测试歌词"></textarea>
-      <div class="opt-row" style="margin-top:10px">
-        <span class="opt-label">格式</span>
-        <div class="seg" id="segLyrFmt">
-          <button data-v="auto" class="on">自动识别</button>
-          <button data-v="lrc">按 LRC</button>
-          <button data-v="plain">按纯文本</button>
-        </div>
-        <span class="opt-label" style="margin-left:14px">延音符</span>
-        <div class="seg" id="segLyrCont">
-          <button data-v="auto" class="on" title="中文用 -，英文多音节词用 +">自动</button>
-          <button data-v="-" title="同一音节延续（一字多音）">-</button>
-          <button data-v="+" title="同一个词的下一个音节（open → open +）">+</button>
-        </div>
-      </div>
-      <div class="export-row" style="margin-top:12px">
-        <button class="btn primary sm" id="lyrFill" disabled>填充到 SVP</button>
-        <button class="btn sm" id="lyrClear" disabled>清空（回到 la）</button>
-        <span class="ghost" id="lyrHint">需先完成扒谱</span>
-      </div>
-      <div style="margin-top:14px" id="lyrResultBox" hidden>
-        <div class="pane-head" style="border:1px solid var(--border);border-radius:8px 8px 0 0">
-          <span>填充结果</span><span class="spacer"></span>
-          <span class="ghost" id="lyrStats"></span>
-          <button class="btn sm" id="lrcDownload" disabled>下载 LRC</button>
-        </div>
-        <pre class="lrc" id="lrcBox"></pre>
-      </div>
-    </div>
-  </section>
-
-  <!-- ⑤ 导出 -->
+  <!-- ④ 导出 -->
   <section class="card">
-    <div class="card-head"><span class="num">5</span><h2>导出</h2></div>
+    <div class="card-head"><span class="num">4</span><h2>导出</h2></div>
     <div class="export-row">
       <button class="btn primary" id="dlSvp" disabled>导出 SVP</button>
       <button class="btn" id="dlMidi" disabled>导出 MIDI</button>
@@ -452,6 +503,15 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
       <span class="export-note" id="exportNote">暂无产物</span>
     </div>
   </section>
+</div>
+
+<!-- 通用居中弹窗（导出前的未填歌词提醒 / 导入歌词） -->
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <h3 id="modalTitle"></h3>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-acts" id="modalActs"></div>
+  </div>
 </div>
 
 <div class="statusbar">
@@ -479,12 +539,18 @@ const S = {
   result:null, rawAbc:"", chords:[],
   // ③ 的三个勾选：**勾什么导什么**。默认只勾「人声主旋律」（用户 2026-09-15 定）
   filter:{voices:{vocal:true, ins:false, chords:false}, dropIntroOutro:false},
-  playback:null, highlightNotes:[], noteEls:null, hlOk:false, notesSig:"",
+  playback:null, notesSig:"", hasVocalLyrics:false,
   abcShownOnce:false, es:null,
 };
 const STAGES = ["加载模型","读取音频","识别音乐","生成乐谱","完成"];
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
+// 钢琴卷帘实例。**在这里声明**（而不是在 ③ 那一段旁边）：
+// refreshButtons() 会调 rollEdited() 读它，而 refreshButtons 定义在前面，
+// 用 let 声明在后面会落进 TDZ —— 一旦有谁在脚本解析完之前调到就 ReferenceError。
+let roll = null;
+// 卷帘上是否有未保存的改动（供 refreshButtons / 切换勾选时判断）
+function rollEdited(){ return roll ? roll.dirty() : false; }
 
 /* ============================ 工具 ============================ */
 function fmt(sec){ sec=Math.max(0,Math.round(sec||0)); const m=Math.floor(sec/60); return m+":"+String(sec%60).padStart(2,"0"); }
@@ -620,12 +686,11 @@ function refreshButtons(){
   $("#btnStop").disabled = !busy;
   document.body.dataset.busy = busy?"1":"0";
   $("#fDel").disabled = busy;
-  $("#lyrFill").disabled = busy || !S.taskId || S.state!=="done";
-  $("#lyrClear").disabled = busy || !S.taskId || S.state!=="done";
-  $("#lyrHint").textContent = (!S.taskId || S.state!=="done")
-      ? "需先完成扒谱" : "拖入 .lrc / .txt，或直接粘贴歌词";
-  $("#abcSave").disabled = busy || !S.taskId || S.state!=="done";
-  $("#abcReset").disabled = busy || !S.taskId || S.state!=="done";
+  const ready = !busy && !!S.taskId && S.state==="done";
+  $("#lyrImport").disabled = !ready;
+  $("#lrcDownload").disabled = !ready;
+  $("#prSave").disabled = !ready || !rollEdited();
+  $("#prRevert").disabled = !ready || !rollEdited();
   const hasOut = S.state==="done" && S.result;
   $("#dlSvp").disabled = !hasOut; $("#dlMidi").disabled = !hasOut; $("#openDir").disabled = !hasOut;
   $("#tpPlay").disabled = !hasOut;
@@ -811,7 +876,7 @@ function onResult(t){
     setRawAbc(r.abc||"");
     // 新结果一律以本次推理的 export_voices 为准，并同步三个勾选
     syncVoicesFromResult(r);
-    // 有了乐谱就自动展开「③ 乐谱编辑」，省一次点击
+    // 有了乐谱就自动展开「③ 钢琴卷帘」，省一次点击
     if(!S.abcShownOnce){
       S.abcShownOnce=true;
       $("#scoreCard").classList.remove("collapsed");
@@ -822,8 +887,15 @@ function onResult(t){
     $("#exportNote").textContent = svp
       ? `SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符${r.export.lyrics_source==="recognized"?" · 已写入识别歌词":""}`
       : "暂无产物"; }
-  if(r.export && r.export.lyrics_source === "filled") fetchLyrics(S.taskId);
   loadPlayback();
+  // 卷帘有**未保存**的改动时不要重载 —— 那会把用户正在编辑的东西连同缩放一起冲掉。
+  // （正常路径上自动保存 300ms 内就落盘了，所以这里很少真的拦住；
+  //   它兜的是"其它来源的广播"这类意外。）
+  if(roll && roll.dirty()){
+    log("卷帘有未保存的改动，已跳过自动重载（编辑与缩放都保留）","warn");
+  } else {
+    reloadRoll();
+  }
   refreshButtons();
 }
 function renderSegbar(sections){
@@ -984,13 +1056,6 @@ function syncFilterChips(){
 }
 /** 当前勾选的内容（提交 / 重新生成导出时带上）。 */
 function selectedVoices(){ return ["vocal","ins","chords"].filter(k=>!!S.filter.voices[k]); }
-/** 编辑器里的 ABC 是否**真的被手改过**（与「按当前过滤自动生成」的文本不同）。
- *  用它来决定要不要弹「会丢弃手动修改」的确认框——只看 #abcDirty 会把
- *  「因切换过滤而待重新生成导出」也误判成手改，来回切一次就弹一次。 */
-function abcHandEdited(){
-  if(!S.rawAbc) return false;
-  return $("#abcArea").value !== filterAbc(S.rawAbc, S.filter);
-}
 /** ③ 三个勾选（人声主旋律 / 器乐旋律 / 和弦）的唯一真相入口。
  *
  *  勾选状态存在 `S.filter.voices`，它同时决定四件事：
@@ -999,20 +1064,18 @@ function abcHandEdited(){
  */
 function toggleVoice(kind, on, force){
   on = !!on;
-  if(!force && abcHandEdited()
-     && !confirm("重新应用过滤会丢弃你在 ABC 里的手动修改，继续吗？")){
+  if(!force && rollEdited()
+     && !confirm("重新加载卷帘会丢弃你还没保存的音符/歌词改动，继续吗？")){
     syncFilterChips();          // 用户放弃：UI 回到真正生效的状态
     return;
   }
   const changed = !!S.filter.voices[kind] !== on;
   S.filter.voices[kind] = on;
   syncFilterChips();
-  if(S.rawAbc){
-    applyFiltersToEditor(true);
-    // 勾选变了 → 磁盘上的 export/*.svp|mid|abc 还是上一次的内容，
-    // 标一下「需重新生成」，导出时也会自动重生成一次。
-    if(!force && changed) $("#abcDirty").classList.add("on");
-    if(!force && S.taskId) loadPlayback();
+  if(S.taskId && S.state==="done"){
+    // 勾选变了 → 卷帘要按新的声部集合重载（导出内容 = 卷帘显示内容）
+    reloadRoll();
+    if(!force && changed) loadPlayback();
   }
 }
 $$(".filter-chip").forEach(chip=>chip.onclick=()=>{
@@ -1031,91 +1094,130 @@ function syncVoicesFromResult(r){
     S.filter.voices={vocal:sel.includes("vocal"), ins:sel.includes("ins"), chords:sel.includes("chords")};
   }
   syncFilterChips();
-  if(S.rawAbc) applyFiltersToEditor(true);
-}
-function applyFiltersToEditor(force){
-  if(!S.rawAbc) return;
-  const text=filterAbc(S.rawAbc,S.filter);
-  $("#abcArea").value=text; committed=text;
-  $("#abcDirty").classList.remove("on"); renderScore();
-}
-$("#abcReset").onclick=()=>{ syncFilterChips(); applyFiltersToEditor(true); };
-
-let committed="", renderTimer=null;
-// abcjs 的 renderAbc 返回对象上没有 `.svg`（实测 undefined），且 responsive 模式会把
-// SVG 设成 absolute 跳出布局；这里渲染到临时节点再整体替换 innerHTML。
-function renderScore(){
-  const abc=$("#abcArea").value, body=$("#scoreBody");
-  if(!abc.trim()){ body.innerHTML='<div class="empty">请输入 ABC 记谱</div>'; return; }
-  const tmp=document.createElement("div");
-  try{
-    ABCJS.renderAbc(tmp,abc,{scale:1.0,staffwidth:640,add_classes:true,jazzchords:true,showMeter:true,paddingtop:2,paddingbottom:2});
-  }catch(e){ body.innerHTML='<div class="empty">ABC 解析失败，请检查语法</div>'; return; }
-  if(!tmp.querySelector("svg")){ body.innerHTML='<div class="empty">ABC 解析失败，请检查语法</div>'; return; }
-  body.innerHTML=tmp.innerHTML;
-  const q=(abc.match(/Q:1\/4=(\d+)/)||[])[1]||"—", m=(abc.match(/^M:(\S+)/m)||[])[1]||"—", k=(abc.match(/^K:(\S+)/m)||[])[1]||"—";
-  $("#scoreInfo").textContent=`♩=${q} · ${m} · ${k}`;
-  buildHighlightMap();
 }
 
-/* ---------- 播放高亮：播放到哪个音，谱面对应音符变色 ----------
-   映射方式是**按序号**：后端 /notes 额外返回一份「不合并连音线」的音符表
-   （highlight_notes），它的数量与 abcjs 渲染出的 .abcjs-note 元素一致
-   ——实测 32 vs 28 的差异正是连音线被画成两个音符头。
-   若两者数量对不上（换了样本、ABC 改动等），自动关闭高亮并记一条日志，
-   绝不硬套造成错位。 */
-let hlLast=-1;
-function clearHighlight(){
-  if(S.noteEls) S.noteEls.forEach(e=>e.classList.remove("playing"));
-  hlLast=-1;
+/* ==================== ③ 钢琴卷帘 ====================
+   卷帘是 ③ 唯一的编辑器（旧版的 ABC 文本框与五线谱已按用户要求删除）。
+   数据流：/api/tasks/{id}/notes → 卷帘（单位秒）→ 用户编辑 → POST /roll
+   → 后端把音符序列化回 ABC，并重生成 SVP/MIDI/ABC。
+   歌词是**逐音字面字符串**，`-`（同音节延续）与 `+`（同词下一音节）前后端都原样透传。 */
+// `roll` 与 `rollEdited()` 在上面统一声明（避免 TDZ），这里只管接线。
+function initRoll(){
+  if(roll) return;
+  roll=PianoRoll.mount($("#prHost"),{
+    grid:PianoRoll.DEFAULT_GRID,
+    onChange:()=>{ setPrDirty(true); refreshButtons(); scheduleAutoSave(); },
+    onToast:(m,k)=>toast(m,k),
+    onAudition:auditionPitch,
+    // Ctrl+L：歌词填充（弹窗属于页面层，不在卷帘组件里）
+    onLyrics:()=>lyrImportOpen(),
+    // 点卷帘空白处 → 进度条跳过去
+    onSeek:(sec)=>seekToSeconds(sec)
+  });
 }
-function buildHighlightMap(){
-  const body=$("#scoreBody");
-  S.noteEls=[...body.querySelectorAll(".abcjs-note")];
-  const want=(S.highlightNotes||[]).length;
-  S.hlOk = S.noteEls.length>0 && want>0 && S.noteEls.length===want;
-  if(S.noteEls.length && want && !S.hlOk){
-    log(`谱面音符元素 ${S.noteEls.length} 个与高亮数据 ${want} 个不一致，已关闭高亮`,"warn");
-  }
-  clearHighlight();
+
+/* 改完音符就自动保存并刷新预览 —— **不等失焦**。
+   用户明确指出：应该是"修改完音符"就更新，而不是"点到卷帘外面"才更新。
+   （失焦本身是个很弱的信号：用户可能一直在卷帘里编辑、根本不失焦；而且
+   "改完还要再点一下别处才生效"很反直觉。）
+
+   为什么用防抖而不是每次改动都存：拖动/打字会连续产生很多次改动，而一次重新生成
+   要一两秒。防抖保证"停手之后才存"。
+   为什么还要串行化：并发调用 saveRoll 会让两次重生成互相覆盖产物（后写的赢），
+   期间读到的产物是半成品。 */
+const AUTO_SAVE_DEBOUNCE_MS = 300;
+let autoSaveTimer=null, autoSaving=false, autoSaveAgain=false;
+
+function scheduleAutoSave(){
+  if(autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer=setTimeout(runAutoSave, AUTO_SAVE_DEBOUNCE_MS);
 }
-function highlightAt(seconds){
-  if(!S.hlOk) return;
-  const notes=S.highlightNotes;
-  // 二分找包含当前时刻的音符
-  let lo=0, hi=notes.length-1, idx=-1;
-  while(lo<=hi){
-    const mid=(lo+hi)>>1;
-    if(seconds < notes[mid].start) hi=mid-1;
-    else if(seconds >= notes[mid].end) lo=mid+1;
-    else { idx=mid; break; }
-  }
-  if(idx===hlLast) return;
-  if(hlLast>=0 && S.noteEls[hlLast]) S.noteEls[hlLast].classList.remove("playing");
-  hlLast=idx;
-  if(idx>=0 && S.noteEls[idx]) S.noteEls[idx].classList.add("playing");
-}
-$("#abcArea").addEventListener("input",()=>$("#abcDirty").classList.toggle("on",$("#abcArea").value!==committed));
-$("#abcArea").addEventListener("blur",()=>{ clearTimeout(renderTimer);
-  if($("#abcArea").value!==committed){ committed=$("#abcArea").value; renderScore(); } });
-$("#abcSave").onclick=async()=>{
-  if(!S.taskId) return;
-  $("#abcSave").disabled=true;
+async function runAutoSave(){
+  autoSaveTimer=null;
+  if(!roll || !roll.dirty()) return;
+  if(!S.taskId || S.state!=="done" || running()) return;
+  if(autoSaving){ autoSaveAgain=true; return; }     // 串行化，别并发重生成
+  autoSaving=true;
   try{
-    const r=await fetch(`/api/tasks/${S.taskId}/abc`,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({abc:$("#abcArea").value,bpm:S.result?.bpm,
-        export_voices:selectedVoices(),lyrics:"la"})});
+    if(await saveRoll(true)) toast("已自动保存并更新预览","ok");
+  } finally {
+    autoSaving=false;
+    if(autoSaveAgain){ autoSaveAgain=false; scheduleAutoSave(); }
+  }
+}
+function setPrDirty(on){
+  const ready=!!S.taskId && S.state==="done" && !running();
+  $("#prDirty").classList.toggle("on",!!on);
+  $("#prSave").disabled=!ready || !on;
+  $("#prRevert").disabled=!ready || !on;
+}
+/** 按当前勾选重新拉取卷帘数据。会**丢弃未保存的改动**，调用方负责先确认。 */
+async function reloadRoll(){
+  initRoll();
+  if(!S.taskId){ roll.load({tracks:[]}); setPrDirty(false); return; }
+  try{
+    // 传**具体的勾选**（voices=vocal,ins…），不要用 only_melody 那个布尔：
+    // 布尔只有两个值，"只勾器乐旋律"会被当成"全都要"，于是和弦被一起放出来 ——
+    // 那就是"勾了器乐却带出和弦"的根因。导出侧一直是对的，只有预览走错了口径。
+    const r=await fetch(`/api/tasks/${S.taskId}/notes?voices=${selectedVoices().join(",")}`);
+    if(!r.ok){ log(`读取卷帘数据失败：HTTP ${r.status}`,"error"); return; }
+    const j=await r.json();
+    if(!j.available){ roll.load({tracks:[]}); setPrDirty(false); return; }
+    roll.load(j);
+    setPrDirty(false);
+    S.hasVocalLyrics=!!j.has_vocal_lyrics;
+    const n=(j.tracks||[]).reduce((a,t)=>a+t.notes.length,0);
+    $("#prStats").textContent=`♩=${j.bpm?(Math.round(j.bpm*10)/10):"—"} · ${j.meter||"—"} · ${n} 个音符`;
+    // 勾的声部在当前编辑稿里没有（典型：这次推理只导出了人声，现在又勾了器乐）
+    // → 后端回落到模型原始谱。**要说出来**，别让用户以为看到的是自己编辑过的版本。
+    if(j.fell_back_to_model){
+      log("当前谱面里没有你勾的声部，已改用模型原始谱（这些声部是你没编辑过的原始版本）","warn");
+      toast("部分声部取自模型原始谱（当前编辑稿里没有）","warn");
+    }
+    const ov=roll.overlaps();
+    ov.forEach(w=>log("卷帘："+w,"warn"));
+    log(`卷帘就绪：${(j.tracks||[]).length} 条轨 / ${n} 个音符` +
+        `（${j.has_vocal_lyrics?"人声已填歌词":"人声歌词为 la"}）`);
+  }catch(e){ log("读取卷帘数据失败："+e.message,"error"); }
+}
+/** 保存卷帘并按当前勾选重生成导出。silent=true 用于"导出前顺手保存"。 */
+async function saveRoll(silent){
+  if(!S.taskId || !roll) return true;
+  try{
+    const r=await fetch(`/api/tasks/${S.taskId}/roll`,{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tracks:roll.state().tracks, export_voices:selectedVoices(),
+                           bpm:S.result?.bpm, meter:S.result?.meter})});
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||j.detail||"保存失败");
-    committed=$("#abcArea").value; $("#abcDirty").classList.remove("on");
     const svp=(j.exports||[]).find(x=>x.kind==="svp");
-    $("#exportNote").textContent = svp?`SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符`:"已重新生成";
-    toast("已按编辑后的乐谱重新生成导出","ok");
-    log(`导出已更新：${j.exports?.length||0} 个产物；歌词来源 ${j.lyrics_source||"-"}`);
+    if(svp) $("#exportNote").textContent=`SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符`;
+    (j.warnings||[]).forEach(w=>log(w,"warn"));
+    roll.clearDirty(); setPrDirty(false); refreshButtons();
+    S.hasVocalLyrics=!!j.has_vocal_lyrics;
+    if(!silent) toast("已按卷帘重新生成导出","ok");
+    log(`卷帘已保存：${(j.exports||[]).length} 个产物；声部 [${(svp&&svp.tracks||[]).join("/")}]`);
     loadPlayback();
-  }catch(e){ toast(e.message,"err"); log("保存 ABC 失败："+e.message,"error"); }
-  refreshButtons();
+    return true;
+  }catch(e){
+    toast("保存失败："+e.message,"err"); log("保存卷帘失败："+e.message,"error");
+    return false;
+  }
+}
+$("#prSave").onclick=()=>saveRoll(false);
+$("#prRevert").onclick=async()=>{
+  if(rollEdited() && !confirm("放弃卷帘上还没保存的改动？")) return;
+  await reloadRoll();
+  toast("已还原到最近一次保存的谱面","ok");
 };
+/** 点琴键试听一个音——用来确认"这个音到底是不是这个高度"。 */
+function auditionPitch(pitch){
+  try{
+    if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)();
+    ensureBus();
+    pianoVoice(melodyBus, 440*Math.pow(2,(pitch-69)/12), actx.currentTime+0.01, 0.3, 0.9);
+  }catch(e){ /* 没有音频上下文时静默：试听不是关键路径 */ }
+}
 
 /* 试听：Web Audio 加法合成钢琴音色（离线，不联网，不依赖音色库） */
 let actx=null, melodyNodes=[], melodyOffset=0, melodyTimer=null, melodyPlaying=false,
@@ -1177,9 +1279,11 @@ async function loadPlayback(){
     // 这样用户在乐谱编辑里改过 ABC 之后，试听跟着改后的谱面走。
     // only_melody 跟着这个过滤开关：取消它时后端会把
     // 其余声部一并返回，试听才是完整多声部，而不是永远只有主旋律。
-    // 只有「仅仅勾了人声主旋律」时才按单声部试听，否则把器乐/和弦一并放出来
-    const onlyVocal = selectedVoices().join(",")==="vocal" ? 1 : 0;
-    const r=await fetch(`/api/tasks/${S.taskId}/notes?only_melody=${onlyVocal}`);
+    // 只有「仅仅勾了人声主旋律」时才按单声部试听，否则把器乐/和弦一并放出来。
+    // 同样按**具体勾选**传，别用布尔：布尔表达不了"只要器乐"。
+    // 三个都取消时传**空参数**（?voices=），后端据此返回空 ——
+    // 注意不能传 none，那会被 normalize_export_voices 当成无法识别而退回默认的人声。
+    const r=await fetch(`/api/tasks/${S.taskId}/notes?voices=${selectedVoices().join(",")}`);
     if(!r.ok){ S.playback=null; return; }
     const j=await r.json();
     if(!j.available){ S.playback=null; S.highlightNotes=[]; resetPiano(); return; }
@@ -1196,20 +1300,17 @@ async function loadPlayback(){
     const sig=notesSignature(newNotes);
     if(sig!==S.notesSig){ resetPiano(); S.notesSig=sig; }
     S.playback={notes:newNotes, duration:j.duration||0};
-    S.highlightNotes=j.highlight_notes||[];
-    buildHighlightMap();
     log(`试听就绪：${newNotes.length} 个音符` +
         (chords.length?`（含和弦 ${chords.length}）`:"") +
         (j.voices?.length>1?`（声部 ${j.voices.join("/")}）`:"") +
-        `（${j.lyrics_source==="filled"?"已填充歌词":"歌词为 la"}）` +
-        (S.hlOk?`，高亮 ${S.noteEls.length} 个音符`:"，高亮不可用"));
+        `（${j.has_vocal_lyrics?"人声已填歌词":"歌词为 la"}）`);
   }catch(e){ S.playback=null; }
 }
 /* 换曲子 / 改谱面后，之前渲染好的钢琴音频必须作废 */
 function resetPiano(){
   stopMelody();
   pianoData=null; pianoPromise=null; melodyBus=null; tpLimiter=null;
-  melodyOffset=0; hlLast=-1;
+  melodyOffset=0;
   $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00";
 }
 function stopMelody(){
@@ -1221,7 +1322,6 @@ function stopMelody(){
   melodyNodes.forEach(n=>{ try{ n.stop(); }catch{} }); melodyNodes=[];
   if(melodyTimer) cancelAnimationFrame(melodyTimer); melodyTimer=null;
   melodyPlaying=false; $("#tpPlay").textContent="▶";
-  clearHighlight();
 }
 
 /* 首选：用**内置大钢琴采样**离屏渲染出整段音频
@@ -1292,7 +1392,7 @@ async function playWithPiano(from){
     const cur=melodyOffset+(actx.currentTime-melodyStartT)*tpRate;
     const p=Math.max(0,Math.min(1,cur/total));
     $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(cur);
-    highlightAt(cur);
+    if(roll) roll.setPlayhead(cur);
     if(cur>=total){ stopMelody(); melodyOffset=0; $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00"; return; }
     melodyTimer=requestAnimationFrame(tick);
   };
@@ -1323,7 +1423,7 @@ function playWithSynth(){
     const cur=base+(actx.currentTime-t0);
     const p=Math.max(0,Math.min(1,cur/total));
     $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(cur);
-    highlightAt(cur);
+    if(roll) roll.setPlayhead(cur);
     if(cur>=total){ stopMelody(); melodyOffset=0; $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00"; return; }
     melodyTimer=requestAnimationFrame(tick);
   };
@@ -1358,120 +1458,158 @@ $("#tpVol").oninput=e=>{
   if(tpGain && pianoData) tpGain.gain.value=pianoData.gain*Math.max(0.02,v);
   if(melodyBus) melodyBus.gain.setTargetAtTime(Math.max(1.2,v), actx.currentTime, 0.02);
 };
-$("#tpSeek").onclick=e=>{ if(!S.playback) return;
-  const r=e.currentTarget.getBoundingClientRect(); const p=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
-  // 钢琴路径的总时长以渲染出的 AudioBuffer 为准
+/** 把播放位置设到总长的 p（0..1）。钢琴路径的总时长以渲染出的 AudioBuffer 为准。 */
+function seekToFraction(p){
+  if(!S.playback) return false;
+  p=Math.max(0,Math.min(1,p||0));
   const total = pianoData ? pianoData.buffer.duration : S.playback.duration;
+  if(!(total>0)) return false;
   melodyOffset=p*total;
   $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(melodyOffset);
-  if(melodyPlaying){ stopMelody(); $("#tpPlay").click(); } };
+  if(melodyPlaying){ stopMelody(); $("#tpPlay").click(); }
+  return true;
+}
+/** 卷帘上点空白处 → 跳到那一秒（卷帘那边已经做了 1 秒节流，避免连点卡死）。 */
+function seekToSeconds(sec){
+  if(!S.playback) return;
+  const total = pianoData ? pianoData.buffer.duration : S.playback.duration;
+  if(!(total>0)) return;
+  seekToFraction(sec/total);
+}
+$("#tpSeek").onclick=e=>{
+  const r=e.currentTarget.getBoundingClientRect();
+  seekToFraction((e.clientX-r.left)/r.width); };
 
 /* 折叠 */
 $$(".fold").forEach(btn=>btn.onclick=()=>{
   const card=document.getElementById(btn.dataset.fold);
   const c=card.classList.toggle("collapsed");
   btn.textContent=c?"展开 ▸":"折叠 ▾";
+  // 卷帘的行高是按"可用高度"反推的，折叠时容器高度是 0 —— 展开后必须重算一次，
+  // 否则会一直用折叠状态下算出来的那个离谱行高。
+  if(!c && card.contains($("#prHost")) && roll) setTimeout(()=>roll.resize(), 0);
 });
 
-/* ============================ ④ 歌词填充 ============================ */
-/* 歌词来源是用户：拖入 .lrc / .txt、点选文件，或直接粘贴到文本框。
-   LRC 带时间戳 → 按时间对齐到音符；纯文本 → 按顺序一字一音。
-   本工具**不做歌词识别**（Qwen3-ASR 已移除）。 */
-function segValOf(sel){ const b=$(sel+" button.on"); return b ? b.dataset.v : null; }
-function bindSeg(sel){ $$(sel+" button").forEach(b=>b.onclick=()=>{
-  if(b.disabled) return;
-  $$(sel+" button").forEach(x=>x.classList.remove("on"));
-  b.classList.add("on");
-}); }
-bindSeg("#segLyrFmt"); bindSeg("#segLyrCont");
+/* ============================ 通用居中弹窗 ============================
+   两处用它：① 导出前人声主旋律没填歌词的确认；② 批量导入歌词。
+   （④ 歌词填充卡片已按用户要求删除，功能并入 ③ 钢琴卷帘：
+     逐音歌词在卷帘上直接编辑，批量导入仍走这里的弹窗。） */
 
-async function loadLyricsTextFile(file){
-  const name=file.name||"";
-  if(!/\.(lrc|txt|text)$/i.test(name)){ toast("请拖入 .lrc 或 .txt 歌词文件","err"); return; }
-  try{
-    const text=await file.text();
-    $("#lyrText").value=text;
-    // .lrc 时自动把格式切到「按 LRC」；.txt 切到「按纯文本」
-    const want=/\.lrc$/i.test(name) ? "lrc" : "plain";
-    $$("#segLyrFmt button").forEach(x=>x.classList.toggle("on", x.dataset.v===want));
-    log(`已载入歌词文件：${name}（${text.length} 字符）`);
-    toast(`已载入 ${name}，点「填充到 SVP」应用`,"ok");
-  }catch(e){ toast("读取文件失败："+e.message,"err"); }
+function modalOpen(o){
+  $("#modalTitle").textContent=o.title||"";
+  $("#modalBody").innerHTML=o.bodyHTML||"";
+  const acts=$("#modalActs"); acts.innerHTML="";
+  (o.actions||[]).forEach(a=>{
+    const b=document.createElement("button");
+    b.className="btn"+(a.kind==="primary"?" primary":"");
+    b.textContent=a.label;
+    b.onclick=()=>{ if(a.onClick) a.onClick(); };
+    acts.appendChild(b);
+  });
+  $("#modalMask").hidden=false;
+  const first=acts.querySelector(".btn.primary")||acts.querySelector(".btn");
+  if(first) first.focus();
 }
-$("#lyrDrop").onclick=()=>$("#lyrFile").click();
-$("#lyrFile").onchange=e=>{ const f=e.target.files?.[0]; if(f) loadLyricsTextFile(f); e.target.value=""; };
-["dragenter","dragover"].forEach(ev=>$("#lyrDrop").addEventListener(ev,e=>{
-  e.preventDefault(); $("#lyrDrop").classList.add("over"); }));
-["dragleave","drop"].forEach(ev=>$("#lyrDrop").addEventListener(ev,e=>{
-  e.preventDefault(); $("#lyrDrop").classList.remove("over"); }));
-$("#lyrDrop").addEventListener("drop", e=>{
-  e.preventDefault(); $("#lyrDrop").classList.remove("over");
-  const f=e.dataTransfer?.files?.[0]; if(f) loadLyricsTextFile(f);
+function modalClose(){ $("#modalMask").hidden=true; }
+$("#modalMask").addEventListener("click",e=>{ if(e.target===$("#modalMask")) modalClose(); });
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && !$("#modalMask").hidden) modalClose();
 });
 
-$("#lyrFill").onclick=async()=>{
-  if(!S.taskId) return;
-  const text=$("#lyrText").value||"";
-  if(!text.trim()){ toast("请先拖入或粘贴歌词","err"); return; }
-  $("#lyrFill").disabled=true;
+/** 导出前检查：**人声主旋律**一个歌词都没填 → 居中弹窗（继续 / 返回）。
+ *  器乐旋律与和弦**豁免**（用户明确要求）。
+ *  返回 Promise<boolean>：true = 继续导出。 */
+function confirmVocalLyrics(){
+  if(!roll || !roll.requireVocalLyrics()) return Promise.resolve(true);
+  return new Promise(resolve=>{
+    modalOpen({
+      title:"未填充歌词",
+      bodyHTML:
+        `<div>人声主旋律<b>还没有填歌词</b>，导出后所有音符的歌词都会是 <b>“la”</b>。</div>
+         <div style="margin-top:10px;color:var(--text-2)">
+           器乐旋律与和弦不受影响，可以留空。<br>
+           要在卷帘上填歌词：选中音符后在「歌词」框里输入（中文可直接用输入法）；<br>
+           <b>‿</b> 是延音符（-，同一音节延续到本音符），
+           <b>⁀</b> 是多音节拆分（+，本音符唱上一个词的下一个音节）。
+         </div>`,
+      actions:[
+        {label:"返回去填", onClick:()=>{ modalClose(); resolve(false); }},
+        {label:"继续导出", kind:"primary", onClick:()=>{ modalClose(); resolve(true); }}
+      ]
+    });
+  });
+}
+
+/* 批量导入歌词：LRC 带时间戳 → 按时间对齐；纯文本 → 按顺序一字一音。
+   几百个音符不可能手打，所以这条路必须留着（卷帘负责逐音微调）。
+   本工具**不做歌词识别**（Qwen3-ASR 已移除）。 */
+function lyrImportOpen(){
+  if(!S.taskId || S.state!=="done"){ toast("请先完成一次扒谱","err"); return; }
+  modalOpen({
+    title:"导入歌词",
+    bodyHTML:
+      `<div>粘贴歌词，或选择 <b>.lrc</b> / <b>.txt</b> 文件。会按时间（LRC）或按顺序（纯文本）分配到音符上。
+           多行文本可以一次全贴进来。</div>
+       <div class="opt-row"><span class="opt-label">格式</span>
+         <select id="mFmt">
+           <option value="auto">自动识别</option>
+           <option value="lrc">按 LRC</option>
+           <option value="plain">按纯文本</option>
+         </select>
+         <span class="opt-label" style="margin-left:12px">延音符</span>
+         <select id="mCont">
+           <option value="auto">自动（中文 -，英文多音节 +）</option>
+           <option value="-">- 同一音节延续</option>
+           <option value="+">+ 同词下一个音节</option>
+         </select>
+       </div>
+       <div class="opt-row">
+         <label class="pr-chk" title="不勾：中文逐字（我爱你 → 我/爱/你），英文按词。勾上：只按空格切分（wo ai ni → wo/ai/ni）。">
+           <input type="checkbox" id="mSpace"> 按空格切分（拼音 / 英文）
+         </label>
+       </div>
+       <textarea id="mText" spellcheck="false"
+         placeholder="[00:14.64]这里是第一行测试歌词&#10;或直接粘贴纯文本歌词"></textarea>
+       <div class="opt-row"><input type="file" id="mFile" accept=".lrc,.txt,.text,text/plain"></div>`,
+    actions:[
+      {label:"取消", onClick:modalClose},
+      {label:"填充到音符", kind:"primary", onClick:lyrImportSubmit}
+    ]
+  });
+  $("#mFile").onchange=async e=>{
+    const f=e.target.files?.[0]; if(!f) return;
+    try{
+      $("#mText").value=await f.text();
+      $("#mFmt").value=/\.lrc$/i.test(f.name)?"lrc":"plain";
+      log(`已载入歌词文件：${f.name}`);
+    }catch(err){ toast("读取文件失败："+err.message,"err"); }
+  };
+}
+async function lyrImportSubmit(){
+  // 先把值读出来再关弹窗——关掉之后这些元素就没了
+  const text=$("#mText")?.value||"";
+  const format=$("#mFmt")?.value||"auto";
+  const continuation=$("#mCont")?.value||"auto";
+  // 分词：不勾 = auto（中文逐字、英文按词）；勾上 = space（"wo ai ni" → wo/ai/ni）
+  const split=$("#mSpace")?.checked ? "space" : "auto";
+  if(!text.trim()){ toast("请先粘贴或选择歌词","err"); return; }
+  modalClose();
   try{
     const r=await fetch(`/api/tasks/${S.taskId}/lyrics`,{method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({ text, format:segValOf("#segLyrFmt")||"auto",
-                            continuation:segValOf("#segLyrCont")||"auto" })});
+      body:JSON.stringify({text, format, continuation, split})});
     const j=await r.json();
     if(!r.ok) throw new Error(j.detail||"填充失败");
     const st=j.stats||{};
-    const byLrc = j.format==="lrc";
-    $("#lyrResultBox").hidden=false;
-    $("#lrcBox").textContent=j.lrc||"";
-    $("#lrcDownload").disabled=!j.lrc;
-    $("#lyrStats").textContent =
-      `${byLrc?"按 LRC 对齐":"按顺序铺"} · 命中 ${st.matched||0}/${st.notes||0}` +
-      `（${(((st.match_rate||0))*100).toFixed(1)}%）`;
-    $("#lyrState").textContent=`已填充（${byLrc?"LRC":"纯文本"}）`;
-    $("#lyrClear").disabled=false;
     (j.warnings||[]).forEach(w=>log(w,"warn"));
     if((j.warnings||[]).length) toast(j.warnings[0],"warn");
-    else toast("歌词已填充并写入 SVP","ok");
-    log(`歌词填充：${j.format}，命中 ${st.matched}/${st.notes}，延音符 ${st.continuation}`);
-    loadPlayback(); refreshButtons();
-  }catch(e){ toast(e.message,"err"); log("歌词填充失败："+e.message,"error"); }
-  $("#lyrFill").disabled=false;
-};
-$("#lyrClear").onclick=async()=>{
-  if(!S.taskId) return;
-  $("#lyrClear").disabled=true;
-  try{
-    const r=await fetch(`/api/tasks/${S.taskId}/lyrics`,{method:"POST",
-      headers:{"Content-Type":"application/json"}, body:JSON.stringify({clear:true})});
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.detail||"清空失败");
-    $("#lyrResultBox").hidden=true; $("#lrcBox").textContent="";
-    $("#lyrState").textContent='未填充 · 音符歌词为 “la”';
-    $("#lyrText").value="";
-    toast("已清空歌词，音符回到 la","ok");
+    else toast(`歌词已填充（命中 ${st.matched||0}/${st.notes||0}）`,"ok");
+    log(`歌词导入：${j.format}，命中 ${st.matched}/${st.notes}，延音符 ${st.continuation}`);
+    await reloadRoll();     // 卷帘要立刻反映新歌词，用户接着逐音微调
     loadPlayback();
-  }catch(e){ toast(e.message,"err"); }
-  refreshButtons();
-};
-async function fetchLyrics(taskId){
-  if(!taskId) return;
-  try{
-    const j=await (await fetch(`/api/tasks/${taskId}/lyrics`)).json();
-    if(!j.available) return;
-    $("#lyrText").value=j.text||j.words_text||"";
-    $("#lyrResultBox").hidden=false;
-    $("#lyrStats").textContent=`已填充 ${(j.items||[]).length} 字`;
-    $("#lyrState").textContent="已填充";
-    $("#lyrClear").disabled=false;
-    const lr=await fetch(`/api/tasks/${taskId}/lrc`);
-    if(lr.ok){
-      const t=await lr.text();
-      $("#lrcBox").textContent=t; $("#lrcDownload").disabled=!t;
-    }
-  }catch(e){ log("读取歌词失败："+e.message,"error"); }
+  }catch(e){ toast("导入歌词失败："+e.message,"err"); log("导入歌词失败："+e.message,"error"); }
 }
+$("#lyrImport").onclick=lyrImportOpen;
 $("#lrcDownload").onclick=()=>{ if(S.taskId) window.location=`/api/tasks/${S.taskId}/lrc`; };
 
 /* ============================ ⑤ 导出 ============================ */
@@ -1487,21 +1625,26 @@ $("#lrcDownload").onclick=()=>{ if(S.taskId) window.location=`/api/tasks/${S.tas
  *  返回 true 表示可以继续下载。 */
 async function regenerateExports(){
   if(!S.taskId) return true;
-  if(!S.rawAbc) return true;      // 还没有乐谱，直接下现有的
   if(running()) return true;      // 任务在跑，别去动产物
+  if(!roll) return true;
+
+  // 卷帘上有未保存的改动 → 先落盘（保存本身就顺带重生成了一次导出）
+  if(roll.dirty()) return await saveRoll(true);
 
   const exportVoices = selectedVoices();
   try{
-    const r=await fetch(`/api/tasks/${S.taskId}/abc`,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({abc:$("#abcArea").value,bpm:S.result?.bpm,
-        export_voices:exportVoices,lyrics:"la"})});
+    const r=await fetch(`/api/tasks/${S.taskId}/roll`,{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tracks:roll.state().tracks, export_voices:exportVoices,
+                           bpm:S.result?.bpm, meter:S.result?.meter})});
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||j.detail||"重新生成失败");
-    committed=$("#abcArea").value; $("#abcDirty").classList.remove("on");
     const svp=(j.exports||[]).find(x=>x.kind==="svp");
     const trackNames=(svp&&svp.tracks)||[];
     if(svp) $("#exportNote").textContent=`SVP version ${svp.version} · ${trackNames.join("/")} · ${svp.notes} 音符`;
-    log(`导出前已按当前设置重新生成：${(j.exports||[]).length} 个产物，`
+    (j.warnings||[]).forEach(w=>log(w,"warn"));
+    S.hasVocalLyrics=!!j.has_vocal_lyrics;
+    log(`导出前已按当前卷帘重新生成：${(j.exports||[]).length} 个产物，`
         +`声部 [${trackNames.join("/")}]，export_voices=${exportVoices.join(",")}`);
     return true;
   }catch(e){
@@ -1511,8 +1654,10 @@ async function regenerateExports(){
   }
 }
 $("#dlSvp").onclick=async()=>{ if(!S.taskId) return;
+  if(!(await confirmVocalLyrics())) return;
   if(await regenerateExports()) window.location=`/api/tasks/${S.taskId}/export/svp`; };
 $("#dlMidi").onclick=async()=>{ if(!S.taskId) return;
+  if(!(await confirmVocalLyrics())) return;
   if(await regenerateExports()) window.location=`/api/tasks/${S.taskId}/export/midi`; };
 $("#openDir").onclick=async()=>{ if(!S.taskId) return;
   try{ const r=await fetch(`/api/tasks/${S.taskId}/open-folder`,{method:"POST"}); const j=await r.json();
@@ -1534,6 +1679,7 @@ setInterval(pollGpu,3000);
 
 (async function init(){
   pollGpu();
+  initRoll();
   try{
     const st=await (await fetch("/api/state")).json();
     if(st.task) applyTask(st.task,true);

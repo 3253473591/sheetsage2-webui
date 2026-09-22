@@ -553,6 +553,77 @@ def notes_to_seconds(
     return warnings
 
 
+def seconds_to_score(
+    spans: Sequence[tuple[float, float, int]],
+    *,
+    bpm: float,
+    measures: Sequence[dict[str, Any]] | None = None,
+) -> list[tuple[float, float, int]]:
+    """把 ``(起始秒, 结束秒, 音高)`` 换回 ``(记谱起点, 记谱时值, 音高)``（单位=全音符）。
+
+    这是 :func:`notes_to_seconds` 的逆 —— 给**钢琴卷帘**用：用户在卷帘上按秒拖动音符，
+    保存时必须写回记谱位置，才能序列化成 ABC 交给既有导出链路。
+    变速曲下必须走小节课表做分段线性反查，不能拿单一 BPM 硬除（§16/§23 的教训）。
+
+    Returns:
+        与 ``spans`` 等长的列表，顺序不变。
+    """
+    table = _normalize_measures(measures) if measures else []
+    if not table:
+        whole_seconds = 240.0 / bpm if bpm else 2.0
+        return [(s / whole_seconds, (e - s) / whole_seconds, p) for s, e, p in spans]
+
+    tail_rate = (table[-1]["end"] - table[-1]["start"]) / max(
+        1e-9, table[-1]["score_end"] - table[-1]["score_start"]
+    )
+    out: list[tuple[float, float, int]] = []
+    for start, end, pitch in spans:
+        a = _seconds_to_score(start, table, tail_rate)
+        b = _seconds_to_score(end, table, tail_rate)
+        out.append((a, max(0.0, b - a), pitch))
+    return out
+
+
+#: 记谱网格的分母：记谱位置按 **1/4096 个全音符** 吸附。
+#:
+#: 为什么必须要这一步（两个真实故障，同一个根因）：:func:`seconds_to_score` 是浮点
+#: 运算，产出的是 ``0.12499999999999911`` 这种带噪声的值。而 ABC 只能表示 1/2^k 的
+#: 时值，于是——
+#:
+#: 1. 相邻音的"结束点"会比下一个音的起点大 ~1e-16，被当成**重叠**
+#:    （实测 22 个真实样本里 21 个因此被 ``app.abcs`` 拒绝）；
+#: 2. 噪声让序列化器需要的基本单位一路被抬到 1/8192，超过上限 1/4096 而拒绝生成。
+#:
+#: 吸附到 1/4096 一次解决两个问题。1/4096 个全音符在 120 BPM 下约 **0.49 毫秒** ——
+#: 远低于可听的量化误差，也远细于模型产物的精度，对听感无损。
+NOTATION_DENOM = 4096
+
+
+def quantize_notation(
+    notated: Sequence[tuple[float, float, int]],
+    *,
+    denom: int = NOTATION_DENOM,
+) -> list[tuple[float, float, int]]:
+    """把 ``(记谱起点, 记谱时值, 音高)`` 吸附到 ``1/denom`` 全音符的网格上。
+
+    吸附后所有值都是 ``2**-k`` 的整数倍，可以精确表示成浮点数，于是
+    "首尾相接"就是真相等，序列化器也能用足够粗的基本单位表达。
+
+    时值至少保一个格，绝不产出零长度音符（那会被 ``app.abcs`` 判为非法）。
+    """
+    if denom <= 0:
+        return [(float(o), float(d), int(p)) for o, d, p in notated]
+    unit = 1.0 / float(denom)
+    out: list[tuple[float, float, int]] = []
+    for onset, dur, pitch in notated:
+        o = round(float(onset) / unit) * unit
+        d = round(float(dur) / unit) * unit
+        if d < unit:
+            d = unit
+        out.append((o, d, int(pitch)))
+    return out
+
+
 def _normalize_measures(measures: Sequence[dict[str, Any]]) -> list[dict[str, float]]:
     out: list[dict[str, float]] = []
     for m in measures:
@@ -584,6 +655,25 @@ def _score_to_seconds(position: float, table: Sequence[dict[str, float]], tail_r
             return m["start"] + t * (m["end"] - m["start"])
     last = table[-1]
     return last["end"] + (position - last["score_end"]) * tail_rate
+
+
+def _seconds_to_score(seconds: float, table: Sequence[dict[str, float]], tail_rate: float) -> float:
+    """记谱位置（全音符）→ 秒 的逆运算，见 :func:`_score_to_seconds`。
+
+    两边必须严格互逆：:func:`seconds_to_score` 依赖它把钢琴卷帘的秒写回记谱位置，
+    对不上就会让「编辑一次、音符整体偏移一点」这种慢性错位悄悄累积。
+    """
+    if seconds <= table[0]["start"]:
+        return table[0]["score_start"]
+    for m in table:
+        ms, me = m["start"], m["end"]
+        if me - ms <= 0:
+            continue
+        if ms <= seconds <= me:
+            t = (seconds - ms) / (me - ms)
+            return m["score_start"] + t * (m["score_end"] - m["score_start"])
+    last = table[-1]
+    return last["score_end"] + (seconds - last["end"]) / max(1e-9, tail_rate)
 
 
 def to_simple_notes(

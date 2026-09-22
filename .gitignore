@@ -36,6 +36,7 @@ dist/
 # 对外文档只有 README.md / docs/使用说明.md / THIRD_PARTY_NOTICES.md。
 交接文档.md
 任务文档.md
+开发日志-归档.md
 packaging/README-打包说明.md
 packaging/docs/
 

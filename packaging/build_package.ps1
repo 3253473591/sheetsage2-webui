@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Build the "SheetSage2 扒谱" distribution packages (full / lite).
 

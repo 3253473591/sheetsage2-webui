@@ -22,8 +22,9 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from app.abcp import AbcScore, notes_to_seconds, parse_abc, to_simple_notes
 from app.lyrics import LyricWord, assign_lyrics
@@ -42,9 +43,14 @@ __all__ = [
     "EXPORT_VOICE_TOKENS",
     "DEFAULT_EXPORT_VOICES",
     "voice_kind",
+    "voice_sort_key",
+    "display_name",
     "normalize_export_voices",
     "load_measures",
     "load_lyrics_words",
+    "load_note_lyrics",
+    "save_note_lyrics",
+    "NOTE_LYRICS_FILENAME",
     "load_chord_notes",
     "rebuild_exports",
     "pick_voices",
@@ -55,6 +61,14 @@ __all__ = [
 EXPORT_DIRNAME = "export"
 #: 歌词识别产物文件名（放在任务目录根部）
 LYRICS_FILENAME = "lyrics.json"
+#: **逐音手动歌词**文件名（钢琴卷帘上直接编辑的结果）。
+#:
+#: 为什么不能用 ``lyrics.json`` 那一套：那份是「带时间戳的词表」，导出时还要靠
+#: :func:`app.lyrics.assign_lyrics` 重新分配到音符上。但用户在卷帘上填的是
+#: **逐音的字面歌词**，其中还包含 ``-``（同音节延续）与 ``+``（同词下一音节）这两个
+#: **记号**——它们必须原样落到 SVP 里，绝不能被"分配"逻辑重新解释或吞掉。
+#: 所以单独存一份「按音符顺序的字面歌词表」，导出时若有就直接用。
+NOTE_LYRICS_FILENAME = "lyrics_notes.json"
 
 #: 主旋律声部候选名（小写）
 _MELODY_NAMES = {"vocal", "melody", "lead", "voice"}
@@ -86,6 +100,41 @@ def load_measures(out_dir: str | Path) -> list[dict[str, Any]]:
     except (OSError, ValueError):
         return []
     return data.get("measures") or []
+
+
+def load_note_lyrics(out_dir: str | Path) -> dict[str, list[str]]:
+    """读取钢琴卷帘上手动编辑的**逐音字面歌词**（``lyrics_notes.json``）。
+
+    形状：``{"Vocal": ["ja", "-", "ka", ...], "Ins": [...]}`` —— 按该声部
+    **音符排序后的顺序**一一对应。空/缺失/不合法一律返回 ``{}``（退回词表分配或 ``la``）。
+    """
+    p = Path(out_dir) / NOTE_LYRICS_FILENAME
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = data.get("voices") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for voice, items in raw.items():
+        if isinstance(items, list):
+            out[str(voice)] = [str(x) if x is not None else "" for x in items]
+    return out
+
+
+def save_note_lyrics(out_dir: str | Path, lyrics: Mapping[str, Sequence[str]]) -> Path:
+    """写回逐音歌词。只保留非空声部；写失败不抛（歌词不该阻断导出）。"""
+    p = Path(out_dir) / NOTE_LYRICS_FILENAME
+    payload = {
+        "version": 1,
+        "voices": {str(k): [str(x) for x in v] for k, v in lyrics.items() if v},
+    }
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
 
 
 def load_lyrics_words(out_dir: str | Path) -> list[LyricWord] | None:
@@ -146,10 +195,27 @@ _VOICE_KIND = {
     "ins": "ins", "instrumental": "ins", "accompaniment": "ins",
 }
 
+#: 拆复音轨产生的序号后缀（``Vocal2`` / ``Ins3``）。
+#: 不剥掉它，``pick_voices()`` 会把这些轨当成"认不出的声部"**整条丢掉** ——
+#: 用户在钢琴卷帘上拖出一个重叠、保存后那一轨就凭空消失，属于最难查的一类 bug。
+_VOICE_SUFFIX_RE = re.compile(r"^(.*?)(\d+)$")
+
+#: 轨道的规范顺序：人声 → 器乐 → 和弦（与界面上三个勾选的顺序一致）。
+#: 由 :func:`voice_sort_key` 使用，理由见那里的注释。
+_VOICE_ORDER = {t: i for i, t in enumerate(EXPORT_VOICE_TOKENS)}
+
 
 def voice_kind(name: str) -> str | None:
-    """把一个 ABC 声部名归到 ``vocal`` / ``ins``，认不出来返回 ``None``。"""
-    return _VOICE_KIND.get((name or "").strip().lower())
+    """把一个 ABC 声部名归到 ``vocal`` / ``ins``，认不出来返回 ``None``。
+
+    ``Vocal2`` / ``Ins3`` 这类带序号的名字按**前缀**归类。
+    """
+    raw = (name or "").strip().lower()
+    hit = _VOICE_KIND.get(raw)
+    if hit:
+        return hit
+    m = _VOICE_SUFFIX_RE.match(raw)
+    return _VOICE_KIND.get(m.group(1)) if m else None
 
 
 def normalize_export_voices(
@@ -173,18 +239,52 @@ def normalize_export_voices(
     return ["vocal"] if only_melody else list(EXPORT_VOICE_TOKENS)
 
 
+def voice_sort_key(name: str) -> tuple[int, str]:
+    """轨道的**规范排序键**：人声 → 器乐 → 和弦。
+
+    为什么不按 ABC 里 ``V:`` 的声明顺序：那个顺序**不稳定**。编辑稿
+    （``score.edited.abc`` / ``export/<歌名>.abc``）的声部顺序来自上一轮前端提交的
+    顺序，而模型原始稿（``score.abc``）是模型自己写的；同一个任务在不同时刻导出，
+    可能落到不同的 ABC 文件上，于是**同一份内容两次导出的轨道顺序会不一样**。
+    实测踩到过：`['主人声','器乐旋律']` 变成 `['器乐旋律','主人声']`。
+
+    排序只看"是哪一类"，同类的按名字排（``Vocal`` 在 ``Vocal2`` 前），
+    所以 ``主人声 → 器乐旋律1 → 器乐旋律2 → 和弦1…`` 是稳定的。
+    """
+    kind = voice_kind(name)
+    return (_VOICE_ORDER.get(kind, len(_VOICE_ORDER)), str(name))
+
+
 def pick_voices(score: AbcScore, export_voices: Sequence[str]) -> list[str]:
-    """按「要导出哪些内容」从 ABC 里挑出声部（保持 ABC 里的声明顺序）。"""
+    """按「要导出哪些内容」从 ABC 里挑出声部，返回**规范顺序**（见 :func:`voice_sort_key`）。"""
     wanted = {str(t).strip().lower() for t in export_voices}
     available = list(score.voices)
     if not available:
         available = sorted({n.voice for n in score.notes})
     picked = [v for v in available if voice_kind(v) in wanted]
+    picked.sort(key=voice_sort_key)
     return picked
 
 
 def _display_name(voice: str) -> str:
-    return _DISPLAY.get(voice.strip().lower(), voice)
+    """ABC 声部名 → 界面/轨道显示名。
+
+    ``Vocal2`` 这类带序号的，前缀照常映射、序号保留 → ``主人声2``：
+    用户在卷帘上拆出来的轨，在导出的轨道列表里也要认得出是第几条。
+    """
+    raw = (voice or "").strip()
+    low = raw.lower()
+    if low in _DISPLAY:
+        return _DISPLAY[low]
+    m = _VOICE_SUFFIX_RE.match(low)
+    if m and m.group(1) in _DISPLAY:
+        return _DISPLAY[m.group(1)] + m.group(2)
+    return raw
+
+
+#: 公开别名：``/notes`` 要把「ABC 声部名 → 界面显示名」的映射给钢琴卷帘用，
+#: 免得前端自己再维护一份、跟导出轨道名对不上。
+display_name = _display_name
 
 
 def _midi_safe(name: str) -> str:
@@ -466,6 +566,8 @@ def rebuild_exports(
     write_abc: bool = True,
     lyrics_words: Sequence[LyricWord] | None = None,
     use_stored_lyrics: bool = True,
+    note_lyrics: Mapping[str, Sequence[str]] | None = None,
+    use_stored_note_lyrics: bool = True,
     continuation: str = "auto",
     extra_tracks: Sequence[tuple[str, Sequence[Sequence[float]]]] | None = None,
 ) -> dict[str, Any]:
@@ -473,14 +575,23 @@ def rebuild_exports(
 
     歌词处理
     --------
-    歌词以**带时间戳的词**（``lyrics.json``）存储，在导出时才对**当前音符**做分配。
-    这样用户在「乐谱编辑」里改动 ABC、音符集合变化后，歌词不会错位——分配永远
-    基于本次真实的音符。
+    三级优先：
+
+    1. **逐音手动歌词**（``lyrics_notes.json``，来自钢琴卷帘的逐音编辑）——
+       字面采用，``-`` / ``+`` 记号原样进 SVP；
+    2. **词表分配**（``lyrics.json`` 的带时间戳词）—— 导出时对**当前音符**重新分配。
+       这样用户在卷帘上改动音符、音符集合变化后，歌词不会错位；
+    3. 统一占位 ``la``。
+
+    词表分配只作用于**人声主旋律**，器乐旋律与和弦保持占位。
 
     Args:
         lyrics: 无法匹配时（或没有歌词时）使用的统一占位歌词。
         lyrics_words: 直接给出词表；``None`` 时按 ``use_stored_lyrics`` 决定是否
             从 ``<out_dir>/lyrics.json`` 读取。
+        note_lyrics: 逐音字面歌词 ``{声部: [歌词, ...]}``，按该声部音符顺序一一对应；
+            ``None`` 时按 ``use_stored_note_lyrics`` 决定是否从
+            ``<out_dir>/lyrics_notes.json`` 读取。
 
     Returns:
         结果摘要，含产物路径、音符数、歌词分配统计与诊断信息。
@@ -531,29 +642,44 @@ def rebuild_exports(
         else:
             voices = []
 
-    # ---- 歌词：优先用识别结果，按当前音符做分配；否则统一占位 ----
+    # ---- 歌词：逐音手动歌词 > 词表分配 > 统一占位（三级优先）----
+    # 手动歌词来自钢琴卷帘：它是**字面歌词**，里面的 - 与 + 是记号，必须原样进 SVP，
+    # 所以命中时直接采用，绝不交给 assign_lyrics 再解释一遍。
     words = lyrics_words
     if words is None and use_stored_lyrics:
         words = load_lyrics_words(out)
+    manual = note_lyrics
+    if manual is None and use_stored_note_lyrics:
+        manual = load_note_lyrics(out)
     lyric_stats: dict[str, Any] = {}
     lyrics_source = "recognized" if words else "fallback"
+
+    # 词表分配只对**人声主旋律**做（与 /notes 的既有语义一致）：
+    # 器乐旋律与和弦保持占位。让器乐把歌词吃掉没有意义，用户也明确说这两条豁免。
+    def _is_melody_voice(v: str) -> bool:
+        return voice_kind(v) == "vocal"
 
     for voice in voices:
         simple = to_simple_notes(score.notes, voice=voice)
         if not simple:
             continue
         display = _display_name(voice)
-        spans = [(s, e) for s, e, _ in simple]
-        if words:
-            note_lyrics, lyric_stats = assign_lyrics(
-                words, spans, fallback=lyrics, continuation=continuation
+        lines = list(manual.get(voice) or []) if manual else []
+        if lines and len(lines) == len(simple):
+            # 长度对得上才用：对不上说明存的是上一版谱面的歌词，宁可不猜
+            texts = lines
+            lyrics_source = "manual"
+        elif words and _is_melody_voice(voice):
+            texts, lyric_stats = assign_lyrics(
+                words, [(s, e) for s, e, _ in simple],
+                fallback=lyrics, continuation=continuation,
             )
         else:
-            note_lyrics = [lyrics] * len(simple)
+            texts = [lyrics] * len(simple)
         svp_tracks.append(
             (
                 display,
-                [SvNote(s, e, p, ly) for (s, e, p), ly in zip(simple, note_lyrics)],
+                [SvNote(s, e, p, ly) for (s, e, p), ly in zip(simple, texts)],
             )
         )
         # MIDI 轨道名走 Latin-1，用 ABC 里的 ASCII 声部名（Vocal/Ins），不要中文

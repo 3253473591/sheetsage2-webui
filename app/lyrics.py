@@ -36,6 +36,7 @@ __all__ = [
     "LyricWord",
     "CONTINUATION_SUSTAIN",
     "CONTINUATION_SYLLABLE",
+    "SPLIT_MODES",
     "continuation_mark",
     "parse_lrc",
     "looks_like_lrc",
@@ -126,8 +127,29 @@ def parse_lrc(text: str) -> list[tuple[float, str]]:
     return rows
 
 
-def _split_units(text: str) -> list[str]:
-    """把一行歌词切成对齐单元：CJK 逐字，拉丁按词。"""
+#: 分词模式（用户在「导入歌词」里选，界面用勾选框暴露 auto / space 两种）
+#:
+#: ``auto``  —— 按字符集判断：CJK 逐字、拉丁按词。**默认**。
+#:              用户给的两个例子在这一个模式下就都对：
+#:              ``我爱你`` → 我/爱/你（3 个），``wo ai ni`` → wo/ai/ni（3 个）。
+#: ``char``  —— 强制逐字符（每个非空白字符一个单元）。
+#: ``space`` —— 强制按空白切分。整句没有空格时只会得到 1 个单元。
+SPLIT_MODES = ("auto", "char", "space")
+
+
+def _split_units(text: str, mode: str = "auto") -> list[str]:
+    """把一行歌词切成对齐单元。
+
+    ``auto``：CJK 逐字，拉丁按词（原行为）。
+    ``char`` / ``space``：**强制**指定切法，用来纠正自动判断的误判
+    （例如想把 ``opendoor`` 当成一个单元、或想把整句中文按空格分）。
+    """
+    text = text or ""
+    if mode == "char":
+        return [ch for ch in text if not ch.isspace() and ch != "\u3000"]
+    if mode == "space":
+        return [u for u in re.split(r"[\s\u3000]+", text) if u]
+
     units: list[str] = []
     buf: list[str] = []
 
@@ -160,6 +182,7 @@ def words_from_lrc(
     notes: Sequence[tuple[float, float]],
     *,
     fallback_span: float = 0.8,
+    split: str = "auto",
 ) -> tuple[list[LyricWord], list[str]]:
     """由 LRC + 音符时间轴生成带时间的词。
 
@@ -180,7 +203,7 @@ def words_from_lrc(
 
     for idx, (start, content) in enumerate(rows):
         end = rows[idx + 1][0] if idx + 1 < len(rows) else start + fallback_span * max(1, len(content))
-        units = _split_units(content)
+        units = _split_units(content, split)
         if not units:
             continue
         # 落在本行窗内的音符
@@ -210,6 +233,8 @@ def words_from_lrc(
 def words_from_plain(
     text: str,
     notes: Sequence[tuple[float, float]],
+    *,
+    split: str = "auto",
 ) -> tuple[list[LyricWord], list[str]]:
     """纯文本 → 按顺序**一字一音**铺开（没有时间信息时的常用做法）。
 
@@ -222,7 +247,7 @@ def words_from_plain(
 
     units: list[str] = []
     for line in (text or "").splitlines():
-        units.extend(_split_units(line))
+        units.extend(_split_units(line, split))
     if not units:
         return [], ["没有解析到可用的歌词文字"]
 
@@ -357,22 +382,26 @@ def fill_lyrics(
     fmt: str = "auto",
     fallback: str = "la",
     continuation: str = "auto",
+    split: str = "auto",
 ) -> dict[str, Any]:
     """一站式：解析输入 → 生成词 → 分配到音符。
 
     Args:
         fmt: ``auto`` / ``lrc`` / ``plain``。
+        split: 分词模式，见 :data:`SPLIT_MODES`。
 
     Returns:
         ``{"ok", "format", "words", "lyrics", "stats", "warnings"}``
     """
+    if split not in SPLIT_MODES:
+        split = "auto"
     spans = [(float(s), float(e)) for s, e in notes]
     use_lrc = fmt == "lrc" or (fmt == "auto" and looks_like_lrc(text))
     if use_lrc:
-        words, warnings = words_from_lrc(text, spans)
+        words, warnings = words_from_lrc(text, spans, split=split)
         used = "lrc"
     else:
-        words, warnings = words_from_plain(text, spans)
+        words, warnings = words_from_plain(text, spans, split=split)
         used = "plain"
 
     if not words:
@@ -389,6 +418,7 @@ def fill_lyrics(
     return {
         "ok": True,
         "format": used,
+        "split": split,
         "words": [w.as_dict() for w in words],
         "lyrics": lyrics,
         "stats": stats,

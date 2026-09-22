@@ -122,9 +122,26 @@ try:
             got = set(page.evaluate("() => selectedVoices()"))
             check(f"勾选调成 {sorted(kinds)}", got == want, f"实际 {sorted(got)}")
 
+        def dismiss_lyric_guard():
+            """人声主旋律没填歌词时，点「导出 SVP」会先弹一个居中确认框
+            （「未填歌词，所有音符均为 la」→ 继续 / 返回）。那是**设计要求**的行为，
+            所以测试要像用户一样点「继续导出」。
+
+            ⚠️ 这条是本脚本的锅：门禁是后加的，早期版本没有它，
+            老测试会一直等下载等到超时，而且**日志一行都不多、没有任何失败请求** ——
+            现象非常像"导出坏了"，实际上是"等人在弹窗上点确定"。
+            """
+            page.wait_for_timeout(600)
+            if page.locator("#modalMask").is_visible():
+                page.click("#modalActs .btn.primary")
+                page.wait_for_timeout(200)
+                return True
+            return False
+
         def download_tracks():
             with page.expect_download(timeout=180000) as dl:
                 page.eval_on_selector("#dlSvp", "e => e.click()")
+                dismiss_lyric_guard()
             path = pathlib.Path(dl.value.path())
             raw = path.read_bytes()
             return svp_tracks(raw), path.name, raw
