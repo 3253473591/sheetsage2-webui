@@ -1,0 +1,1547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SheetSage2 扒谱</title>
+<!-- 空 data URI 图标：避免浏览器请求 /favicon.ico 产生 404 控制台噪音 -->
+<link rel="icon" href="data:,">
+<script src="./vendor/abcjs/abcjs-basic-min.js"></script>
+<style>
+:root{
+  --bg-app:#fff; --bg-subtle:#f5f4fa; --bg-card:#fff;
+  --primary:#7c4dff; --primary-weak:#f1ebff;
+  --grad-progress:linear-gradient(90deg,#7c4dff,#e0409b);
+  --success:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+  --text-1:#1f2033; --text-2:#6b6c80; --border:#e8e7f0;
+  --radius-card:12px; --radius-ctl:8px;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font:13px/1.65 "Segoe UI","PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;
+     color:var(--text-1);background:var(--bg-app);padding-bottom:56px}
+.wrap{max-width:1280px;margin:0 auto;padding:22px 24px 40px}
+.title{font-size:20px;font-weight:600;margin:0}
+.subtitle{color:var(--text-2);font-size:13px;margin-top:3px}
+.page-head{margin-bottom:18px}
+
+.card{border:1px solid var(--border);border-radius:var(--radius-card);background:var(--bg-card);padding:16px;margin-bottom:14px}
+.card-head{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.card-head h2{font-size:14px;font-weight:600;margin:0}
+.num{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
+     border-radius:50%;background:var(--primary);color:#fff;font-size:11px;font-weight:600;flex:none}
+.spacer{margin-left:auto}
+.fold{border:1px solid var(--border);background:#fff;border-radius:var(--radius-ctl);
+      padding:3px 10px;font:inherit;font-size:12px;color:var(--text-2);cursor:pointer}
+.fold:hover{border-color:#cfcbdd;color:var(--text-1)}
+.collapsed .card-body{display:none}
+.ghost{font-size:11px;color:#9a99ab}
+
+/* ① 音频 */
+.dropzone{border:1.5px dashed #d6d3e6;border-radius:10px;background:var(--bg-subtle);
+          padding:18px 16px;text-align:center;color:var(--text-2);cursor:pointer;transition:.15s}
+/* ① 里拖拽框与下面「计算精度」之间留够距离（用户反馈贴太近） */
+#dropzone + .opt-row, #fileWrap + .opt-row{margin-top:18px}
+.dropzone:hover,.dropzone.over{border-color:var(--primary);background:var(--primary-weak)}
+.dropzone .big{font-size:13px;color:var(--text-1);font-weight:500}
+.dropzone .hint{font-size:12px;margin-top:4px}
+.dropzone .formats{font-size:11px;color:#9a99ab;margin-top:6px}
+body.dragging .dropzone{border-color:var(--primary);background:var(--primary-weak)}
+.chip{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:10px;
+      background:var(--bg-subtle);padding:10px 12px}
+.chip .ico{width:28px;height:28px;border-radius:8px;background:var(--primary-weak);color:var(--primary);
+           display:flex;align-items:center;justify-content:center;font-size:14px;flex:none}
+.chip .meta{min-width:0;flex:1}
+.chip .name{font-weight:500;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip .size{font-size:11px;color:var(--text-2);font-family:Consolas,monospace}
+.chip .del{border:0;background:none;color:#b9b7c7;font-size:16px;cursor:pointer;padding:0 4px}
+.chip .del:hover{color:var(--danger)}
+.chip .del:disabled{opacity:.35;cursor:not-allowed}
+.player{display:flex;align-items:center;gap:10px;margin-top:10px}
+.play-btn{width:32px;height:32px;border-radius:50%;border:0;background:var(--primary);color:#fff;
+          font-size:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center}
+.play-btn:disabled{opacity:.4;cursor:not-allowed}
+.wave{flex:1;height:30px;display:flex;align-items:center;gap:1px;overflow:hidden;cursor:pointer}
+.wave i{flex:1;background:#d9d6e8;border-radius:1px;display:block;min-height:2px}
+.wave i.p{background:var(--primary)}
+.time{font-size:11px;color:var(--text-2);font-family:Consolas,monospace;flex:none}
+.vol{width:64px;flex:none}
+
+/* 原「② 识别选项」的样式；卡片已删除，.opt-row / .seg 现在被 ① 复用 */
+.check{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer;user-select:none}
+.check .box{width:15px;height:15px;border-radius:4px;border:1.5px solid #cfcbdd;flex:none;
+            display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff}
+.check.on .box{background:var(--primary);border-color:var(--primary)}
+.opt-row{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.opt-label{font-size:13px;color:var(--text-2);width:64px;flex:none}
+.seg{display:inline-flex;gap:6px}
+.seg button{border:1px solid var(--border);background:#fff;color:var(--text-1);font:inherit;
+            padding:6px 14px;border-radius:var(--radius-ctl);cursor:pointer}
+.seg button:hover:not(:disabled){border-color:#cfcbdd}
+.seg button.on{border-color:var(--primary);background:var(--primary-weak);color:var(--primary);font-weight:500}
+.seg button:disabled{opacity:.45;cursor:not-allowed}
+select{font:inherit;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-ctl);
+       background:var(--bg-subtle);color:var(--text-1);min-width:170px;cursor:pointer}
+select:disabled{opacity:.45;cursor:not-allowed}
+.adv{color:var(--text-2);font-size:12px;cursor:pointer;user-select:none;display:inline-flex;gap:6px;align-items:center}
+.adv:hover{color:var(--text-1)}
+.adv-body{margin-top:10px;padding:12px;border-radius:10px;background:var(--bg-subtle);display:none}
+.adv-body.open{display:block}
+.adv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.adv-grid label{font-size:12px;color:var(--text-2);display:block;margin-bottom:4px}
+.adv-grid input{font:inherit;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-ctl);
+                background:#fff;width:100%}
+.adv-note{font-size:11px;color:#9a99ab;margin-top:10px}
+
+/* ② 进度 */
+.stages{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:12px;color:var(--text-2);margin-bottom:10px}
+.stages .st{display:inline-flex;align-items:center;gap:5px}
+.stages .st.done{color:var(--success)}
+.stages .st.active{color:var(--primary);font-weight:500}
+.stages .st.fail{color:var(--danger);font-weight:500}
+.bar{height:8px;border-radius:4px;background:var(--bg-subtle);overflow:hidden}
+.bar>i{display:block;height:100%;width:0;background:var(--grad-progress);transition:width .3s}
+.bar-foot{display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);margin-top:8px}
+.bar-foot .pct{font-family:Consolas,monospace;color:var(--text-1)}
+.overview{margin-top:16px;padding-top:14px;border-top:1px dashed var(--border)}
+.ov-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.ov-head h3{font-size:13px;font-weight:600;margin:0}
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+@media(max-width:760px){.metrics{grid-template-columns:repeat(2,1fr)}}
+.metric{background:var(--bg-subtle);border-radius:9px;padding:9px 12px}
+.metric b{display:block;font-size:18px;font-weight:600;line-height:1.25}
+.metric span{font-size:11px;color:var(--text-2)}
+.segbar{display:flex;height:26px;border-radius:6px;overflow:hidden;margin-top:12px;background:var(--bg-subtle)}
+.segbar>div{display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;
+            overflow:hidden;white-space:nowrap}
+.segbar>div:hover{filter:brightness(1.12)}
+
+/* ② 分析概览 · 和弦进行（用于和声扒谱：时间轴上的和弦名 + 段落归属） */
+.chordbox{margin-top:14px;padding-top:12px;border-top:1px dashed var(--border)}
+.chordbox .ov-head h3{white-space:nowrap}
+.chord-stat{font-size:11px;color:var(--text-2);white-space:nowrap}
+.chord-list{max-height:240px;overflow:auto;border:1px solid var(--border);border-radius:9px;
+            background:#fff}
+.chord-sec{padding:8px 12px;border-bottom:1px solid var(--border)}
+.chord-sec:last-child{border-bottom:0}
+.chord-sec-head{display:flex;align-items:baseline;gap:8px;font-size:12px;margin-bottom:6px}
+.chord-sec-head b{font-weight:600;color:var(--text-1)}
+.chord-sec-head span{font-family:Consolas,monospace;font-size:11px;color:var(--text-2)}
+.chord-sec-head em{margin-left:auto;font-style:normal;font-size:11px;color:var(--text-2)}
+.chord-chips{display:flex;flex-wrap:wrap;gap:6px}
+.chord-chip{display:inline-flex;align-items:baseline;gap:5px;font-size:12px;padding:2px 8px;
+            border-radius:6px;background:var(--bg-subtle);border:1px solid var(--border)}
+.chord-chip i{font-style:normal;font-family:Consolas,monospace;font-size:10px;color:var(--text-2)}
+.chord-chip b{font-weight:600}
+.chord-empty{font-size:12px;color:var(--text-2)}
+.chord-note{margin-top:8px;font-size:11px;color:var(--text-2)}
+
+/* ③ 乐谱编辑 */
+.filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;
+         padding:9px 12px;border-radius:9px;background:var(--bg-subtle);border:1px solid var(--border)}
+.filters-label{font-size:12px;color:var(--text-2);font-weight:500}
+.filter-chip{border:1px solid var(--border);background:#fff;color:var(--text-2);font:inherit;
+             font-size:12px;padding:5px 11px;border-radius:999px;cursor:pointer;
+             display:inline-flex;align-items:center;gap:6px}
+.filter-chip:hover{border-color:#cfcbdd;color:var(--text-1)}
+.filter-chip::before{content:"○";font-size:10px}
+.filter-chip.on{border-color:var(--primary);background:var(--primary-weak);color:var(--primary);font-weight:500}
+.filter-chip.on::before{content:"✓"}
+.filters-hint{margin-left:auto;font-size:11px;color:#9a99ab}
+.editor{display:grid;grid-template-columns:minmax(300px,.85fr) 1.15fr;gap:14px}
+@media(max-width:1000px){.editor{grid-template-columns:1fr}}
+.pane{border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.pane-head{display:flex;align-items:center;gap:8px;padding:7px 11px;background:var(--bg-subtle);
+           border-bottom:1px solid var(--border);font-size:12px;color:var(--text-2)}
+.dirty{color:var(--warn);font-size:11px;display:none}
+.dirty.on{display:inline}
+.abc-area{width:100%;height:340px;border:0;resize:vertical;padding:12px;
+          font:12px/1.7 Consolas,"Cascadia Mono",monospace;color:#2f3040;background:#fff;outline:none}
+.abc-area:focus{background:#fdfcff;box-shadow:inset 0 0 0 2px var(--primary-weak)}
+.score-body{padding:8px 12px;background:#fff;overflow:auto;height:340px;position:relative}
+.empty{color:#b9b7c7;font-size:12px;text-align:center;padding:60px 12px}
+.transport{display:flex;align-items:center;gap:12px;margin-top:12px;padding:10px 12px;
+           border:1px solid var(--border);border-radius:10px;background:var(--bg-subtle);flex-wrap:wrap}
+.tp-btn{border:1px solid var(--border);background:#fff;width:28px;height:28px;border-radius:7px;
+        cursor:pointer;font-size:11px;color:var(--text-1);flex:none;display:flex;align-items:center;justify-content:center}
+.tp-btn:hover:not(:disabled){border-color:var(--primary);color:var(--primary)}
+.tp-btn:disabled{opacity:.4;cursor:not-allowed}
+.tp-play{width:30px;height:30px;border-radius:50%;background:var(--primary);border-color:var(--primary);color:#fff}
+.seek{flex:1;min-width:120px;height:6px;border-radius:3px;background:#e2dff0;position:relative;cursor:pointer}
+.seek>i{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--grad-progress);border-radius:3px}
+.tp-time{font-size:11px;font-family:Consolas,monospace;color:var(--text-2);flex:none}
+.tp-speed{display:flex;align-items:center;gap:6px;flex:none;font-size:11px;color:var(--text-2)}
+.tp-speed input{width:80px}
+.tone-hint{font-size:11px;color:var(--text-2)}
+
+/* ④ 歌词 */
+.switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none;font-size:13px}
+.track{width:36px;height:20px;border-radius:10px;background:#d6d3e6;position:relative;transition:background .18s;flex:none}
+.track>i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;
+         transition:left .18s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.switch.on .track{background:var(--primary)}
+.switch.on .track>i{left:18px}
+.lyr-note{font-size:12px;color:var(--text-2);margin-top:10px}
+.lyr-drop{border:1.5px dashed #d6d3e6;border-radius:10px;background:var(--bg-subtle);
+          padding:16px;text-align:center;color:var(--text-2);cursor:pointer;transition:.15s;margin-bottom:10px}
+.lyr-drop:hover,.lyr-drop.over{border-color:var(--primary);background:var(--primary-weak)}
+.lyr-drop .big{font-size:13px;color:var(--text-1)}
+.lyr-drop .hint{font-size:11px;margin-top:5px;color:#9a99ab}
+
+/* 播放到哪个音，谱面对应音符高亮 */
+.abcjs-note.playing path,
+.abcjs-note.playing .abcjs-notehead,
+.abcjs-note.playing .abcjs-stem,
+.abcjs-note.playing .abcjs-flag,
+.abcjs-note.playing .abcjs-beam { fill:#e0409b !important; stroke:#e0409b !important }
+.abcjs-note.playing .abcjs-notehead { fill:#e0409b !important }
+.abcjs-note.playing .abcjs-dotted,
+.abcjs-note.playing .abcjs-augmentation { fill:#e0409b !important; stroke:#e0409b !important }
+.abcjs-note.playing { filter:drop-shadow(0 0 4px rgba(224,64,155,.55)) }
+#scoreBody.playing { cursor:default }
+.lyr-when-on{margin-top:14px;display:none}
+.lyr-when-on.show{display:block}
+.lyr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:12px}
+.lyr-grid label{font-size:12px;color:var(--text-2);display:block;margin-bottom:4px}
+.btn{border:1px solid var(--border);background:#fff;color:var(--text-1);font:inherit;
+     padding:7px 14px;border-radius:var(--radius-ctl);cursor:pointer}
+.btn:hover:not(:disabled){border-color:#cfcbdd}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.primary:hover:not(:disabled){filter:brightness(1.06)}
+.btn.sm{padding:5px 10px;font-size:12px}
+.lyr-text{width:100%;height:120px;border:1px solid var(--border);border-radius:8px;padding:10px;
+          font:13px/1.8 inherit;color:var(--text-1);resize:vertical;outline:none}
+.lyr-text:focus{box-shadow:inset 0 0 0 2px var(--primary-weak)}
+.lrc{background:#1f2033;color:#e6e6f0;border-radius:8px;padding:12px;font:12px/1.8 Consolas,monospace;
+     max-height:180px;overflow:auto;white-space:pre-wrap}
+
+/* ⑤ 导出 */
+.export-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.export-row .btn.primary{padding:9px 20px}
+.export-note{font-size:12px;color:var(--text-2)}
+
+.banner{display:none;align-items:flex-start;gap:10px;border:1px solid #f5c9c9;background:#fef2f2;
+        border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.banner.show{display:flex}
+.banner.warn{border-color:#f3dfb5;background:#fffbeb}
+.banner .bd{color:var(--danger);font-size:16px;flex:none}
+.banner.warn .bd{color:var(--warn)}
+.banner b{font-size:13px;color:#991b1b}
+.banner.warn b{color:#8a6100}
+.banner p{margin:2px 0 8px;font-size:12px;color:#b91c1c}
+.banner.warn p{color:#8a6100}
+.banner .acts{display:flex;gap:8px;flex-wrap:wrap}
+.skel{background:linear-gradient(90deg,#f0eef7 25%,#f7f6fc 50%,#f0eef7 75%);
+      background-size:200% 100%;animation:sh 1.4s infinite;border-radius:6px}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+.statusbar{position:fixed;left:0;right:0;bottom:0;height:44px;background:#fff;border-top:1px solid var(--border);
+           display:flex;align-items:center;gap:14px;padding:0 18px;font-size:12px;color:var(--text-2);z-index:20}
+.gpu{display:flex;align-items:center;gap:8px;font-family:Consolas,monospace;font-size:11px}
+.gpu .mini{width:70px;height:5px;border-radius:3px;background:var(--bg-subtle);overflow:hidden}
+.gpu .mini>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#22c55e,#f59e0b);transition:width .5s}
+.state{color:var(--text-1)}
+.statusbar .right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.toast{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:60;
+       background:#1f2033;color:#fff;padding:9px 16px;border-radius:8px;font-size:12px;
+       box-shadow:0 6px 20px rgba(0,0,0,.2);opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:1}
+.toast.err{background:#b91c1c}
+.toast.ok{background:#15803d}
+body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
+</style>
+</head>
+<body data-state="idle">
+
+<div class="wrap">
+  <div class="page-head">
+    <h1 class="title">SheetSage2 扒谱</h1>
+    <div class="subtitle">把歌曲录音转成可编辑的乐谱，并导出 Synthesizer V 工程（SVP）与 MIDI。</div>
+  </div>
+
+  <div class="banner" id="banner">
+    <span class="bd" id="bannerIcon">✕</span>
+    <div style="flex:1">
+      <b id="bannerTitle">扒谱失败</b>
+      <p id="bannerMsg"></p>
+      <div class="acts" id="bannerActs"></div>
+    </div>
+    <button class="btn sm" id="bannerClose">关闭</button>
+  </div>
+
+  <!-- ① 音频 -->
+  <section class="card">
+    <div class="card-head"><span class="num">1</span><h2>拖入音频</h2></div>
+    <div id="dropzone" class="dropzone">
+      <div class="big">拖拽音频到此处，或点击选择</div>
+      <div class="hint">拖拽为第一入口</div>
+      <div class="formats">支持 wav / mp3 / flac</div>
+    </div>
+    <div id="fileWrap" style="display:none">
+      <div class="chip">
+        <span class="ico">♪</span>
+        <div class="meta">
+          <div class="name" id="fName"></div>
+          <div class="size" id="fMeta"></div>
+        </div>
+        <button class="del" id="fDel" title="移除">×</button>
+      </div>
+      <div class="player">
+        <button class="play-btn" id="aPlay" disabled>▶</button>
+        <div class="wave" id="wave"></div>
+        <span class="time" id="aTime">0:00 / 0:00</span>
+        <input class="vol" type="range" id="aVol" min="0" max="100" value="80">
+      </div>
+    </div>
+    <div class="opt-row">
+      <span class="opt-label">计算精度</span>
+      <div class="seg" id="segDtype">
+        <button data-v="bf16" class="on">BF16 快速</button><button data-v="fp32">FP32 精确</button>
+      </div>
+    </div>
+    <div class="opt-row">
+      <span class="opt-label">只分析前</span>
+      <select id="selRange">
+        <option value="">整首歌曲</option><option value="30">前 30s</option>
+        <option value="60">前 60s</option><option value="120">前 120s</option>
+        <option value="custom">自定义…</option>
+      </select>
+      <input id="customRange" type="number" min="5" placeholder="秒" style="display:none;width:90px;
+             font:inherit;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle)">
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn primary" id="btnStart" disabled>开始扒谱</button>
+      <button class="btn" id="btnStop" disabled>停止</button>
+    </div>
+  </section>
+
+  <!-- ② 进度 -->
+  <section class="card">
+    <div class="card-head">
+      <span class="num">2</span><h2>进度</h2>
+    </div>
+    <div class="stages" id="stages"></div>
+    <div class="bar"><i id="barFill"></i></div>
+    <div class="bar-foot"><span id="progText">就绪</span><span class="pct" id="progPct">0%</span></div>
+
+    <div class="overview" id="overview" style="opacity:.4">
+      <div class="ov-head"><h3>分析概览</h3></div>
+      <div class="metrics">
+        <div class="metric"><b id="mKey">—</b><span>调性</span></div>
+        <div class="metric"><b id="mBpm">—</b><span>速度 BPM</span></div>
+        <div class="metric"><b id="mMeter">—</b><span>拍号</span></div>
+        <div class="metric"><b id="mDur">—</b><span>时长</span></div>
+        <div class="metric"><b id="mNotes">—</b><span>音符 人声/器乐</span></div>
+      </div>
+      <div class="segbar" id="segbar"></div>
+
+      <div class="chordbox" id="chordBox" style="display:none">
+        <div class="ov-head">
+          <h3>和弦进行</h3>
+          <span class="chord-stat" id="chordStat">—</span>
+          <span class="spacer"></span>
+          <button class="btn sm" id="chordCopy">复制</button>
+          <button class="btn sm" id="chordDlTxt">下载 .txt</button>
+          <button class="btn sm" id="chordDlCsv">下载 .csv</button>
+        </div>
+        <div class="chord-list" id="chordList"></div>
+        <div class="chord-note" id="chordNote"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ③ 乐谱编辑 -->
+  <section class="card collapsed" id="scoreCard">
+    <div class="card-head">
+      <span class="num">3</span><h2>乐谱编辑</h2>
+      <span class="spacer"></span>
+      <span class="ghost">左侧可编辑 ABC，失焦后右侧重新渲染</span>
+      <button class="fold" data-fold="scoreCard">展开 ▸</button>
+    </div>
+    <div class="card-body">
+      <div class="filters">
+        <span class="filters-label">导出内容</span>
+        <button class="filter-chip" data-voice="vocal">人声主旋律</button>
+        <button class="filter-chip" data-voice="ins">器乐旋律</button>
+        <button class="filter-chip" data-voice="chords">和弦</button>
+        <span class="filters-hint">勾什么就导什么；即时作用于左侧 ABC，无需重跑推理</span>
+      </div>
+      <div class="editor">
+        <div class="pane">
+          <div class="pane-head">
+            <span>ABC</span>
+            <span class="dirty" id="abcDirty">● 已修改，需重新生成导出</span>
+            <span class="spacer"></span>
+            <button class="btn sm" id="abcReset" disabled>还原</button>
+            <button class="btn sm primary" id="abcSave" disabled>保存并重新生成</button>
+          </div>
+          <textarea class="abc-area" id="abcArea" spellcheck="false" placeholder="扒谱完成后，这里显示可编辑的 ABC"></textarea>
+        </div>
+        <div class="pane">
+          <div class="pane-head">
+            <span>乐谱</span><span class="spacer"></span><span id="scoreInfo">—</span>
+          </div>
+          <div class="score-body" id="scoreBody"><div class="empty">上传音频并完成扒谱后，这里显示乐谱</div></div>
+        </div>
+      </div>
+      <div class="transport">
+        <button class="tp-btn" id="tpPlay" disabled title="播放/暂停">▶</button>
+        <div class="seek" id="tpSeek"><i id="tpFill"></i></div>
+        <span class="tp-time" id="tpTime">0:00</span>
+        <div class="tp-speed"><input type="range" id="tpSpeed" min="50" max="150" value="100"><span id="tpSpeedLabel">100% (BPM)</span></div>
+        <div class="tp-speed" title="试听音量"><span>音量</span><input type="range" id="tpVol" min="0" max="200" value="100"><span id="tpVolLabel">100%</span></div>
+        <span class="tone-hint" id="toneHint">可试听旋律（离线钢琴音色）</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 歌词填充 -->
+  <section class="card collapsed" id="lyricsCard">
+    <div class="card-head">
+      <span class="num">4</span><h2>歌词填充</h2>
+      <span class="ghost" id="lyrState">未填充 · 音符歌词为 “la”</span>
+      <span class="spacer"></span>
+      <button class="fold" data-fold="lyricsCard">展开 ▸</button>
+    </div>
+    <div class="card-body">
+      <div class="lyr-drop" id="lyrDrop">
+        <div class="big">拖入 <b>.lrc</b> 或 <b>.txt</b> 歌词文件，或点击选择</div>
+        <div class="hint">LRC 带时间戳 → 按时间对齐到音符；纯文本 → 按顺序一字一音</div>
+        <input type="file" id="lyrFile" accept=".lrc,.txt,.text,text/plain" hidden>
+      </div>
+      <textarea class="lyr-text" id="lyrText" spellcheck="false"
+        placeholder="也可以直接在这里粘贴歌词。&#10;&#10;LRC 例：[00:14.64]这里是第一行测试歌词&#10;纯文本例：这里是第一行测试歌词"></textarea>
+      <div class="opt-row" style="margin-top:10px">
+        <span class="opt-label">格式</span>
+        <div class="seg" id="segLyrFmt">
+          <button data-v="auto" class="on">自动识别</button>
+          <button data-v="lrc">按 LRC</button>
+          <button data-v="plain">按纯文本</button>
+        </div>
+        <span class="opt-label" style="margin-left:14px">延音符</span>
+        <div class="seg" id="segLyrCont">
+          <button data-v="auto" class="on" title="中文用 -，英文多音节词用 +">自动</button>
+          <button data-v="-" title="同一音节延续（一字多音）">-</button>
+          <button data-v="+" title="同一个词的下一个音节（open → open +）">+</button>
+        </div>
+      </div>
+      <div class="export-row" style="margin-top:12px">
+        <button class="btn primary sm" id="lyrFill" disabled>填充到 SVP</button>
+        <button class="btn sm" id="lyrClear" disabled>清空（回到 la）</button>
+        <span class="ghost" id="lyrHint">需先完成扒谱</span>
+      </div>
+      <div style="margin-top:14px" id="lyrResultBox" hidden>
+        <div class="pane-head" style="border:1px solid var(--border);border-radius:8px 8px 0 0">
+          <span>填充结果</span><span class="spacer"></span>
+          <span class="ghost" id="lyrStats"></span>
+          <button class="btn sm" id="lrcDownload" disabled>下载 LRC</button>
+        </div>
+        <pre class="lrc" id="lrcBox"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑤ 导出 -->
+  <section class="card">
+    <div class="card-head"><span class="num">5</span><h2>导出</h2></div>
+    <div class="export-row">
+      <button class="btn primary" id="dlSvp" disabled>导出 SVP</button>
+      <button class="btn" id="dlMidi" disabled>导出 MIDI</button>
+      <button class="btn" id="openDir" disabled>打开输出文件夹</button>
+      <span class="export-note" id="exportNote">暂无产物</span>
+    </div>
+  </section>
+</div>
+
+<div class="statusbar">
+  <div class="gpu">
+    <span id="gpuName">GPU</span>
+    <span id="gpuUse">—</span>
+    <span class="mini"><i id="gpuBar"></i></span>
+  </div>
+  <span class="state" id="stateText">就绪</span>
+  <div class="right">
+    <span class="ghost" id="taskIdText"></span>
+    <button class="btn sm" id="btnClean" title="清空 output\ 与 tmp\（永久删除，不进回收站）">清理缓存</button>
+    <button class="btn sm" id="btnLog">日志</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<pre id="logBox" style="display:none"></pre>
+
+<script>
+/* ============================ 状态 ============================ */
+const S = {
+  token:null, fileName:"", fileSize:0, duration:null,
+  taskId:null, state:"idle",
+  result:null, rawAbc:"", chords:[],
+  // ③ 的三个勾选：**勾什么导什么**。默认只勾「人声主旋律」（用户 2026-09-15 定）
+  filter:{voices:{vocal:true, ins:false, chords:false}, dropIntroOutro:false},
+  playback:null, highlightNotes:[], noteEls:null, hlOk:false, notesSig:"",
+  abcShownOnce:false, es:null,
+};
+const STAGES = ["加载模型","读取音频","识别音乐","生成乐谱","完成"];
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+/* ============================ 工具 ============================ */
+function fmt(sec){ sec=Math.max(0,Math.round(sec||0)); const m=Math.floor(sec/60); return m+":"+String(sec%60).padStart(2,"0"); }
+function fmtSize(b){ return b>1024*1024 ? (b/1024/1024).toFixed(2)+" MB" : (b/1024).toFixed(0)+" KB"; }
+let toastTimer=null;
+function toast(msg, kind){
+  const t=$("#toast"); t.textContent=msg; t.className="toast show"+(kind?" "+kind:"");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className="toast", kind==="err"?8000:3000);
+}
+function bannerShow(title,msg,kind,acts){
+  const b=$("#banner"); b.className="banner show"+(kind==="warn"?" warn":"");
+  $("#bannerTitle").textContent=title; $("#bannerMsg").textContent=msg||"";
+  $("#bannerIcon").textContent=kind==="warn"?"!":"✕";
+  const box=$("#bannerActs"); box.innerHTML="";
+  (acts||[]).forEach(a=>{ const bt=document.createElement("button"); bt.className="btn sm"; bt.textContent=a.label; bt.onclick=a.onClick; box.appendChild(bt); });
+}
+function bannerHide(){ $("#banner").className="banner"; }
+$("#bannerClose").onclick=bannerHide;
+
+const LOG=[];
+function log(msg,level){
+  LOG.push(`[${new Date().toLocaleTimeString()}] ${level?`(${level}) `:""}${msg}`);
+  if(LOG.length>500) LOG.shift();
+  $("#logBox").textContent=LOG.join("\n");
+}
+$("#btnLog").onclick=()=>{ const p=$("#logBox"); if(p.style.display==="none"){ p.style.display="block"; p.style.position="fixed"; p.style.right="16px"; p.style.bottom="56px"; p.style.width="480px"; p.style.maxHeight="320px"; p.style.overflow="auto"; p.style.background="#1f2033"; p.style.color="#e6e6f0"; p.style.padding="12px"; p.style.borderRadius="10px"; p.style.font="12px/1.7 Consolas,monospace"; p.style.zIndex="50"; } else p.style.display="none"; };
+
+/* ============================ ① 上传 ============================ */
+const dz=$("#dropzone");
+dz.onclick=()=>pickFile();
+function pickFile(){
+  const inp=document.createElement("input"); inp.type="file"; inp.accept=".wav,.mp3,.flac";
+  inp.onchange=()=>{ if(inp.files[0]) upload(inp.files[0]); };
+  inp.click();
+}
+["dragenter","dragover"].forEach(e=>document.addEventListener(e,ev=>{ ev.preventDefault(); document.body.classList.add("dragging"); }));
+["dragleave","drop"].forEach(e=>document.addEventListener(e,ev=>{ ev.preventDefault(); if(e==="drop"||!ev.relatedTarget) document.body.classList.remove("dragging"); }));
+document.addEventListener("drop", ev=>{ ev.preventDefault(); const f=ev.dataTransfer?.files?.[0]; if(f) upload(f); });
+
+async function upload(file){
+  const ext="."+(file.name.split(".").pop()||"").toLowerCase();
+  if(![".wav",".mp3",".flac"].includes(ext)){ toast("仅支持 wav / mp3 / flac 格式","err"); return; }
+  const fd=new FormData(); fd.append("file",file);
+  $("#fName").textContent=file.name; $("#fMeta").textContent="上传中…";
+  $("#fileWrap").style.display="block"; $("#dropzone").style.display="none";
+  try{
+    const r=await fetch("/api/upload",{method:"POST",body:fd});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||"上传失败");
+    S.token=j.token; S.fileName=j.name; S.fileSize=j.size; S.duration=j.duration;
+    S.notesSig=""; resetPiano();        // 重新上传 = 换曲子，作废旧钢琴音频
+    $("#fName").textContent=j.name;
+    $("#fMeta").textContent=`${fmtSize(j.size)}${j.duration?" · "+fmt(j.duration):""}`;
+    setupAudio(j.token, j.duration);
+    log("上传成功："+j.name);
+    refreshButtons();
+  }catch(err){
+    toast(err.message,"err"); log("上传失败："+err.message,"error");
+    resetFile();
+  }
+}
+function resetFile(){
+  S.token=null; S.fileName=""; S.fileSize=0; S.duration=null;
+  S.notesSig=""; resetPiano();          // 换文件时清掉试听状态，避免残留上一首
+  $("#fileWrap").style.display="none"; $("#dropzone").style.display="block";
+  refreshButtons();
+}
+$("#fDel").onclick=()=>{ if(S.state==="running"||S.state==="stopping") return; resetFile(); };
+
+/* 迷你播放器 */
+const audio=new Audio(); audio.preload="auto";
+$("#aPlay").onclick=()=>{ if(audio.paused){ audio.play().catch(e=>toast("无法播放："+e.message,"err")); } else audio.pause(); };
+audio.onplay=()=>{ $("#aPlay").textContent="❚❚"; };
+audio.onpause=()=>{ $("#aPlay").textContent="▶"; };
+audio.ontimeupdate=()=>{ $("#aTime").textContent=`${fmt(audio.currentTime)} / ${fmt(audio.duration||S.duration||0)}`; paintWave(); };
+$("#aVol").oninput=e=>{ audio.volume=e.target.value/100; };
+$("#wave").onclick=e=>{ if(!audio.duration) return; const r=e.currentTarget.getBoundingClientRect(); audio.currentTime=(e.clientX-r.left)/r.width*audio.duration; };
+
+let wavePeaks=null, waveBars=[];
+async function setupAudio(token, duration){
+  audio.src=`/api/audio/${token}`; $("#aPlay").disabled=false; audio.volume=$("#aVol").value/100;
+  $("#aTime").textContent=`0:00 / ${fmt(duration||0)}`;
+  $("#wave").innerHTML="";
+  wavePeaks=null;
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext;
+    const ctx=new AC(); const buf=await (await fetch(`/api/audio/${token}`)).arrayBuffer();
+    const decoded=await ctx.decodeAudioData(buf);
+    const data=decoded.getChannelData(0); const N=140; const blk=Math.floor(data.length/N)||1;
+    const peaks=[];
+    for(let i=0;i<N;i++){ let m=0; for(let j=0;j<blk;j+=32){ const v=Math.abs(data[i*blk+j]||0); if(v>m)m=v; } peaks.push(m); }
+    wavePeaks=peaks; ctx.close();
+  }catch(e){ wavePeaks=null; }
+  waveBars=[];
+  for(let i=0;i<140;i++){
+    const b=document.createElement("i");
+    const h = wavePeaks ? (10+wavePeaks[i]*90) : (15+Math.abs(Math.sin(i/9))*55+((i*37)%30));
+    b.style.height=Math.min(100,h)+"%";
+    $("#wave").appendChild(b); waveBars.push(b);
+  }
+}
+function paintWave(){
+  if(!audio.duration||!waveBars.length) return;
+  const p=audio.currentTime/audio.duration;
+  waveBars.forEach((b,i)=>b.classList.toggle("p", i/waveBars.length<p));
+}
+
+/* ============== ③ 的三个勾选：人声主旋律 / 器乐旋律 / 和弦（导出内容） ============== */
+/* 唯一入口：③ 乐谱编辑里那三个 `.filter-chip[data-voice]`（绑定见下方）。
+   状态统一存在 `S.filter.voices`，`syncFilterChips()` 负责把 chip 的 on 态同步过去。
+   这三个勾选同时决定四件事：编辑器里的 ABC、试听放哪些声部、
+   提交给后端的 `export_voices`、以及**导出的轨道数** —— 勾什么就导什么，由用户决定。
+   默认只勾「人声主旋律」（2026-09-15 用户定的）。
+
+   历史（别再走回头路）：
+   * 2026-09-14 —— 它以前是 ① 上方一行「仅主旋律乐谱」+ ③ 里一个「过滤 V: Ins」两套状态，
+     切了一个另一个不动，ABC 里还留着 `V: Ins Z4|`、导出轨道数和界面显示也对不上；
+     后来收口成一个开关。
+   * 2026-09-15 —— 用户要求「让导出什么由用户决定」，于是从一个开关扩成三个勾选；
+     同时删掉了「删除 % intro/% outro」那个 chip（后端参数仍在，只是 UI 不再暴露）。 */
+function segHandler(sel){
+  $$(sel+" button").forEach(b=>b.onclick=()=>{ if(b.disabled) return; $$(sel+" button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); });
+}
+segHandler("#segDtype");
+const segVal = sel => ($(sel+" button.on")||{}).dataset?.v;
+$("#selRange").onchange=e=>{ $("#customRange").style.display = e.target.value==="custom"?"inline-block":"none"; };
+
+/* ============================ ② 任务提交 / SSE ============================ */
+function running(){ return S.state==="running"||S.state==="stopping"||S.state==="queued"; }
+function refreshButtons(){
+  const busy=running();
+  $("#btnStart").disabled = busy || !S.token;
+  $("#btnStop").disabled = !busy;
+  document.body.dataset.busy = busy?"1":"0";
+  $("#fDel").disabled = busy;
+  $("#lyrFill").disabled = busy || !S.taskId || S.state!=="done";
+  $("#lyrClear").disabled = busy || !S.taskId || S.state!=="done";
+  $("#lyrHint").textContent = (!S.taskId || S.state!=="done")
+      ? "需先完成扒谱" : "拖入 .lrc / .txt，或直接粘贴歌词";
+  $("#abcSave").disabled = busy || !S.taskId || S.state!=="done";
+  $("#abcReset").disabled = busy || !S.taskId || S.state!=="done";
+  const hasOut = S.state==="done" && S.result;
+  $("#dlSvp").disabled = !hasOut; $("#dlMidi").disabled = !hasOut; $("#openDir").disabled = !hasOut;
+  $("#tpPlay").disabled = !hasOut;
+  // 清理缓存是破坏性动作：跑任务时直接禁用（后端也会 409 兜一道）
+  $("#btnClean").disabled = busy;
+}
+
+/* ============================ 清理缓存（状态栏） ============================ */
+/* 清空 output\ 与 tmp\ 的内容 —— **永久删除，不走回收站**，所以必定二次确认。
+   放在状态栏「日志」旁边：它是低频维护动作，不该占主流程的位置，也不该动 5 张卡的结构。 */
+const CACHE_LABEL = { output:"历史任务产物 output\\", tmp:"上传与中间文件 tmp\\" };
+function fmtBytes(b){
+  b = Number(b)||0;
+  if(b>=1073741824) return (b/1073741824).toFixed(2)+" GB";
+  if(b>=1048576)    return (b/1048576).toFixed(1)+" MB";
+  if(b>=1024)       return (b/1024).toFixed(0)+" KB";
+  return b+" B";
+}
+$("#btnClean").onclick=async()=>{
+  if(running()){ toast("正在扒谱，先停止或等它跑完，再清理缓存","err"); return; }
+  $("#btnClean").disabled=true;
+  try{
+    const info=await (await fetch("/api/cache")).json();
+    const lines=[];
+    for(const k of ["output","tmp"]){
+      const it=(info.items||{})[k];
+      if(it && (it.files||it.dirs)) lines.push(`${CACHE_LABEL[k]}：${it.files} 个文件 / ${fmtBytes(it.bytes)}`);
+    }
+    if(!lines.length){ toast("没有可清理的缓存","ok"); return; }
+    const msg="将要【永久删除】以下内容（不进回收站，删除后无法恢复）：\n\n"
+      + lines.join("\n")
+      + `\n\n合计 ${fmtBytes(info.total_bytes)}。确定继续吗？`;
+    if(!confirm(msg)){ log("已取消清理缓存"); return; }
+    const r=await fetch("/api/cache/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({targets:["output","tmp"]})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||"清理失败");
+    const failed=((j.items.output||{}).failed||0)+((j.items.tmp||{}).failed||0);
+    toast(`已清理 ${fmtBytes(j.freed_bytes)}`+(failed?`（${failed} 项正被占用，没删掉）`:""), failed?"err":"ok");
+    log(`清理缓存：释放 ${fmtBytes(j.freed_bytes)}`+(failed?`，${failed} 项失败`:""));
+    // 上传的音频已被删掉 → 文件卡片必须复位，否则 S.token 还指着一个不存在的文件
+    if((j.targets||[]).includes("tmp")) resetFile();
+    // 当前任务的产物也被删了 → 收起导出按钮，别让用户点出 404
+    if(j.current_task_cleared){ S.taskId=null; S.state="idle"; S.result=null; }
+  }catch(e){ toast("清理失败："+e.message,"err"); log("清理缓存失败："+e.message,"error"); }
+  finally{ refreshButtons(); }
+};
+
+$("#btnStart").onclick=async()=>{
+  if(!S.token) return;
+  $("#btnStart").disabled=true;
+  const body={ token:S.token, preset:"default", dtype:segVal("#segDtype")||"bf16",
+    export_voices:selectedVoices(),
+    lyrics:"la" };
+  const r0=$("#selRange").value;
+  body.max_seconds = r0==="custom" ? (Number($("#customRange").value)||null) : (r0?Number(r0):null);
+  try{
+    const r=await fetch("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!r.ok){
+      if(j.blocking){ bannerShow("环境检测未通过","", "err", j.blocking.map(b=>({label:"修复："+b.label,onClick:()=>toast(b.fix||b.detail||"",""),}))); }
+      throw new Error(j.detail||"提交失败");
+    }
+    bannerHide(); S.taskId=j.task_id; S.state=j.state;
+    // 新任务开始：先收起上一首的和弦进行，避免误导（结果的 onResult 会重新填）
+    S.chords=[]; $("#chordBox").style.display="none";
+    log("任务已提交："+S.taskId);
+    refreshButtons(); connectSSE(S.taskId);
+  }catch(e){ toast(e.message,"err"); log("提交失败："+e.message,"error"); refreshButtons(); }
+};
+
+$("#btnStop").onclick=async()=>{
+  $("#btnStop").disabled=true;
+  try{ const r=await fetch("/api/stop",{method:"POST"}); const j=await r.json();
+    log(j.stopped?"已请求停止":"无可停止任务","warn"); }catch(e){ toast("停止失败："+e.message,"err"); }
+};
+
+function connectSSE(taskId){
+  if(S.es) S.es.close();
+  const url = taskId ? `/api/events?task_id=${encodeURIComponent(taskId)}` : "/api/events";
+  const es=new EventSource(url); S.es=es;
+  es.onmessage=ev=>{
+    let m; try{ m=JSON.parse(ev.data); }catch{ return; }
+    if(m.type==="snapshot"){ if(m.task) applyTask(m.task,true); if(m.history) renderHistory(m.history); return; }
+    if(m.task) applyTask(m.task,false);
+    if(m.log?.message) log(m.log.message, m.log.level);
+    if(m.type==="error"){ bannerShow("失败",m.message||"未知错误","err"); toast("任务失败","err"); }
+  };
+  es.onerror=()=>log("SSE 断线，浏览器会自动重连…","warn");
+}
+function renderHistory(list){ /* 保留接口：当前 UI 不做历史列表 */ }
+
+/** 刷新后恢复已上传的音频。
+ *  上传文件落盘为 `tmp/uploads/<token>.<ext>`，所以 audio_path 的 stem 就是 token；
+ *  把它还原回来，用户刷新页面后可以直接重跑，不用重新选文件。 */
+async function restoreFile(t){
+  if(S.token || !t.audio_path) return;
+  const stem=(t.audio_path.split(/[\\/]/).pop()||"").replace(/\.[^.]+$/,"");
+  if(!stem) return;
+  try{
+    // 用轻量 info 接口探测，不要 HEAD（FastAPI 的 @app.get 不应答 HEAD，会 405）
+    const info=await (await fetch(`/api/audio/${encodeURIComponent(stem)}/info`)).json();
+    if(!info.available) return;              // 服务重启后磁盘文件可能已被清理
+    S.token=stem; S.fileName=t.audio_original_name || info.name || stem;
+    $("#fName").textContent=S.fileName;
+    $("#fMeta").textContent=`${fmtSize(info.size)} · 已恢复上次上传的音频`;
+    $("#fileWrap").style.display="block"; $("#dropzone").style.display="none";
+    setupAudio(stem, null);
+    refreshButtons();
+  }catch{}
+}
+
+/** 刷新后恢复：若当前是歌词任务，要先把父扒谱任务的状态应用上，
+ *  否则概览、乐谱、导出说明会全空——它们属于父任务。 */
+async function restore(parentId){
+  if(!parentId) return;
+  try{
+    const ps=await (await fetch(`/api/state?task_id=${encodeURIComponent(parentId)}`)).json();
+    if(ps.task) applyTask(ps.task,true);
+  }catch{}
+}
+
+function applyTask(t, isSnapshot){
+  S.taskId=t.task_id; S.state=t.state;
+
+  $("#barFill").style.width=(t.percent||0)+"%";
+  $("#progPct").textContent=Math.round(t.percent||0)+"%";
+  $("#stateText").textContent=t.state_label+(t.stage?" · "+t.stage:"");
+  $("#progText").textContent=(t.text||t.state_label)+(t.elapsed?` · ${t.elapsed.toFixed(1)}s`:"");
+  $("#taskIdText").textContent=t.task_id?`#${t.task_id}`:"";
+  renderStages(STAGES, t.stage, t.state);
+  bindStartButtons();
+
+  if(t.state==="done"&&t.result){
+    if(isSnapshot) restoreFile(t);
+    onResult(t);
+  }
+  if(t.state==="failed"){
+    bannerShow("扒谱失败", t.error||"未知错误", "err", [{label:"打开日志",onClick:()=>$("#btnLog").click()}]);
+  }
+  if(t.state==="cancelled"){ toast("任务已停止，可重新开始","ok"); }
+  refreshButtons();
+}
+function renderStages(names, current, state){
+  const idx=names.indexOf(current);
+  $("#stages").innerHTML=names.map((n,i)=>{
+    let cls="st", mark="○";
+    if(state==="failed"&&i===idx){ cls="st fail"; mark="✕"; }
+    else if(state==="done"||i<idx){ cls="st done"; mark="✓"; }
+    else if(i===idx){ cls="st active"; mark="◐"; }
+    return `<span class="${cls}">${mark} ${n}</span>`;
+  }).join("");
+}
+function bindStartButtons(){
+  if($("#scoreCard").classList.contains("collapsed") && S.rawAbc){
+    $("#scoreCard").classList.remove("collapsed");
+    $("#scoreCard").querySelector(".fold").textContent="折叠 ▾";
+  }
+}
+
+/* 结果落地 */
+function onResult(t){
+  const r=t.result; S.result=r;
+  if(!r) return;
+  $("#overview").style.opacity=1;
+  $("#mKey").textContent=r.key_cn||"—";
+  // 变速曲：概览的速度格显示变化链（如 110→75→110），hover 看到每一段的起始时间
+  const tmap=(r.tempo_map||[]).filter(x=>x&&x.bpm>0);
+  if(tmap.length>1){
+    $("#mBpm").textContent=tmap.map(x=>Math.round(x.bpm)).join("→");
+    $("#mBpm").title=tmap.map(x=>`${fmt(x.t)}→${Math.round(x.bpm)}`).join("\n");
+    $("#mBpm").style.fontSize=tmap.length>3?"14px":"";
+  }else{
+    $("#mBpm").textContent=r.bpm_int??"—";
+    $("#mBpm").title=""; $("#mBpm").style.fontSize="";
+  }
+  $("#mMeter").textContent=r.meter||"—";
+  $("#mDur").textContent=r.duration?fmt(r.duration):"—";
+  $("#mNotes").textContent=`${r.vocal_notes??"—"} / ${r.instrumental_notes??"—"}`;
+  renderSegbar(r.sections||[]);
+  renderChords(r);
+  if(r.abc){
+    setRawAbc(r.abc||"");
+    // 新结果一律以本次推理的 export_voices 为准，并同步三个勾选
+    syncVoicesFromResult(r);
+    // 有了乐谱就自动展开「③ 乐谱编辑」，省一次点击
+    if(!S.abcShownOnce){
+      S.abcShownOnce=true;
+      $("#scoreCard").classList.remove("collapsed");
+      $("#scoreCard").querySelector(".fold").textContent="折叠 ▾";
+    }
+  }
+  if(r.export){ const svp=(r.export.exports||[]).find(x=>x.kind==="svp");
+    $("#exportNote").textContent = svp
+      ? `SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符${r.export.lyrics_source==="recognized"?" · 已写入识别歌词":""}`
+      : "暂无产物"; }
+  if(r.export && r.export.lyrics_source === "filled") fetchLyrics(S.taskId);
+  loadPlayback();
+  refreshButtons();
+}
+function renderSegbar(sections){
+  const palette={前奏:"#c9a227",主歌:"#b0155c",副歌:"#0fa98f",预副歌:"#7c4dff",间奏:"#e0409b",尾奏:"#8a8fa3"};
+  const total=sections.reduce((a,s)=>a+(s.duration||0),0)||1;
+  $("#segbar").innerHTML=sections.map((s,i)=>{
+    const w=(s.duration||0)/total*100;
+    const bg=palette[s.label_cn]||["#c9a227","#0fa98f","#b0155c","#7c4dff","#e0409b","#4d8bff"][i%6];
+    return `<div style="flex:0 0 ${w.toFixed(3)}%;background:${bg}" title="${s.label_cn} ${fmt(s.start)}–${fmt(s.end)}">${s.label_cn}</div>`;
+  }).join("");
+}
+
+/* ==================== ② 分析概览 · 和弦进行（和声扒谱用） ====================
+   数据来源：summary 里的 ``r.chords``（overview 解析 chord.lab 得到，已剔除 N/无和弦）
+   与 ``r.sections``。**纯前端**：不新增接口、不重跑推理、不碰 ABCD/SVP 格式。
+
+   注意语义：模型对每首歌**都会解码和弦**，③ 的「只显示/导出主旋律」只影响 ABC 与导出
+   （见 exports_sheetsage2.py:78「without changing decoded events」），所以这里始终有内容。 */
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+/* 和弦用的时间格式：保留 2 位小数，比 fmt() 的整秒更容易对齐 */
+function fmt2(sec){
+  sec=Math.max(0,Number(sec)||0);
+  const m=Math.floor(sec/60), s=sec%60;
+  return m+":"+String(Math.floor(s)).padStart(2,"0")+"."+String(Math.round((s%1)*100)).padStart(2,"0");
+}
+function chordBase(){
+  const n=(S.fileName||"").replace(/\.[^.]+$/,"").trim();
+  return n || (S.taskId?("task_"+S.taskId):"chords");
+}
+/** 按段落把和弦分组：每个和弦**只归一段**——归属到"起点已经开始了的最近那一段"。
+ *  注意不能用「区间包含」判定：段落是首尾相接的（上一段 end == 下一段 start），
+ *  加了浮点容差就会让边界上的和弦被前后两段各算一次（实测 139 个和弦被数成 148）。 */
+function chordGroups(chords, sections){
+  const secs=(sections||[]).slice().sort((a,b)=>a.start-b.start);
+  const groups=secs.map(s=>({
+    name:s.label_cn||s.label||"段落", start:s.start, end:s.end, chords:[],
+  }));
+  const outside=[];
+  for(const c of chords){
+    let idx=-1;
+    for(let i=0;i<secs.length;i++){
+      if(secs[i].start<=c.start+1e-9) idx=i; else break;
+    }
+    if(idx<0) outside.push(c); else groups[idx].chords.push(c);
+  }
+  if(outside.length) groups.push({name:"其他", start:outside[0].start,
+    end:outside[outside.length-1].end, chords:outside});
+  return groups;
+}
+/** 和弦覆盖率 = 各和弦区间的并集 / 总时长（重叠不会重复计入）。 */
+function chordCoverage(chords, duration){
+  const iv=chords.map(c=>[c.start,c.end]).filter(([a,b])=>b>a).sort((x,y)=>x[0]-y[0]);
+  const merged=[];
+  for(const [a,b] of iv){
+    const last=merged[merged.length-1];
+    if(last&&a<=last[1]) last[1]=Math.max(last[1],b); else merged.push([a,b]);
+  }
+  const sum=merged.reduce((t,[a,b])=>t+(b-a),0);
+  return duration>0?Math.min(1,sum/duration):0;
+}
+function renderChords(r){
+  const chords=(r.chords||[]).slice().sort((a,b)=>a.start-b.start);
+  S.chords=chords;
+  const box=$("#chordBox");
+  if(!chords.length){ box.style.display="none"; return; }
+  box.style.display="block";
+  const groups=chordGroups(chords, r.sections);
+  const kinds=new Set(chords.map(c=>c.label)).size;
+  $("#chordStat").textContent=`${chords.length} 个 · 去重 ${kinds} 种 · 覆盖 ${(chordCoverage(chords,r.duration||0)*100).toFixed(0)}%`;
+  $("#chordList").innerHTML=groups.map(g=>`
+    <div class="chord-sec">
+      <div class="chord-sec-head"><b>${esc(g.name)}</b>
+        <span>${fmt2(g.start)}–${fmt2(g.end)}</span>
+        <em>${g.chords.length} 个和弦</em></div>
+      ${g.chords.length
+        ? `<div class="chord-chips">${g.chords.map(c=>
+            `<span class="chord-chip"><i>${fmt2(c.start)}</i><b>${esc(c.label)}</b></span>`).join("")}</div>`
+        : `<div class="chord-empty">（该段无和弦）</div>`}
+    </div>`).join("");
+  $("#chordNote").textContent="和弦来自模型的全量解码；③ 的「只显示/导出主旋律」只影响 ABC 与导出，不影响和弦识别。";
+}
+function chordText(){
+  const r=S.result||{};
+  const groups=chordGroups(S.chords, r.sections);
+  const kinds=new Set(S.chords.map(c=>c.label)).size;
+  const out=[
+    "# 和弦进行（Chord Progression）",
+    `# 曲目：${S.fileName||S.taskId||"—"}`,
+    `# 调性：${r.key_cn||r.key||"—"}    速度：${r.bpm_int??"—"} BPM    拍号：${r.meter||"—"}`,
+    `# 和弦：${S.chords.length} 个 · 去重 ${kinds} 种 · 覆盖 ${(chordCoverage(S.chords,r.duration||0)*100).toFixed(0)}%`,
+    "# 时间格式 m:ss.xx；和弦名沿用模型原始写法（含转位，如 D#:maj/2）",
+    "",
+  ];
+  for(const g of groups){
+    out.push(`[${g.name}] ${fmt2(g.start)} – ${fmt2(g.end)}  (${g.chords.length} 个和弦)`);
+    if(!g.chords.length) out.push("    （无和弦）");
+    for(const c of g.chords) out.push(`    ${fmt2(c.start)}  ${c.label}    ${(c.end-c.start).toFixed(2)}s`);
+    out.push("");
+  }
+  return out.join("\n");
+}
+function chordCsv(){
+  const r=S.result||{};
+  const rows=[["section","start_s","end_s","start_mmss","chord","duration_s"]];
+  for(const g of chordGroups(S.chords, r.sections))
+    for(const c of g.chords)
+      rows.push([g.name, c.start.toFixed(3), c.end.toFixed(3), fmt2(c.start), c.label, (c.end-c.start).toFixed(3)]);
+  const cell=v=>/["\,\n]/.test(String(v))?'"'+String(v).replace(/"/g,'""')+'"':String(v);
+  // 带 BOM，Excel 打开中文段落名才不会乱码
+  return "\ufeff"+rows.map(r=>r.map(cell).join(",")).join("\r\n")+"\r\n";
+}
+function downloadText(name, text, mime){
+  const url=URL.createObjectURL(new Blob([text],{type:(mime||"text/plain")+";charset=utf-8"}));
+  const a=document.createElement("a");
+  a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
+$("#chordDlTxt").onclick=()=>{ if(S.chords.length){ downloadText(chordBase()+".chords.txt", chordText()); log("已导出和弦进行 .txt"); } };
+$("#chordDlCsv").onclick=()=>{ if(S.chords.length){ downloadText(chordBase()+".chords.csv", chordCsv(), "text/csv"); log("已导出和弦进行 .csv"); } };
+$("#chordCopy").onclick=async()=>{
+  if(!S.chords.length) return;
+  const text=chordText();
+  try{ await navigator.clipboard.writeText(text); toast("和弦进行已复制","ok"); }
+  catch(e){ toast("复制失败，请用「下载 .txt」","err"); }
+};
+
+/* ============================ ③ 乐谱编辑 ============================ */
+const VOICE_KIND={vocal:"vocal",melody:"vocal",lead:"vocal",voice:"vocal",
+                  ins:"ins",instrumental:"ins",accompaniment:"ins"};
+function voiceKind(name){ return VOICE_KIND[String(name||"").trim().toLowerCase()]||null; }
+/** 认不出来的声部一律保留，免得误删。 */
+function keepVoice(name, voices){
+  const k=voiceKind(name);
+  return k===null ? true : !!voices[k];
+}
+function filterAbc(raw,f){
+  const voices=(f&&f.voices)||{vocal:true,ins:false,chords:false};
+  const out=[]; let cur=null, skip=false;
+  for(const line of (raw||"").split("\n")){
+    const sec=line.match(/^\s*%\s*([A-Za-z][\w \-]*?)\s*$/);
+    if(sec){ const n=sec[1].toLowerCase();
+      if(f&&f.dropIntroOutro&&(n==="intro"||n==="outro")){ skip=true; continue; }
+      skip=false; out.push(line); continue; }
+    if(/^\s*%/.test(line)){ if(!skip) out.push(line); continue; }
+    if(skip) continue;
+    const decl=line.match(/^\s*V:\s*([^\s=]+)(.*)$/);
+    if(decl&&decl[2].includes("=")){ if(!keepVoice(decl[1],voices)) continue; out.push(line); continue; }
+    const sw=line.match(/^\s*V:\s*([^\s=%]+)\s*$/);
+    if(sw){ cur=sw[1]; if(!keepVoice(cur,voices)) continue; out.push(line); continue; }
+    if(cur&&!keepVoice(cur,voices)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+function setRawAbc(abc){ S.rawAbc=abc||""; }
+function syncFilterChips(){
+  $$(".filter-chip").forEach(c=>c.classList.toggle("on", !!S.filter.voices[c.dataset.voice]));
+}
+/** 当前勾选的内容（提交 / 重新生成导出时带上）。 */
+function selectedVoices(){ return ["vocal","ins","chords"].filter(k=>!!S.filter.voices[k]); }
+/** 编辑器里的 ABC 是否**真的被手改过**（与「按当前过滤自动生成」的文本不同）。
+ *  用它来决定要不要弹「会丢弃手动修改」的确认框——只看 #abcDirty 会把
+ *  「因切换过滤而待重新生成导出」也误判成手改，来回切一次就弹一次。 */
+function abcHandEdited(){
+  if(!S.rawAbc) return false;
+  return $("#abcArea").value !== filterAbc(S.rawAbc, S.filter);
+}
+/** ③ 三个勾选（人声主旋律 / 器乐旋律 / 和弦）的唯一真相入口。
+ *
+ *  勾选状态存在 `S.filter.voices`，它同时决定四件事：
+ *    编辑器里的 ABC、试听放哪些声部、提交给后端的 `export_voices`、导出的轨道数。
+ *  **勾什么就导什么 —— 由用户决定**（2026-09-15 用户定的默认：只勾人声主旋律）。
+ */
+function toggleVoice(kind, on, force){
+  on = !!on;
+  if(!force && abcHandEdited()
+     && !confirm("重新应用过滤会丢弃你在 ABC 里的手动修改，继续吗？")){
+    syncFilterChips();          // 用户放弃：UI 回到真正生效的状态
+    return;
+  }
+  const changed = !!S.filter.voices[kind] !== on;
+  S.filter.voices[kind] = on;
+  syncFilterChips();
+  if(S.rawAbc){
+    applyFiltersToEditor(true);
+    // 勾选变了 → 磁盘上的 export/*.svp|mid|abc 还是上一次的内容，
+    // 标一下「需重新生成」，导出时也会自动重生成一次。
+    if(!force && changed) $("#abcDirty").classList.add("on");
+    if(!force && S.taskId) loadPlayback();
+  }
+}
+$$(".filter-chip").forEach(chip=>chip.onclick=()=>{
+  const kind=chip.dataset.voice; if(!kind) return;
+  toggleVoice(kind, !S.filter.voices[kind]);
+});
+// 首屏必须同步一次：HTML 里 chip 不带 on 态，默认「只勾人声主旋律」靠这一行画出来。
+// 少了它，页面看起来一个都没勾，实际提交的却是 export_voices=["vocal"] —— UI 与行为脱节。
+syncFilterChips();
+/** 按任务结果里的 export_voices 同步三个勾选（老结果只有 only_melody 时回退）。 */
+function syncVoicesFromResult(r){
+  let sel=null;
+  if(r&&Array.isArray(r.export_voices)) sel=r.export_voices;
+  else if(r&&typeof r.only_melody==="boolean") sel = r.only_melody ? ["vocal"] : ["vocal","ins","chords"];
+  if(sel){
+    S.filter.voices={vocal:sel.includes("vocal"), ins:sel.includes("ins"), chords:sel.includes("chords")};
+  }
+  syncFilterChips();
+  if(S.rawAbc) applyFiltersToEditor(true);
+}
+function applyFiltersToEditor(force){
+  if(!S.rawAbc) return;
+  const text=filterAbc(S.rawAbc,S.filter);
+  $("#abcArea").value=text; committed=text;
+  $("#abcDirty").classList.remove("on"); renderScore();
+}
+$("#abcReset").onclick=()=>{ syncFilterChips(); applyFiltersToEditor(true); };
+
+let committed="", renderTimer=null;
+// abcjs 的 renderAbc 返回对象上没有 `.svg`（实测 undefined），且 responsive 模式会把
+// SVG 设成 absolute 跳出布局；这里渲染到临时节点再整体替换 innerHTML。
+function renderScore(){
+  const abc=$("#abcArea").value, body=$("#scoreBody");
+  if(!abc.trim()){ body.innerHTML='<div class="empty">请输入 ABC 记谱</div>'; return; }
+  const tmp=document.createElement("div");
+  try{
+    ABCJS.renderAbc(tmp,abc,{scale:1.0,staffwidth:640,add_classes:true,jazzchords:true,showMeter:true,paddingtop:2,paddingbottom:2});
+  }catch(e){ body.innerHTML='<div class="empty">ABC 解析失败，请检查语法</div>'; return; }
+  if(!tmp.querySelector("svg")){ body.innerHTML='<div class="empty">ABC 解析失败，请检查语法</div>'; return; }
+  body.innerHTML=tmp.innerHTML;
+  const q=(abc.match(/Q:1\/4=(\d+)/)||[])[1]||"—", m=(abc.match(/^M:(\S+)/m)||[])[1]||"—", k=(abc.match(/^K:(\S+)/m)||[])[1]||"—";
+  $("#scoreInfo").textContent=`♩=${q} · ${m} · ${k}`;
+  buildHighlightMap();
+}
+
+/* ---------- 播放高亮：播放到哪个音，谱面对应音符变色 ----------
+   映射方式是**按序号**：后端 /notes 额外返回一份「不合并连音线」的音符表
+   （highlight_notes），它的数量与 abcjs 渲染出的 .abcjs-note 元素一致
+   ——实测 32 vs 28 的差异正是连音线被画成两个音符头。
+   若两者数量对不上（换了样本、ABC 改动等），自动关闭高亮并记一条日志，
+   绝不硬套造成错位。 */
+let hlLast=-1;
+function clearHighlight(){
+  if(S.noteEls) S.noteEls.forEach(e=>e.classList.remove("playing"));
+  hlLast=-1;
+}
+function buildHighlightMap(){
+  const body=$("#scoreBody");
+  S.noteEls=[...body.querySelectorAll(".abcjs-note")];
+  const want=(S.highlightNotes||[]).length;
+  S.hlOk = S.noteEls.length>0 && want>0 && S.noteEls.length===want;
+  if(S.noteEls.length && want && !S.hlOk){
+    log(`谱面音符元素 ${S.noteEls.length} 个与高亮数据 ${want} 个不一致，已关闭高亮`,"warn");
+  }
+  clearHighlight();
+}
+function highlightAt(seconds){
+  if(!S.hlOk) return;
+  const notes=S.highlightNotes;
+  // 二分找包含当前时刻的音符
+  let lo=0, hi=notes.length-1, idx=-1;
+  while(lo<=hi){
+    const mid=(lo+hi)>>1;
+    if(seconds < notes[mid].start) hi=mid-1;
+    else if(seconds >= notes[mid].end) lo=mid+1;
+    else { idx=mid; break; }
+  }
+  if(idx===hlLast) return;
+  if(hlLast>=0 && S.noteEls[hlLast]) S.noteEls[hlLast].classList.remove("playing");
+  hlLast=idx;
+  if(idx>=0 && S.noteEls[idx]) S.noteEls[idx].classList.add("playing");
+}
+$("#abcArea").addEventListener("input",()=>$("#abcDirty").classList.toggle("on",$("#abcArea").value!==committed));
+$("#abcArea").addEventListener("blur",()=>{ clearTimeout(renderTimer);
+  if($("#abcArea").value!==committed){ committed=$("#abcArea").value; renderScore(); } });
+$("#abcSave").onclick=async()=>{
+  if(!S.taskId) return;
+  $("#abcSave").disabled=true;
+  try{
+    const r=await fetch(`/api/tasks/${S.taskId}/abc`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({abc:$("#abcArea").value,bpm:S.result?.bpm,
+        export_voices:selectedVoices(),lyrics:"la"})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||j.detail||"保存失败");
+    committed=$("#abcArea").value; $("#abcDirty").classList.remove("on");
+    const svp=(j.exports||[]).find(x=>x.kind==="svp");
+    $("#exportNote").textContent = svp?`SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符`:"已重新生成";
+    toast("已按编辑后的乐谱重新生成导出","ok");
+    log(`导出已更新：${j.exports?.length||0} 个产物；歌词来源 ${j.lyrics_source||"-"}`);
+    loadPlayback();
+  }catch(e){ toast(e.message,"err"); log("保存 ABC 失败："+e.message,"error"); }
+  refreshButtons();
+};
+
+/* 试听：Web Audio 加法合成钢琴音色（离线，不联网，不依赖音色库） */
+let actx=null, melodyNodes=[], melodyOffset=0, melodyTimer=null, melodyPlaying=false,
+    melodyBus=null, melodyStartT=0, tpSource=null, tpGain=null, tpLimiter=null,
+    pianoData=null, pianoPromise=null, tpRate=1;
+//: 试听音量再提升 8 dB（用户实测需求）
+const PIANO_BOOST = Math.pow(10, 8/20);   // ≈2.512
+
+/* 钢琴音色：多个泛音叠加 + 轻微非谐性 + 打击式包络。
+   早期版本用单个 triangle 振荡器、总增益只有 0.15，实测比原曲小一大截
+   （原曲系统音量 8 就够，试听要开到 30）。 */
+const PIANO_PARTIALS=[[1,1.0],[2,0.45],[3,0.22],[4,0.13],[5,0.08],[6,0.05],[8,0.028]];
+function pianoVoice(dest, freq, t0, dur, velocity){
+  const env=actx.createGain();
+  env.gain.value=0.0001; env.connect(dest);
+  const B=0.0004;                                  // 琴弦非谐性系数
+  for(const [n,amp] of PIANO_PARTIALS){
+    const f=freq*n*Math.sqrt(1+B*n*n);
+    if(f>18000) continue;
+    const osc=actx.createOscillator(), g=actx.createGain();
+    osc.type="sine"; osc.frequency.value=f; g.gain.value=amp;
+    osc.connect(g); g.connect(env);
+    // 高音衰减更快，模拟钢琴
+    const decay=Math.max(0.28, 1.7-(freq-160)/1500);
+    osc.start(t0); osc.stop(t0+Math.max(dur,0.12)+decay+0.1);
+    melodyNodes.push(osc);
+  }
+  const peak=0.55*velocity;
+  const relax=Math.max(dur,0.12);
+  const decayLen=Math.max(0.28, 1.7-(freq-160)/1500);
+  env.gain.setValueAtTime(0.0001,t0);
+  env.gain.exponentialRampToValueAtTime(peak,t0+0.006);      // 极短起音（琴槌）
+  env.gain.exponentialRampToValueAtTime(peak*0.35,t0+0.08);  // 初段快落
+  env.gain.exponentialRampToValueAtTime(0.0001,t0+relax+decayLen);
+}
+
+function ensureBus(){
+  if(melodyBus) return melodyBus;
+  const bus=actx.createGain();
+  bus.gain.value=Math.max(1.2,(Number($("#tpVol").value)||100)/100);
+  // 限幅，避免多音叠加时削波
+  const comp=actx.createDynamicsCompressor();
+  comp.threshold.value=-10; comp.knee.value=10; comp.ratio.value=5;
+  comp.attack.value=0.004; comp.release.value=0.18;
+  bus.connect(comp); comp.connect(actx.destination);
+  melodyBus=bus; return bus;
+}
+/** 音符集合的指纹，用于判断谱面是否真的换了。 */
+function notesSignature(notes){
+  if(!notes || !notes.length) return "empty";
+  const n=notes;
+  return `${n.length}|${n[0].start.toFixed(3)}|${n[0].pitch}|${n[n.length-1].end.toFixed(3)}`;
+}
+
+async function loadPlayback(){
+  if(!S.taskId) return;
+  try{
+    // 用「当前乐谱」解析出的音符，而不是模型原始 playback.json，
+    // 这样用户在乐谱编辑里改过 ABC 之后，试听跟着改后的谱面走。
+    // only_melody 跟着这个过滤开关：取消它时后端会把
+    // 其余声部一并返回，试听才是完整多声部，而不是永远只有主旋律。
+    // 只有「仅仅勾了人声主旋律」时才按单声部试听，否则把器乐/和弦一并放出来
+    const onlyVocal = selectedVoices().join(",")==="vocal" ? 1 : 0;
+    const r=await fetch(`/api/tasks/${S.taskId}/notes?only_melody=${onlyVocal}`);
+    if(!r.ok){ S.playback=null; return; }
+    const j=await r.json();
+    if(!j.available){ S.playback=null; S.highlightNotes=[]; resetPiano(); return; }
+    const newNotes=(j.notes||[]).slice();
+    const chords=j.chord_notes||[];
+    // 取消「仅主旋律乐谱」时把 SheetSage2 自己的和弦轨也叠上——
+    // 整合包默认放的就是 transcription.mid（人声 + 器乐 + 和弦）；
+    // 我们之前只喂 ABC 里的旋律，所以 intro 的和弦与器乐都没声音。
+    if(chords.length) newNotes.push(...chords);
+    newNotes.sort((a,b)=>a.start-b.start||a.pitch-b.pitch);
+    // 换了曲子 / 改了谱面 / 切换了声部范围 → 必须作废已渲染的钢琴音频。
+    // 不作废的话 buildPiano() 会直接返回上一首（或上一版声部）的 AudioBuffer，
+    // 表现为「换了歌/改了设置，试听还是老的」，而且进度条总长也是老的。
+    const sig=notesSignature(newNotes);
+    if(sig!==S.notesSig){ resetPiano(); S.notesSig=sig; }
+    S.playback={notes:newNotes, duration:j.duration||0};
+    S.highlightNotes=j.highlight_notes||[];
+    buildHighlightMap();
+    log(`试听就绪：${newNotes.length} 个音符` +
+        (chords.length?`（含和弦 ${chords.length}）`:"") +
+        (j.voices?.length>1?`（声部 ${j.voices.join("/")}）`:"") +
+        `（${j.lyrics_source==="filled"?"已填充歌词":"歌词为 la"}）` +
+        (S.hlOk?`，高亮 ${S.noteEls.length} 个音符`:"，高亮不可用"));
+  }catch(e){ S.playback=null; }
+}
+/* 换曲子 / 改谱面后，之前渲染好的钢琴音频必须作废 */
+function resetPiano(){
+  stopMelody();
+  pianoData=null; pianoPromise=null; melodyBus=null; tpLimiter=null;
+  melodyOffset=0; hlLast=-1;
+  $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00";
+}
+function stopMelody(){
+  if(tpSource){ try{ tpSource.onended=null; tpSource.stop(); }catch{} tpSource=null; }
+  // 断开本次播放的增益/限幅节点。不断开的话每播一次就往 destination 上挂一条链，
+  // 播得多了音频图会一直变大（实测确认过这个泄漏）。
+  if(tpGain){ try{ tpGain.disconnect(); }catch{} tpGain=null; }
+  if(tpLimiter){ try{ tpLimiter.disconnect(); }catch{} tpLimiter=null; }
+  melodyNodes.forEach(n=>{ try{ n.stop(); }catch{} }); melodyNodes=[];
+  if(melodyTimer) cancelAnimationFrame(melodyTimer); melodyTimer=null;
+  melodyPlaying=false; $("#tpPlay").textContent="▶";
+  clearHighlight();
+}
+
+/* 首选：用**内置大钢琴采样**离屏渲染出整段音频
+   （abcjs 的 ABCJS.synth + FluidR3_GM，与 SheetSage2 自带 renderer.js 同一条路径，
+     只是跑在客户端）。渲染成 AudioBuffer 后，拖动进度是瞬时的、变速靠 playbackRate。 */
+async function buildPiano(){
+  if(pianoData) return pianoData;
+  if(pianoPromise) return pianoPromise;
+  pianoPromise=(async()=>{
+    if(!(window.ABCJS && ABCJS.synth)) throw new Error("abcjs synth 不可用");
+    if(!S.playback?.notes?.length) throw new Error("没有可渲染的音符");
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    try{
+      const seq=new ABCJS.synth.SynthSequence();
+      const id=seq.addTrack();
+      seq.setInstrument(id,0);
+      for(const n of S.playback.notes){
+        seq.tracks[id].push({cmd:"note", instrument:0, pitch:n.pitch,
+          volume:Number.isFinite(n.velocity)?n.velocity:90,
+          start:n.start, duration:Math.max(0.06,n.end-n.start), gap:0});
+      }
+      seq.totalDuration=S.playback.duration;
+      const synth=new ABCJS.synth.CreateSynth();
+      const r=await synth.init({audioContext:ctx, sequence:seq, millisecondsPerMeasure:1000,
+        options:{soundFontUrl:"./vendor/soundfont/", fadeLength:35,
+                 programOffsets:{acoustic_grand_piano:0}, soundFontVolumeMultiplier:1}});
+      if(r && r.error && r.error.length) throw new Error(r.error.join(", "));
+      await synth.prime();
+      const buffer=synth.getAudioBuffer();
+      if(!buffer) throw new Error("未取得音频缓冲");
+      let peak=0;
+      for(let c=0;c<buffer.numberOfChannels;c++){
+        const d=buffer.getChannelData(c);
+        for(let i=0;i<d.length;i++){ const v=Math.abs(d[i]); if(v>peak) peak=v; }
+      }
+      pianoData={buffer, gain: peak>0?Math.min(1.0,0.95/peak):0.8};
+      $("#toneHint").textContent="可试听旋律（内置大钢琴音色）";
+      log(`钢琴音色就绪：${buffer.duration.toFixed(1)}s / ${buffer.numberOfChannels} 声道`);
+      return pianoData;
+    } finally { try{ await ctx.close(); }catch{} }
+  })().catch(e=>{ pianoPromise=null; throw e; });
+  return pianoPromise;
+}
+
+async function playWithPiano(from){
+  const data=await buildPiano();
+  actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+  await actx.resume();
+  tpRate=Number($("#tpSpeed").value)/100;
+  const vol=Math.max(0.02,(Number($("#tpVol").value)||100)/100);
+  const src=actx.createBufferSource();
+  src.buffer=data.buffer;
+  src.playbackRate.value=tpRate;
+  // 用户实测需要再大 8dB（原曲系统音量 8 够用、试听要开到 30）。
+  // 8dB ≈ ×2.512；钢琴采样已归一到峰值，直接放大必然削波，因此串一个限幅器。
+  tpGain=actx.createGain(); tpGain.gain.value=data.gain*vol*PIANO_BOOST;
+  const limiter=actx.createDynamicsCompressor();
+  limiter.threshold.value=-1.5; limiter.knee.value=0; limiter.ratio.value=20;
+  limiter.attack.value=0.002; limiter.release.value=0.12;
+  src.connect(tpGain); tpGain.connect(limiter); limiter.connect(actx.destination);
+  tpLimiter=limiter;
+  src.start(0, Math.max(0, Math.min(from, data.buffer.duration-0.01)));
+  tpSource=src; melodyStartT=actx.currentTime;
+  melodyPlaying=true; $("#tpPlay").textContent="❚❚";
+  const total=data.buffer.duration;
+  const tick=()=>{
+    if(!melodyPlaying) return;
+    const cur=melodyOffset+(actx.currentTime-melodyStartT)*tpRate;
+    const p=Math.max(0,Math.min(1,cur/total));
+    $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(cur);
+    highlightAt(cur);
+    if(cur>=total){ stopMelody(); melodyOffset=0; $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00"; return; }
+    melodyTimer=requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+/* 兜底：加法合成（音色加载失败时用，离线零依赖） */
+function playWithSynth(){
+  const rate=Number($("#tpSpeed").value)/100;
+  const base=melodyOffset;
+  const t0=actx.currentTime+0.06;
+  melodyStartT=t0;
+  const bus=ensureBus();
+  let scheduled=0;
+  S.playback.notes.forEach(n=>{
+    const ns=n.start/rate, ne=n.end/rate;
+    if(ne<=base) return;
+    const s=t0+Math.max(0,ns-base), e=t0+(ne-base);
+    if(e-s<0.02) return;
+    pianoVoice(bus, 440*Math.pow(2,(n.pitch-69)/12), s, e-s, 1.0);
+    scheduled++;
+  });
+  if(!scheduled){ toast("该位置之后没有音符","warn"); return; }
+  melodyPlaying=true; $("#tpPlay").textContent="❚❚";
+  const total=S.playback.duration/rate;
+  const tick=()=>{
+    if(!melodyPlaying) return;
+    const cur=base+(actx.currentTime-t0);
+    const p=Math.max(0,Math.min(1,cur/total));
+    $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(cur);
+    highlightAt(cur);
+    if(cur>=total){ stopMelody(); melodyOffset=0; $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00"; return; }
+    melodyTimer=requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+$("#tpPlay").onclick=async()=>{
+  if(melodyPlaying){ stopMelody(); return; }
+  if(!S.playback?.notes?.length){ toast("暂无可试听旋律","err"); return; }
+  try{ actx=actx||new (window.AudioContext||window.webkitAudioContext)(); }
+  catch(e){ $("#toneHint").textContent="当前环境不支持试听，可下载 MIDI 试听"; return; }
+  try{
+    await playWithPiano(melodyOffset||0);        // 首选真钢琴采样
+    return;
+  }catch(e){
+    log("钢琴音色不可用，改用合成音色："+e.message,"warn");
+    $("#toneHint").textContent="音色加载失败，已改用合成音色";
+  }
+  playWithSynth();
+};
+$("#tpSpeed").oninput=e=>{
+  $("#tpSpeedLabel").textContent=e.target.value+"% (BPM)";
+  if(melodyPlaying){
+    const off=melodyOffset+(actx.currentTime-melodyStartT)*tpRate;
+    stopMelody(); melodyOffset=off; $("#tpPlay").click();
+  }
+};
+$("#tpVol").oninput=e=>{
+  const v=(Number(e.target.value)||100)/100;
+  $("#tpVolLabel").textContent=e.target.value+"%";
+  // 两条播放路径的总音量都要跟着走
+  if(tpGain && pianoData) tpGain.gain.value=pianoData.gain*Math.max(0.02,v);
+  if(melodyBus) melodyBus.gain.setTargetAtTime(Math.max(1.2,v), actx.currentTime, 0.02);
+};
+$("#tpSeek").onclick=e=>{ if(!S.playback) return;
+  const r=e.currentTarget.getBoundingClientRect(); const p=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+  // 钢琴路径的总时长以渲染出的 AudioBuffer 为准
+  const total = pianoData ? pianoData.buffer.duration : S.playback.duration;
+  melodyOffset=p*total;
+  $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(melodyOffset);
+  if(melodyPlaying){ stopMelody(); $("#tpPlay").click(); } };
+
+/* 折叠 */
+$$(".fold").forEach(btn=>btn.onclick=()=>{
+  const card=document.getElementById(btn.dataset.fold);
+  const c=card.classList.toggle("collapsed");
+  btn.textContent=c?"展开 ▸":"折叠 ▾";
+});
+
+/* ============================ ④ 歌词填充 ============================ */
+/* 歌词来源是用户：拖入 .lrc / .txt、点选文件，或直接粘贴到文本框。
+   LRC 带时间戳 → 按时间对齐到音符；纯文本 → 按顺序一字一音。
+   本工具**不做歌词识别**（Qwen3-ASR 已移除）。 */
+function segValOf(sel){ const b=$(sel+" button.on"); return b ? b.dataset.v : null; }
+function bindSeg(sel){ $$(sel+" button").forEach(b=>b.onclick=()=>{
+  if(b.disabled) return;
+  $$(sel+" button").forEach(x=>x.classList.remove("on"));
+  b.classList.add("on");
+}); }
+bindSeg("#segLyrFmt"); bindSeg("#segLyrCont");
+
+async function loadLyricsTextFile(file){
+  const name=file.name||"";
+  if(!/\.(lrc|txt|text)$/i.test(name)){ toast("请拖入 .lrc 或 .txt 歌词文件","err"); return; }
+  try{
+    const text=await file.text();
+    $("#lyrText").value=text;
+    // .lrc 时自动把格式切到「按 LRC」；.txt 切到「按纯文本」
+    const want=/\.lrc$/i.test(name) ? "lrc" : "plain";
+    $$("#segLyrFmt button").forEach(x=>x.classList.toggle("on", x.dataset.v===want));
+    log(`已载入歌词文件：${name}（${text.length} 字符）`);
+    toast(`已载入 ${name}，点「填充到 SVP」应用`,"ok");
+  }catch(e){ toast("读取文件失败："+e.message,"err"); }
+}
+$("#lyrDrop").onclick=()=>$("#lyrFile").click();
+$("#lyrFile").onchange=e=>{ const f=e.target.files?.[0]; if(f) loadLyricsTextFile(f); e.target.value=""; };
+["dragenter","dragover"].forEach(ev=>$("#lyrDrop").addEventListener(ev,e=>{
+  e.preventDefault(); $("#lyrDrop").classList.add("over"); }));
+["dragleave","drop"].forEach(ev=>$("#lyrDrop").addEventListener(ev,e=>{
+  e.preventDefault(); $("#lyrDrop").classList.remove("over"); }));
+$("#lyrDrop").addEventListener("drop", e=>{
+  e.preventDefault(); $("#lyrDrop").classList.remove("over");
+  const f=e.dataTransfer?.files?.[0]; if(f) loadLyricsTextFile(f);
+});
+
+$("#lyrFill").onclick=async()=>{
+  if(!S.taskId) return;
+  const text=$("#lyrText").value||"";
+  if(!text.trim()){ toast("请先拖入或粘贴歌词","err"); return; }
+  $("#lyrFill").disabled=true;
+  try{
+    const r=await fetch(`/api/tasks/${S.taskId}/lyrics`,{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ text, format:segValOf("#segLyrFmt")||"auto",
+                            continuation:segValOf("#segLyrCont")||"auto" })});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||"填充失败");
+    const st=j.stats||{};
+    const byLrc = j.format==="lrc";
+    $("#lyrResultBox").hidden=false;
+    $("#lrcBox").textContent=j.lrc||"";
+    $("#lrcDownload").disabled=!j.lrc;
+    $("#lyrStats").textContent =
+      `${byLrc?"按 LRC 对齐":"按顺序铺"} · 命中 ${st.matched||0}/${st.notes||0}` +
+      `（${(((st.match_rate||0))*100).toFixed(1)}%）`;
+    $("#lyrState").textContent=`已填充（${byLrc?"LRC":"纯文本"}）`;
+    $("#lyrClear").disabled=false;
+    (j.warnings||[]).forEach(w=>log(w,"warn"));
+    if((j.warnings||[]).length) toast(j.warnings[0],"warn");
+    else toast("歌词已填充并写入 SVP","ok");
+    log(`歌词填充：${j.format}，命中 ${st.matched}/${st.notes}，延音符 ${st.continuation}`);
+    loadPlayback(); refreshButtons();
+  }catch(e){ toast(e.message,"err"); log("歌词填充失败："+e.message,"error"); }
+  $("#lyrFill").disabled=false;
+};
+$("#lyrClear").onclick=async()=>{
+  if(!S.taskId) return;
+  $("#lyrClear").disabled=true;
+  try{
+    const r=await fetch(`/api/tasks/${S.taskId}/lyrics`,{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({clear:true})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||"清空失败");
+    $("#lyrResultBox").hidden=true; $("#lrcBox").textContent="";
+    $("#lyrState").textContent='未填充 · 音符歌词为 “la”';
+    $("#lyrText").value="";
+    toast("已清空歌词，音符回到 la","ok");
+    loadPlayback();
+  }catch(e){ toast(e.message,"err"); }
+  refreshButtons();
+};
+async function fetchLyrics(taskId){
+  if(!taskId) return;
+  try{
+    const j=await (await fetch(`/api/tasks/${taskId}/lyrics`)).json();
+    if(!j.available) return;
+    $("#lyrText").value=j.text||j.words_text||"";
+    $("#lyrResultBox").hidden=false;
+    $("#lyrStats").textContent=`已填充 ${(j.items||[]).length} 字`;
+    $("#lyrState").textContent="已填充";
+    $("#lyrClear").disabled=false;
+    const lr=await fetch(`/api/tasks/${taskId}/lrc`);
+    if(lr.ok){
+      const t=await lr.text();
+      $("#lrcBox").textContent=t; $("#lrcDownload").disabled=!t;
+    }
+  }catch(e){ log("读取歌词失败："+e.message,"error"); }
+}
+$("#lrcDownload").onclick=()=>{ if(S.taskId) window.location=`/api/tasks/${S.taskId}/lrc`; };
+
+/* ============================ ⑤ 导出 ============================ */
+/** 点导出时**总是**按当前设置重新生成一次，再下载。
+ *
+ *  为什么是"总是"而不是"有改动才"：磁盘上的 ``export/*.svp|mid`` 是**上一次生成时**的
+ *  声部集合，而它可能与界面现在显示的状态不一致 —— 实测两种情况都踩到过：
+ *    * 跑任务时开关是勾着的 → 取消它 → 点导出 → 下到的还是单轨旧文件；
+ *    * 界面明明写着"将导出 3 轨"，下载到的却是 1 轨（因为 `task.result` 的记账
+ *      与磁盘文件已经对不上）。
+ *  重新生成一次只要一两秒，换来的是**"下载到的一定等于界面第一行说的那份"**。
+ *
+ *  返回 true 表示可以继续下载。 */
+async function regenerateExports(){
+  if(!S.taskId) return true;
+  if(!S.rawAbc) return true;      // 还没有乐谱，直接下现有的
+  if(running()) return true;      // 任务在跑，别去动产物
+
+  const exportVoices = selectedVoices();
+  try{
+    const r=await fetch(`/api/tasks/${S.taskId}/abc`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({abc:$("#abcArea").value,bpm:S.result?.bpm,
+        export_voices:exportVoices,lyrics:"la"})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||j.detail||"重新生成失败");
+    committed=$("#abcArea").value; $("#abcDirty").classList.remove("on");
+    const svp=(j.exports||[]).find(x=>x.kind==="svp");
+    const trackNames=(svp&&svp.tracks)||[];
+    if(svp) $("#exportNote").textContent=`SVP version ${svp.version} · ${trackNames.join("/")} · ${svp.notes} 音符`;
+    log(`导出前已按当前设置重新生成：${(j.exports||[]).length} 个产物，`
+        +`声部 [${trackNames.join("/")}]，export_voices=${exportVoices.join(",")}`);
+    return true;
+  }catch(e){
+    toast("重新生成失败，已取消导出："+e.message,"err");
+    log("导出前重新生成失败："+e.message,"error");
+    return false;
+  }
+}
+$("#dlSvp").onclick=async()=>{ if(!S.taskId) return;
+  if(await regenerateExports()) window.location=`/api/tasks/${S.taskId}/export/svp`; };
+$("#dlMidi").onclick=async()=>{ if(!S.taskId) return;
+  if(await regenerateExports()) window.location=`/api/tasks/${S.taskId}/export/midi`; };
+$("#openDir").onclick=async()=>{ if(!S.taskId) return;
+  try{ const r=await fetch(`/api/tasks/${S.taskId}/open-folder`,{method:"POST"}); const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||"打开失败"); toast("已打开输出文件夹","ok"); }
+  catch(e){ toast(e.message,"err"); } };
+
+/* ============================ 显存 / 启动 ============================ */
+async function pollGpu(){
+  try{
+    const g=await (await fetch("/api/gpu")).json();
+    if(g.available){
+      $("#gpuName").textContent=g.name;
+      $("#gpuUse").textContent=`已用 ${(g.used_mib/1024).toFixed(1)} / ${(g.total_mib/1024).toFixed(1)} GiB`;
+      $("#gpuBar").style.width=(g.used_ratio*100).toFixed(0)+"%";
+    } else { $("#gpuName").textContent="GPU 不可用"; $("#gpuUse").textContent=g.error||""; }
+  }catch{}
+}
+setInterval(pollGpu,3000);
+
+(async function init(){
+  pollGpu();
+  try{
+    const st=await (await fetch("/api/state")).json();
+    if(st.task) applyTask(st.task,true);
+  }catch(e){ log("读取状态失败："+e.message,"error"); }
+  connectSSE(null);
+  refreshButtons();
+  log("已连接后端");
+})();
+</script>
+</body>
+</html>

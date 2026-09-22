@@ -1,0 +1,23 @@
+# 统一换行，避免 Windows / *nix 之间来回改。
+* text=auto
+
+# .bat 必须是 CRLF：cmd.exe 解析含 LF 的批处理会出各种诡异问题。
+# 项目里的 .bat 一律保持纯 ASCII + CRLF（start.bat 顶部注释也写了这条规矩）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 这些是二进制，别让 git 做任何转换。
+*.png binary
+*.mp3 binary
+*.wav binary
+*.svp binary
+*.mid binary
+*.safetensors binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.7z binary
+
+# 让 GitHub 的语言统计别把 vendor 里的 JS 算成项目主要语言。
+web/vendor/** linguist-vendored
+packaging/licenses/** linguist-documentation

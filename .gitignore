@@ -1,0 +1,66 @@
+# ============================================================================
+#  SheetSage2 WebUI
+#
+#  对外发布的内容 = README.md + LICENSE + THIRD_PARTY_NOTICES.md
+#                 + docs/ + app/ + web/ + tools/ + _smoke/ + packaging/(非文档部分)
+#  其余全部排除。
+# ============================================================================
+
+# ---- 运行期产物（服务启动时 ensure_dirs() 会自动重建，不要提交）----
+tmp/
+output/
+settings.json
+
+# ---- 模型权重 ----
+# 两个原因都不入库：
+#   1. 许可是 CC BY-NC 4.0（仅限非商业），与本仓库的 MIT 不是一回事；
+#   2. 体积（SheetSage2 218 MB + MERT-v2-FullSong 2.4 GB）超 GitHub 单文件 100 MB 上限。
+# 用 tools/download_models.py 从 Hugging Face 现取。
+models/
+
+# ---- 本机路径覆盖表 ----
+# 开发机上模型放在项目之外的公共目录时用，可能含作者机器的绝对路径。
+# 别人克隆仓库后没有这个文件，app/config.py 会正常回落到 models/ 或环境变量。
+local_paths.json
+
+# ---- 本地 Python 环境（不可移植：pyvenv.cfg 的 home 指向创建者机器的 uv python 路径）----
+.venv/
+__pycache__/
+*.py[cod]
+
+# ---- 分发包构建产物（packaging/build_package.ps1 生成，体积以 GB 计）----
+dist/
+
+# ---- 内部开发文档：不对外发布 ----
+# 这些是开发过程的 agent 工作日志，含个人绝对路径与外部素材路径。
+# 对外文档只有 README.md / docs/使用说明.md / THIRD_PARTY_NOTICES.md。
+交接文档.md
+任务文档.md
+packaging/README-打包说明.md
+packaging/docs/
+
+# ---- 开发期证据 / 设计快照（对外用的截图已复制到 docs/images/）----
+_shot/
+sheetsage2-mockup/
+web/mockup.html
+
+# ---- 临时与调试文件 ----
+*.log
+_smoke/out/
+_smoke/asr_*.json
+_smoke/*.wav
+_smoke/_*.js
+_smoke/_*.py
+# 例外：_paths.py 是「本机资源解析」模块，必须入库（它本身不含任何机器路径）
+!_smoke/_paths.py
+
+# ---- 一次性回归脚本：指向**已改名的旧工程目录**，只在当时那台机器上跑过，现在跑不动 ----
+# 保留在本地磁盘上备用，但不进仓库（它们含绝对的旧路径，且已被后续修复覆盖）。
+_smoke/check_dup_bug.py
+_smoke/check_dup_min.py
+_smoke/check_deline2.py
+_smoke/check_deline3.py
+_smoke/check_final2.py
+_smoke/check_map_real.py
+_smoke/check_piano.py
+_smoke/check_timing.py

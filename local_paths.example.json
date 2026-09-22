@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "把本文件复制成 local_paths.json（同目录），按你机器上的实际位置改。",
+    "local_paths.json 已被 .gitignore 排除，不会进仓库。",
+    "所有键都是可选的：不配就走包内相对路径 / 环境变量 / PATH。"
+  ],
+
+  "_comment_models": "app/config.py —— 模型权重不放在 <项目根>/models 时，从这里指过去",
+  "legacy_models": "D:\\path\\to\\models",
+  "svp_reference": "D:\\path\\to\\svp_samples",
+
+  "_comment_ffmpeg": "app/config.py —— ffmpeg 不在 PATH、也不在 C:\\ffmpeg\\bin 时，指到这里（目录，不是文件）",
+  "ffmpeg_dir": "D:\\ffmpeg\\bin",
+
+  "_comment_smoke": "_smoke/*.py —— 测试脚本用的 ffmpeg 与试听音频",
+  "smoke_ffmpeg": "D:\\ffmpeg\\bin\\ffmpeg.exe",
+  "smoke_samples": "D:\\path\\to\\demo_audio",
+  "smoke_audio": "D:\\path\\to\\demo_audio\\song.mp3",
+  "smoke_song_a": "D:\\path\\to\\demo_audio\\a.mp3",
+  "smoke_song_b": "D:\\path\\to\\demo_audio\\b.mp3",
+  "smoke_extra_audio": "",
+
+  "_comment_build": "packaging/build_package.ps1 —— 出整合包时模型与 ffmpeg 的来源",
+  "build_models_source": "D:\\path\\to\\models",
+  "build_ffmpeg_source": "D:\\ffmpeg\\bin\\ffmpeg.exe"
+}
