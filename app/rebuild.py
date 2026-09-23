@@ -22,11 +22,11 @@
 from __future__ import annotations
 
 import json
-import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Sequence
 
-from app.abcp import AbcScore, notes_to_seconds, parse_abc, to_simple_notes
+from app.abcp import AbcNote, AbcScore, notes_to_seconds, parse_abc, to_simple_note_objs, to_simple_notes
 from app.lyrics import LyricWord, assign_lyrics
 from app.svpw import SvNote, build_svp, write_svp
 from app.tempo import (
@@ -38,20 +38,23 @@ from app.tempo import (
 __all__ = [
     "EXPORT_DIRNAME",
     "LYRICS_FILENAME",
+    "ROLL_FILENAME",
     "CHORD_TRACK_DISPLAY",
     "CHORD_TRACK_MIDI",
     "EXPORT_VOICE_TOKENS",
     "DEFAULT_EXPORT_VOICES",
     "voice_kind",
-    "voice_sort_key",
-    "display_name",
+    "voice_display",
     "normalize_export_voices",
     "load_measures",
     "load_lyrics_words",
-    "load_note_lyrics",
-    "save_note_lyrics",
-    "NOTE_LYRICS_FILENAME",
     "load_chord_notes",
+    "load_roll",
+    "save_roll",
+    "merge_roll_tracks",
+    "sanitize_roll_tracks",
+    "score_from_roll",
+    "select_roll_tracks",
     "rebuild_exports",
     "pick_voices",
     "monophonic_groups",
@@ -61,14 +64,6 @@ __all__ = [
 EXPORT_DIRNAME = "export"
 #: 歌词识别产物文件名（放在任务目录根部）
 LYRICS_FILENAME = "lyrics.json"
-#: **逐音手动歌词**文件名（钢琴卷帘上直接编辑的结果）。
-#:
-#: 为什么不能用 ``lyrics.json`` 那一套：那份是「带时间戳的词表」，导出时还要靠
-#: :func:`app.lyrics.assign_lyrics` 重新分配到音符上。但用户在卷帘上填的是
-#: **逐音的字面歌词**，其中还包含 ``-``（同音节延续）与 ``+``（同词下一音节）这两个
-#: **记号**——它们必须原样落到 SVP 里，绝不能被"分配"逻辑重新解释或吞掉。
-#: 所以单独存一份「按音符顺序的字面歌词表」，导出时若有就直接用。
-NOTE_LYRICS_FILENAME = "lyrics_notes.json"
 
 #: 主旋律声部候选名（小写）
 _MELODY_NAMES = {"vocal", "melody", "lead", "voice"}
@@ -100,41 +95,6 @@ def load_measures(out_dir: str | Path) -> list[dict[str, Any]]:
     except (OSError, ValueError):
         return []
     return data.get("measures") or []
-
-
-def load_note_lyrics(out_dir: str | Path) -> dict[str, list[str]]:
-    """读取钢琴卷帘上手动编辑的**逐音字面歌词**（``lyrics_notes.json``）。
-
-    形状：``{"Vocal": ["ja", "-", "ka", ...], "Ins": [...]}`` —— 按该声部
-    **音符排序后的顺序**一一对应。空/缺失/不合法一律返回 ``{}``（退回词表分配或 ``la``）。
-    """
-    p = Path(out_dir) / NOTE_LYRICS_FILENAME
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    raw = data.get("voices") if isinstance(data, dict) else None
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, list[str]] = {}
-    for voice, items in raw.items():
-        if isinstance(items, list):
-            out[str(voice)] = [str(x) if x is not None else "" for x in items]
-    return out
-
-
-def save_note_lyrics(out_dir: str | Path, lyrics: Mapping[str, Sequence[str]]) -> Path:
-    """写回逐音歌词。只保留非空声部；写失败不抛（歌词不该阻断导出）。"""
-    p = Path(out_dir) / NOTE_LYRICS_FILENAME
-    payload = {
-        "version": 1,
-        "voices": {str(k): [str(x) for x in v] for k, v in lyrics.items() if v},
-    }
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return p
 
 
 def load_lyrics_words(out_dir: str | Path) -> list[LyricWord] | None:
@@ -182,8 +142,222 @@ def load_lyrics_words(out_dir: str | Path) -> list[LyricWord] | None:
     return words
 
 
-#: 可选的导出内容，与前端 ③ 的三个勾选一一对应：
-#: 人声主旋律 / 器乐旋律 / 和弦。**勾什么导什么，完全由用户决定。**
+#: 卷帘的存档文件名（任务目录根部，与 score.abc 同级）。
+#: 它是**卷帘编辑后的唯一真相**：模型产出的 ABC 只用来做首次导入，
+#: 再次打开卷帘与重新生成导出都读它，这样卷帘上的改动不会丢。
+ROLL_FILENAME = "roll.json"
+
+
+def load_roll(out_dir: str | Path) -> dict[str, Any] | None:
+    """读取卷帘存档；不存在或坏了返回 ``None``（调用方回退到 ABC）。"""
+    p = Path(out_dir) / ROLL_FILENAME
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def merge_roll_tracks(
+    existing: Sequence[Mapping[str, Any]] | None,
+    incoming: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """按**声部名**合并卷帘轨道：来什么覆盖什么，没来的原样留着。
+
+    为什么不整体替换：``export_voices`` 会让卷帘只看到被勾选的声部。整体替换的话，
+    用户「取消勾选 → 保存 → 再勾上」就会把那条轨的音符全丢掉。
+    """
+    by_voice: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for tr in list(existing or ()) + list(incoming or ()):
+        if not isinstance(tr, Mapping):
+            continue
+        v = str(tr.get("voice") or "").strip()
+        if not v:
+            continue
+        if v not in by_voice:
+            order.append(v)
+        by_voice[v] = dict(tr)
+    return [by_voice[v] for v in order]
+
+
+def sanitize_roll_tracks(
+    tracks: Sequence[Mapping[str, Any]] | None,
+    *,
+    max_notes: int = 20000,
+) -> list[dict[str, Any]]:
+    """校验并清洗前端传来的卷帘轨道。
+
+    前端已经约束过一次（音量、网格、不重叠），但**接口不能信前端**：一个坏音符
+    （零长、负起点、越界音高）会一路走到 SVP/MIDI 写出，报出来的错会完全对不上源头。
+
+    和弦轨（``kind == "chords"``）直接跳过：它来自 ``chords.mid``，不是 ABC 声部，
+    落盘会造出一条假的旋律轨。
+
+    Raises:
+        ValueError: 有硬性非法数据时（消息可直接回给用户）。
+    """
+    out: list[dict[str, Any]] = []
+    total = 0
+    for tr in tracks or ():
+        if not isinstance(tr, Mapping):
+            continue
+        voice = str(tr.get("voice") or "").strip()
+        kind = str(tr.get("kind") or "").strip().lower()
+        if not voice or kind == "chords":
+            continue
+        if tr.get("editable") is False:
+            continue
+        notes: list[dict[str, Any]] = []
+        for n in tr.get("notes") or ():
+            if not isinstance(n, Mapping):
+                continue
+            try:
+                start = float(n["start"])
+                end = float(n["end"])
+                pitch = int(n["pitch"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("卷帘音符缺少 start/end/pitch 或不是数字")
+            if not (start >= -1e-6):
+                raise ValueError(f"音符起点为负：{start}")
+            if not (end > start):
+                raise ValueError(f"音符时长为 0 或负数：{start} → {end}")
+            if not (0 <= pitch <= 127):
+                raise ValueError(f"音高越界：{pitch}")
+            lyric = n.get("lyric")
+            notes.append({
+                "start": round(start, 6),
+                "end": round(end, 6),
+                "pitch": pitch,
+                "lyric": ("" if lyric is None else str(lyric)),
+            })
+            total += 1
+            if total > max_notes:
+                raise ValueError(f"音符数超过上限 {max_notes}")
+        out.append({
+            "voice": voice,
+            "kind": kind or "ins",
+            "display": str(tr.get("display") or voice),
+            "is_vocal": bool(tr.get("is_vocal")),
+            "editable": True,
+            "notes": notes,
+        })
+    return out
+
+
+def save_roll(
+    out_dir: str | Path,
+    tracks: Sequence[Mapping[str, Any]],
+    *,
+    source_abc: str | None = None,
+    bpm: float | None = None,
+    header: Mapping[str, Any] | None = None,
+) -> Path:
+    """把**给定的这一份完整轨道表**写成 ``roll.json``。
+
+    注意：这里**不做合并**（照写）。合并是调用方的事，因为只有它同时拿得到
+    "当前全量轨"（``roll.json`` 或 ABC 导入）与"本次上传的可见轨"——
+    见 :func:`merge_roll_tracks`。早期版本在这里从空存档起步，结果**首次保存**
+    就把没被勾选（因而不在卷帘里、也就不在上传数据里）的声部整条丢掉了。
+    """
+    out = Path(out_dir)
+    prev = load_roll(out) or {}
+    data = {
+        "version": 1,
+        "source_abc": source_abc or prev.get("source_abc"),
+        "bpm": float(bpm) if bpm else prev.get("bpm"),
+        "header": _jsonable_header(header) if header else (prev.get("header") or {}),
+        "tracks": [dict(t) for t in (tracks or ()) if isinstance(t, Mapping)],
+    }
+    path = out / ROLL_FILENAME
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def _jsonable_header(header: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``AbcScore.header`` 里的 ``meter_tuple`` 是元组，JSON 里会变数组，这里统一成列表。"""
+    out: dict[str, Any] = {}
+    for k, v in (header or {}).items():
+        out[k] = list(v) if isinstance(v, tuple) else v
+    return out
+
+
+def score_from_roll(
+    tracks: Sequence[Mapping[str, Any]],
+    *,
+    bpm: float,
+    header: Mapping[str, Any] | None = None,
+) -> AbcScore:
+    """把**卷帘的音符表**（单位秒）造成一个已定位好的 :class:`AbcScore`。
+
+    为什么造 ``AbcScore`` 而不是"把音符序列化回 ABC 文本再解析一遍"：
+    ABC 的时值是分数记号，绝对位置靠小节与累计时值推出来。要把任意秒数写回去，
+    得处理连音线、休止填充、小节对齐，任何一处近似都会让导出的时间整体偏移。
+    这里直接把秒塞进 ``start``，走的是**同一条导出管线**（和弦轨、复音拆轨、
+    八度、速度表全都不变），只是不走有损的文本往返。
+
+    ``lyrics_per_note=True``：歌词是逐音录的，导出时不能被 LRC 分配逻辑覆盖。
+    """
+    score = AbcScore(header=dict(header or {}))
+    score.header.setdefault("q", float(bpm))
+    score.header.setdefault("meter", "4/4")
+    score.header.setdefault("meter_tuple", (4, 4))
+
+    for tr in tracks or ():
+        if not isinstance(tr, Mapping):
+            continue
+        voice = str(tr.get("voice") or "").strip()
+        if not voice:
+            continue
+        if voice not in score.voices:
+            score.voices.append(voice)
+        for n in tr.get("notes") or ():
+            try:
+                start = float(n["start"])
+                end = float(n["end"])
+                pitch = int(n["pitch"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            note = AbcNote(
+                voice=voice,
+                onset=0.0,      # 卷帘路径不用记谱位置，位置只有秒
+                duration=0.0,
+                pitch=pitch,
+                lyric=(str(n["lyric"]) if n.get("lyric") else None),
+            )
+            note.start = start
+            # ``_dur_sec`` 是本项目既有约定（notes_to_seconds 也写这个私有属性），
+            # AbcNote.duration_seconds 读它。
+            note._dur_sec = end - start
+            score.notes.append(note)
+
+    score.lyrics_per_note = True
+    return score
+
+
+def select_roll_tracks(
+    tracks: Sequence[Mapping[str, Any]],
+    export_voices: Sequence[str],
+) -> list[dict[str, Any]]:
+    """按「导出哪些内容」挑出卷帘轨道（和弦轨不属于这里，见 ``load_chord_notes``）。"""
+    wanted = {str(t).strip().lower() for t in export_voices}
+    out: list[dict[str, Any]] = []
+    for tr in tracks or ():
+        if not isinstance(tr, Mapping):
+            continue
+        kind = str(tr.get("kind") or "").strip().lower()
+        if kind == "chords":
+            continue
+        if voice_kind(str(tr.get("voice") or "")) in wanted or kind in wanted:
+            out.append(dict(tr))
+    return out
+
+
+#: 可选的导出内容，与前端 ③ 的三个勾选一一对应：#: 人声主旋律 / 器乐旋律 / 和弦。**勾什么导什么，完全由用户决定。**
 EXPORT_VOICE_TOKENS = ("vocal", "ins", "chords")
 
 #: 默认只勾"人声主旋律"（用户 2026-09-15 定的默认）
@@ -195,27 +369,10 @@ _VOICE_KIND = {
     "ins": "ins", "instrumental": "ins", "accompaniment": "ins",
 }
 
-#: 拆复音轨产生的序号后缀（``Vocal2`` / ``Ins3``）。
-#: 不剥掉它，``pick_voices()`` 会把这些轨当成"认不出的声部"**整条丢掉** ——
-#: 用户在钢琴卷帘上拖出一个重叠、保存后那一轨就凭空消失，属于最难查的一类 bug。
-_VOICE_SUFFIX_RE = re.compile(r"^(.*?)(\d+)$")
-
-#: 轨道的规范顺序：人声 → 器乐 → 和弦（与界面上三个勾选的顺序一致）。
-#: 由 :func:`voice_sort_key` 使用，理由见那里的注释。
-_VOICE_ORDER = {t: i for i, t in enumerate(EXPORT_VOICE_TOKENS)}
-
 
 def voice_kind(name: str) -> str | None:
-    """把一个 ABC 声部名归到 ``vocal`` / ``ins``，认不出来返回 ``None``。
-
-    ``Vocal2`` / ``Ins3`` 这类带序号的名字按**前缀**归类。
-    """
-    raw = (name or "").strip().lower()
-    hit = _VOICE_KIND.get(raw)
-    if hit:
-        return hit
-    m = _VOICE_SUFFIX_RE.match(raw)
-    return _VOICE_KIND.get(m.group(1)) if m else None
+    """把一个 ABC 声部名归到 ``vocal`` / ``ins``，认不出来返回 ``None``。"""
+    return _VOICE_KIND.get((name or "").strip().lower())
 
 
 def normalize_export_voices(
@@ -239,52 +396,27 @@ def normalize_export_voices(
     return ["vocal"] if only_melody else list(EXPORT_VOICE_TOKENS)
 
 
-def voice_sort_key(name: str) -> tuple[int, str]:
-    """轨道的**规范排序键**：人声 → 器乐 → 和弦。
-
-    为什么不按 ABC 里 ``V:`` 的声明顺序：那个顺序**不稳定**。编辑稿
-    （``score.edited.abc`` / ``export/<歌名>.abc``）的声部顺序来自上一轮前端提交的
-    顺序，而模型原始稿（``score.abc``）是模型自己写的；同一个任务在不同时刻导出，
-    可能落到不同的 ABC 文件上，于是**同一份内容两次导出的轨道顺序会不一样**。
-    实测踩到过：`['主人声','器乐旋律']` 变成 `['器乐旋律','主人声']`。
-
-    排序只看"是哪一类"，同类的按名字排（``Vocal`` 在 ``Vocal2`` 前），
-    所以 ``主人声 → 器乐旋律1 → 器乐旋律2 → 和弦1…`` 是稳定的。
-    """
-    kind = voice_kind(name)
-    return (_VOICE_ORDER.get(kind, len(_VOICE_ORDER)), str(name))
-
-
 def pick_voices(score: AbcScore, export_voices: Sequence[str]) -> list[str]:
-    """按「要导出哪些内容」从 ABC 里挑出声部，返回**规范顺序**（见 :func:`voice_sort_key`）。"""
+    """按「要导出哪些内容」从 ABC 里挑出声部（保持 ABC 里的声明顺序）。"""
     wanted = {str(t).strip().lower() for t in export_voices}
     available = list(score.voices)
     if not available:
         available = sorted({n.voice for n in score.notes})
     picked = [v for v in available if voice_kind(v) in wanted]
-    picked.sort(key=voice_sort_key)
     return picked
 
 
 def _display_name(voice: str) -> str:
-    """ABC 声部名 → 界面/轨道显示名。
+    return _DISPLAY.get(voice.strip().lower(), voice)
 
-    ``Vocal2`` 这类带序号的，前缀照常映射、序号保留 → ``主人声2``：
-    用户在卷帘上拆出来的轨，在导出的轨道列表里也要认得出是第几条。
+
+def voice_display(voice: str) -> str:
+    """声部名的中文显示名（``Vocal`` → ``主人声``）。
+
+    公开给卷帘用：轨标签必须与导出时写进 SVP 的轨名一致，否则用户在卷帘上看到的
+    「轨」和导出后在 Synthesizer V 里看到的「轨」会对不上号。
     """
-    raw = (voice or "").strip()
-    low = raw.lower()
-    if low in _DISPLAY:
-        return _DISPLAY[low]
-    m = _VOICE_SUFFIX_RE.match(low)
-    if m and m.group(1) in _DISPLAY:
-        return _DISPLAY[m.group(1)] + m.group(2)
-    return raw
-
-
-#: 公开别名：``/notes`` 要把「ABC 声部名 → 界面显示名」的映射给钢琴卷帘用，
-#: 免得前端自己再维护一份、跟导出轨道名对不上。
-display_name = _display_name
+    return _display_name(voice)
 
 
 def _midi_safe(name: str) -> str:
@@ -555,7 +687,7 @@ def write_midi(
 
 def rebuild_exports(
     out_dir: str | Path,
-    abc_text: str,
+    abc_text: str = "",
     *,
     bpm: float | None = None,
     export_voices: Sequence[str] | None = None,
@@ -563,62 +695,53 @@ def rebuild_exports(
     lyrics: str = "la",
     project_name: str | None = None,
     measures: Sequence[dict[str, Any]] | None = None,
-    write_abc: bool = True,
     lyrics_words: Sequence[LyricWord] | None = None,
     use_stored_lyrics: bool = True,
-    note_lyrics: Mapping[str, Sequence[str]] | None = None,
-    use_stored_note_lyrics: bool = True,
     continuation: str = "auto",
     extra_tracks: Sequence[tuple[str, Sequence[Sequence[float]]]] | None = None,
+    score: AbcScore | None = None,
 ) -> dict[str, Any]:
-    """由 ABC 文本重建 ``export/`` 下的 SVP 与 MIDI。
-
-    歌词处理
-    --------
-    三级优先：
-
-    1. **逐音手动歌词**（``lyrics_notes.json``，来自钢琴卷帘的逐音编辑）——
-       字面采用，``-`` / ``+`` 记号原样进 SVP；
-    2. **词表分配**（``lyrics.json`` 的带时间戳词）—— 导出时对**当前音符**重新分配。
-       这样用户在卷帘上改动音符、音符集合变化后，歌词不会错位；
-    3. 统一占位 ``la``。
-
-    词表分配只作用于**人声主旋律**，器乐旋律与和弦保持占位。
+    """由 ABC 文本（或一份已定位好的乐谱）重建 ``export/`` 下的 SVP 与 MIDI。
 
     Args:
-        lyrics: 无法匹配时（或没有歌词时）使用的统一占位歌词。
-        lyrics_words: 直接给出词表；``None`` 时按 ``use_stored_lyrics`` 决定是否
-            从 ``<out_dir>/lyrics.json`` 读取。
-        note_lyrics: 逐音字面歌词 ``{声部: [歌词, ...]}``，按该声部音符顺序一一对应；
-            ``None`` 时按 ``use_stored_note_lyrics`` 决定是否从
-            ``<out_dir>/lyrics_notes.json`` 读取。
+        score: **已经带秒级时间**的乐谱（卷帘路径，见 :func:`score_from_roll`）。
+            给了它就不再解析 ``abc_text``、也不再跑 ``notes_to_seconds`` ——
+            那些音符的 ``start`` 已经是秒，再换算一次会把时间算错。
+            此时歌词按 ``AbcNote.lyric`` **逐音**取用（``lyrics_per_note``），
+            不再走 LRC/占位词分配。
 
-    Returns:
-        结果摘要，含产物路径、音符数、歌词分配统计与诊断信息。
+    歌词处理（ABC 路径）
+    --------------------
+    歌词以**带时间戳的词**（``lyrics.json``）存储，在导出时才对**当前音符**做分配。
+    这样音符集合变化后歌词不会错位——分配永远基于本次真实的音符。
     """
     out = Path(out_dir)
     export_dir = out / EXPORT_DIRNAME
     export_dir.mkdir(parents=True, exist_ok=True)
     project = project_name or out.name
 
-    # 「导出哪些内容」完全由用户决定（③ 的三个人声主旋律/器乐旋律/和弦勾选）
+    # 「导出哪些内容」完全由用户决定（③ 的人声主旋律/器乐旋律/和弦勾选）
     sel = normalize_export_voices(export_voices, only_melody)
-    # 和弦轨来自 chords.mid，**不是 ABC 声部**，所以「只勾和弦」时 ABC 会是空的，
-    # 但导出仍然要能成立 —— 提前取好，别让下面「ABC 没有音符」的早返回拦掉。
+    # 和弦轨来自 chords.mid，**不是 ABC 声部**，所以「只勾和弦」时乐谱会是空的，
+    # 但导出仍然要能成立 —— 提前取好，别让下面「没有音符」的早返回拦掉。
     chord_notes = load_chord_notes(out) if "chords" in sel else []
-
-    score = parse_abc(abc_text or "")
-    if not score.notes and not chord_notes:
-        return {"ok": False, "error": "ABC 中没有解析到任何音符", "exports": []}
-
     table = list(measures) if measures is not None else load_measures(out)
+
+    pre_timed = score is not None
+    if score is None:
+        score = parse_abc(abc_text or "")
+    if not score.notes and not chord_notes:
+        return {"ok": False, "error": "乐谱中没有解析到任何音符", "exports": []}
+
     tempo = float(bpm or score.bpm or 120.0)
     # 速度表：变速曲（如 110→75→110）必须靠它才能让 SVP/MIDI 的小节网格正确。
     # 原料就是那份小节表；单速度时会退化成一条，行为与旧的单一 bpm 一致。
     tempo_map = derive_tempo_map(table) if table else []
     if not tempo_map:
         tempo_map = [{"t": 0.0, "bpm": tempo}]
-    warnings = notes_to_seconds(score.notes, bpm=tempo, measures=table)
+    warnings: list[str] = []
+    if not pre_timed:
+        warnings = list(notes_to_seconds(score.notes, bpm=tempo, measures=table))
 
     voices = pick_voices(score, sel)
     exports: list[dict[str, Any]] = []
@@ -642,44 +765,38 @@ def rebuild_exports(
         else:
             voices = []
 
-    # ---- 歌词：逐音手动歌词 > 词表分配 > 统一占位（三级优先）----
-    # 手动歌词来自钢琴卷帘：它是**字面歌词**，里面的 - 与 + 是记号，必须原样进 SVP，
-    # 所以命中时直接采用，绝不交给 assign_lyrics 再解释一遍。
+    # ---- 歌词：卷帘路径逐音自带；ABC 路径按识别结果分配，否则统一占位 ----
     words = lyrics_words
     if words is None and use_stored_lyrics:
         words = load_lyrics_words(out)
-    manual = note_lyrics
-    if manual is None and use_stored_note_lyrics:
-        manual = load_note_lyrics(out)
     lyric_stats: dict[str, Any] = {}
-    lyrics_source = "recognized" if words else "fallback"
-
-    # 词表分配只对**人声主旋律**做（与 /notes 的既有语义一致）：
-    # 器乐旋律与和弦保持占位。让器乐把歌词吃掉没有意义，用户也明确说这两条豁免。
-    def _is_melody_voice(v: str) -> bool:
-        return voice_kind(v) == "vocal"
+    lyrics_source = "per_note" if pre_timed else ("recognized" if words else "fallback")
 
     for voice in voices:
-        simple = to_simple_notes(score.notes, voice=voice)
-        if not simple:
+        objs = to_simple_note_objs(score.notes, voice=voice)
+        if not objs:
             continue
+        simple = [(n.start, n.start + n.duration_seconds, n.pitch) for n in objs]
         display = _display_name(voice)
-        lines = list(manual.get(voice) or []) if manual else []
-        if lines and len(lines) == len(simple):
-            # 长度对得上才用：对不上说明存的是上一版谱面的歌词，宁可不猜
-            texts = lines
-            lyrics_source = "manual"
-        elif words and _is_melody_voice(voice):
-            texts, lyric_stats = assign_lyrics(
-                words, [(s, e) for s, e, _ in simple],
-                fallback=lyrics, continuation=continuation,
+        if pre_timed or getattr(score, "lyrics_per_note", False):
+            # 卷帘路径：歌词是逐音录入的，**直接用**。
+            # 不能落到 assign_lyrics：那是按时间窗对齐的，会把用户逐音填好的词冲掉。
+            note_lyrics = [(o.lyric if o.lyric else lyrics) for o in objs]
+            lyric_stats = {
+                "source": "per_note",
+                "notes": len(objs),
+                "filled": sum(1 for o in objs if o.lyric),
+            }
+        elif words:
+            note_lyrics, lyric_stats = assign_lyrics(
+                words, [(s, e) for s, e, _ in simple], fallback=lyrics, continuation=continuation
             )
         else:
-            texts = [lyrics] * len(simple)
+            note_lyrics = [lyrics] * len(objs)
         svp_tracks.append(
             (
                 display,
-                [SvNote(s, e, p, ly) for (s, e, p), ly in zip(simple, texts)],
+                [SvNote(s, e, p, ly) for (s, e, p), ly in zip(simple, note_lyrics)],
             )
         )
         # MIDI 轨道名走 Latin-1，用 ABC 里的 ASCII 声部名（Vocal/Ins），不要中文
@@ -793,19 +910,9 @@ def rebuild_exports(
     else:
         warnings.append("MIDI 写出不可用（pretty_midi 缺失或没有音符）")
 
-    # ---- 回写编辑后的 ABC，便于留档与复现 ----
-    if write_abc:
-        abc_path = export_dir / f"{project}.abc"
-        abc_path.write_text(abc_text, encoding="utf-8")
-        exports.append(
-            {
-                "kind": "abc",
-                "path": str(abc_path),
-                "rel": f"{EXPORT_DIRNAME}/{abc_path.name}",
-                "lines": len([l for l in abc_text.splitlines() if l.strip()]),
-            }
-        )
-
+    # 不再产出 ABC 文件：ABC 只是模型的输出格式与内部导入格式，用户侧的可编辑真相是
+    # roll.json（见 save_roll），③ 也不再提供 ABC 下载。留着 export/<歌名>.abc 只会
+    # 让用户以为它是个可交付产物。
     return {
         "ok": True,
         "bpm": tempo,

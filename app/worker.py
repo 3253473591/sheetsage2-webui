@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import shutil
 import sys
@@ -136,6 +137,40 @@ def pick_device(requested: str, requested_dtype: str) -> tuple[str, str, str]:
         note = (note + "；" if note else "") + "CPU 上 bf16 无加速，已改用 fp32"
 
     return device, dtype, note
+
+
+#: `is_gpu_failure` 用到的错误特征（按小写匹配）。只列**设备侧**的失败。
+_GPU_FAILURE_HINTS = (
+    "cuda", "no kernel image", "device-side assert", "cublas", "cudnn",
+    "cufft", "out of memory", "nvidia", "nvml", "driver",
+)
+
+
+def is_gpu_failure(exc: BaseException) -> bool:
+    """该异常是否表示「这台机器的 GPU 这条路走不通」。
+
+    为什么需要单独判一次：**GPU 能不能用，光看 ``torch.cuda.is_available()``
+    是判断不出来的**。以整合包默认的 cu130 wheel 为例，它只编译了 Turing 及以上；
+    插着更老的卡时 ``is_available()`` 仍是 True，加载权重也正常（``.to(device)``
+    不执行 kernel），要等**第一颗 kernel 真正执行**才抛
+    ``no kernel image is available for execution on the device``。
+    显存不足同理：通常炸在推理中途，而不是加载权重时。
+
+    只对这类错误退回 CPU 重跑。代码/数据的逻辑错误（例如 overlap 前缀塞满上下文）
+    在 CPU 上一样会失败，重跑只会白白再等一遍。
+    """
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 - torch 都没了，那就不是 GPU 的问题
+        return False
+
+    if isinstance(exc, getattr(torch.cuda, "OutOfMemoryError", ())):
+        return True
+    if type(exc).__name__ in ("OutOfMemoryError", "AcceleratorError", "CudaError"):
+        return True
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _GPU_FAILURE_HINTS)
 
 
 def load_model(device: str, on_stage):
@@ -327,7 +362,51 @@ def run(argv: list[str] | None = None) -> int:
         if args.lookahead is not None:
             options["lookahead_seconds"] = float(args.lookahead)
 
-        result = model.transcribe(str(audio), **options)
+        try:
+            result = model.transcribe(str(audio), **options)
+        except Exception as exc:  # noqa: BLE001
+            # 关键兜底：GPU 的失败点通常在**推理中途**——算力不在这份 torch 的 arch
+            # 列表里、显存不够、驱动 / cuBLAS 起不来——而不是加载权重的时候。
+            # 上面那个 try 只包住 load_model，救不了这一类；再往外一层只会上报失败。
+            # 所以识别也必须纳入兜底：换 CPU 重新加载模型，整段重跑一遍。
+            if device != "cuda" or not is_gpu_failure(exc):
+                raise
+            device, dtype = "cpu", "fp32"
+            options["dtype"] = dtype  # 必须同步：transcribe 用的是 options 里的精度
+            device_note = (
+                f"GPU 推理失败（{type(exc).__name__}: {exc}）"[:200]
+                + "，已自动改用 CPU 重新加载并重跑"
+            )
+            mark(
+                "识别音乐",
+                _stage_percent("识别音乐", 0.0),
+                "GPU 推理失败，改用 CPU 重新加载并重跑…",
+                detail=device_note,
+            )
+
+            def on_reload(phase: str) -> None:
+                # 重跑仍挂在「识别音乐」阶段。若沿用上面的 on_load，进度会从
+                # 「识别音乐」倒回「加载模型」，破坏文档规定的阶段顺序。
+                if phase == "done":
+                    return
+                mark(
+                    "识别音乐",
+                    _stage_percent("识别音乐", 0.0),
+                    "正在用 CPU 重新加载模型…",
+                    detail=f"cpu · fp32（{device_note}）",
+                )
+
+            model = None  # 先松开 CUDA 上的权重，再重新装 CPU 版
+            gc.collect()
+            try:
+                import torch as _torch
+
+                _torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001 - 清理失败不影响重试
+                pass
+
+            model = load_model(device, on_reload)
+            result = model.transcribe(str(audio), **options)
         recognize_seconds = time.time() - recognize_started
         mark("识别音乐", _stage_percent("识别音乐", 1.0), "识别完成")
 
@@ -408,8 +487,10 @@ def run(argv: list[str] | None = None) -> int:
 
         mark("生成乐谱", _stage_percent("生成乐谱", 0.9), "写出导出产物…")
 
-        # ---- 统一导出目录 export/：始终由 ABC 生成，保证与「乐谱编辑」改后一致 ----
-        # 用户可在页面上改 ABC，改后重新调用同一函数即可，产物命名与路径保持稳定。
+        # ---- 统一导出目录 export/：本次推理的**初始**产物 ----
+        # 之后用户在 ③ 钢琴卷帘上的改动走 POST /roll（roll.json → 同一个 rebuild_exports），
+        # 所以这里的产物会在用户第一次保存卷帘时被覆盖成编辑后的版本。
+        # 不再产出 .abc：ABC 只是模型的输出格式，用户侧的可编辑真相是 roll.json。
         from app.rebuild import rebuild_exports
 
         export_info = rebuild_exports(

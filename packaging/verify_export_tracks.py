@@ -2,26 +2,32 @@
 
 背景（实测踩过的坑）
 --------------------
-磁盘上的 ``export/*.svp|mid`` 是**上一次生成时**的声部集合。以前 ⑥ 的导出按钮是
+磁盘上的 ``export/*.svp|mid`` 是**上一次生成时**的声部集合。以前点导出是
 直接 ``window.location`` 下载，所以：
 
-1. 提交任务时只要了主旋律（当年的 ②「仅主旋律乐谱」，= ``only_melody=True``）
+1. 提交任务时只要了主旋律（``only_melody=True``，现在是 ``export_voices=["vocal"]``）
    → 任务产物只有 1 轨（主人声）；
-2. 用户跑完才改主意 → 编辑器被重写成原始 ABC（含 ``V: Ins``）；
+2. 用户跑完才改主意，把「导出内容」里另外两个勾上；
 3. 此时直接点「导出 SVP」→ 下到的**还是那个单轨旧文件**。
 
-现在前端（2026-09-15 第三轮起）**每次点导出都无条件先 POST
-``/api/tasks/{id}/abc`` 重新生成再下载**（`regenerateExports()`），
-不再依赖"检测到改动才重生成"，所以那条漏网路径已经堵死。
-本脚本就是复现这条完整链路 —— **不点浏览器，直接打那两个接口**，模拟前端的行为。
+现在前端每次点导出都**无条件先 POST ``/api/tasks/{id}/roll`` 重新生成再下载**
+（③ 的「保存并重新生成导出」走的就是这个接口），不再依赖"检测到改动才重生成"，
+所以那条漏网路径已经堵死。本脚本复现完整链路 —— **不点浏览器，直接打接口**。
 
-注意：**新前端发的是 ``export_voices: [...]``**；本脚本仍用老的 ``only_melody``
-布尔，走的是 ``normalize_export_voices()`` 的兼容路径（仍然有效，故意留着当回归）。
-要验新参数的完整链路，跑 ``_smoke\\check_export_consistency.py``（真点浏览器）。
+接口契约（2026-09 卷帘版）::
+
+    GET  /api/tasks/{id}/roll?export_voices=vocal,ins,chords
+         → {tracks: [{voice, kind, display, editable, notes:[{start,end,pitch,lyric}]}], bpm, ...}
+    POST /api/tasks/{id}/roll  {tracks: <上面拿到的>, export_voices: [...], bpm: ...}
+         → {ok, exports: [{kind: "svp", tracks: [...]}, ...]}
+
+⚠️ **老版本这里打的是 ``POST /api/tasks/{id}/abc``**（ABC 文本路径：把
+   ``score.abc`` 原样回传 + ``only_melody=False``）。那条路径随 ABC 编辑器一起
+   删掉了，服务端现在只有卷帘这一个入口 —— 断言保留，接口换掉。
 
 用法::
 
-    python packaging\\verify_export_tracks.py --pkg "dist\\full" --audio "<一首 flac/mp3>"
+    python packaging\\verify_export_tracks.py --pkg "dist\\1.0" --audio "<一首 flac/mp3>"
 """
 
 from __future__ import annotations
@@ -137,7 +143,7 @@ def main() -> int:
         token = json.loads(raw.decode())["token"]
         log(f"[2/5] 上传完成 token={token[:12]}…")
 
-        # ---- 关键：**只用主旋律**提交（复现用户那次操作）----
+        # ---- 关键：**只勾人声主旋律**提交（复现用户那次操作）----
         status, body = http_json("POST", f"{base}/api/tasks", {
             "token": token, "preset": "default", "device": "auto",
             "only_melody": True, "max_seconds": args.max_seconds, "lyrics": "la",
@@ -160,39 +166,49 @@ def main() -> int:
         out_dir = Path(task["out_dir"])
         log(f"[4/5] 扒谱完成：{out_dir.name}")
 
-        # ---- 断言 1：默认（② 勾着）导出只有 1 轨 ----
+        # ---- 断言 1：只勾人声导出只有 1 轨 ----
         status, data = http("GET", f"{base}/api/tasks/{task_id}/export/svp")
         if status != 200:
             raise RuntimeError(f"下载 SVP 失败 HTTP {status}")
         before = svp_track_names(data)
         log(f"      导出 SVP 轨道 = {before}")
         if len(before) != 1:
-            failures.append(f"② 勾着时本该 1 轨，实际 {len(before)} 轨：{before}")
+            failures.append(f"只勾人声时本该 1 轨，实际 {len(before)} 轨：{before}")
 
-        # ---- 关键动作：**完全照前端 regenerateIfDirty() 的做法** ----
-        # 前端此时 POST 的是编辑器内容；取消 ② 后编辑器就是**原始 ABC**。
-        raw_abc = (out_dir / "score.abc").read_text(encoding="utf-8")
-        if "V: Ins" not in raw_abc:
-            failures.append("原始 score.abc 里没有 V: Ins，这个样本无法验证多轨")
-        status, result = http_json("POST", f"{base}/api/tasks/{task_id}/abc", {
-            "abc": raw_abc, "bpm": task.get("result", {}).get("bpm"),
-            "only_melody": False, "lyrics": "la",
+        # ---- 关键动作：照前端「切勾选 → 读卷帘 → 保存并重新生成」的做法 ----
+        # 读卷帘时必须**带上三个声部**，否则拿不到被过滤掉的 Ins ——
+        # 这一步等价于老脚本"把原始 score.abc 读出来"。
+        status, roll = http_json(
+            "GET", f"{base}/api/tasks/{task_id}/roll?export_voices=vocal,ins,chords")
+        if status != 200:
+            raise RuntimeError(
+                f"读取卷帘失败 HTTP {status}: {json.dumps(roll, ensure_ascii=False)[:400]}")
+        roll_tracks = roll.get("tracks") or []
+        voices = [t.get("voice") for t in roll_tracks]
+        log(f"      卷帘里的声部 = {voices}")
+        if not any(str(v).strip().lower() in ("ins", "instrumental", "accompaniment")
+                   for v in voices):
+            failures.append(f"卷帘里没有器乐声部，这个样本无法验证多轨：{voices}")
+
+        status, result = http_json("POST", f"{base}/api/tasks/{task_id}/roll", {
+            "tracks": roll_tracks, "bpm": roll.get("bpm"),
+            "export_voices": ["vocal", "ins", "chords"],
         })
         if status != 200:
             raise RuntimeError(f"重新生成失败 HTTP {status}: {json.dumps(result, ensure_ascii=False)[:400]}")
         tracks = next((e.get("tracks") for e in result.get("exports") or []
                        if e.get("kind") == "svp"), None)
-        log(f"[5/5] 取消 ② 后重新生成 → {tracks}")
+        log(f"[5/5] 切到三个勾选后重新生成 → {tracks}")
 
         # ---- 断言 2：重新生成后应该多轨 ----
         status, data = http("GET", f"{base}/api/tasks/{task_id}/export/svp")
         after = svp_track_names(data)
         log(f"      再次下载的 SVP 轨道 = {after}")
         if len(after) < 2:
-            failures.append(f"取消 ② 重新生成后仍只有 {len(after)} 轨：{after} —— "
+            failures.append(f"切到三个勾选重新生成后仍只有 {len(after)} 轨：{after} —— "
                             f"「导出即重新生成」没生效")
         if "器乐旋律" not in after:
-            failures.append(f"器乐旋律轨没出来：{after}（多半是喂了已过滤的 ABC）")
+            failures.append(f"器乐旋律轨没出来：{after}（多半是卷帘里没读到 Ins 声部）")
         # ⚠️ 2026-09-15 第三轮起（交接文档 §24.4）复音轨默认按「同轨不重叠」拆成
         #    和弦1/和弦2…，所以这里必须按**前缀**判断；写死 `"和弦" in after`
         #    会在功能完全正常时误报 FAIL（实际踩到过：轨道名明明是

@@ -21,7 +21,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -45,11 +45,18 @@ _VENDOR_DIR = config.WEB_DIR / "vendor"
 if _VENDOR_DIR.is_dir():
     app.mount("/vendor", StaticFiles(directory=str(_VENDOR_DIR)), name="vendor")
 
-# 本项目**自己的**前端脚本（钢琴卷帘等）。刻意不放 /vendor —— 那里是第三方库，
-# 混进去会让"哪些是我们写的、哪些是别人的、许可怎么算"变得含混。
-# 不挂载的话页面请求 /assets/pianoroll.js 会 404，③ 的卷帘整个挂不上。
-if config.WEB_DIR.is_dir():
-    app.mount("/assets", StaticFiles(directory=str(config.WEB_DIR)), name="assets")
+
+@app.get("/pianoroll.js")
+def pianoroll_js() -> FileResponse:
+    """钢琴卷帘组件（独立文件，无构建步骤）。
+
+    单独一条路由而不是把整个 ``web/`` 挂成 StaticFiles：后者会和 ``/``（index.html）
+    以及 ``/vendor`` 的现有映射打架，而这里只多一个文件，没必要动那两处。
+    """
+    path = config.WEB_DIR / "pianoroll.js"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="pianoroll.js 不存在")
+    return FileResponse(path, media_type="text/javascript; charset=utf-8")
 
 #: 已上传文件登记表：token → {"path": Path, "name": 原始文件名}。
 #: 进程重启会丢，但磁盘上的 ``<token>.name`` 边车文件能让我们重建它。
@@ -494,18 +501,293 @@ def download_artifact(task_id: str, rel: str) -> FileResponse:
 
 
 # --------------------------------------------------------------------------
-# 乐谱编辑：保存改后的 ABC 并重建 SVP / MIDI
+# 钢琴卷帘：保存卷帘的音符表并重建 SVP / MIDI
 # --------------------------------------------------------------------------
-_EXPORT_KINDS = {"svp": ".svp", "midi": ".mid", "abc": ".abc"}
+#: 可下载的导出产物。``abc`` 已随 ③ 的 ABC 编辑器一起删除：卷帘的真相是 roll.json，
+#: 不再产出 ABC 文件（ABC 只是模型输出、内部导入用的中间格式）。
+_EXPORT_KINDS = {"svp": ".svp", "midi": ".mid"}
 
 
-@app.post("/api/tasks/{task_id}/abc")
-def update_abc(task_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
-    """保存用户编辑后的 ABC，并据此重建 ``export/`` 下的 SVP 与 MIDI。
+def _roll_source_abc(task: Any) -> Path | None:
+    """卷帘的**导入来源** ABC。
 
-    对应已定裁决：**编辑后导出也用编辑结果**。
+    ⚠️ 顺序是**先全量、后过滤**，这一点踩过坑：
+
+    * ``score.abc`` —— 模型的全量输出（Vocal + Ins + …）。
+    * ``score.melody.abc`` —— 推理时按**当时勾选**过滤过的版本。默认只勾人声主旋律，
+      所以这个文件里通常**只有 Vocal**；``export/<歌名>.abc`` 同理（老版本还会被手改）。
+    * ``export/<歌名>.abc`` —— 老版本「乐谱编辑」保存的版本，兜底。
+
+    先读 ``score.melody.abc`` 会导致**器乐声部凭空消失**：模型明明给了 ``V.Ins``，
+    卷帘里却永远只有 1 条轨，把「人声主旋律」取消勾选就变成"所选内容没有可用音符"。
+    声部过滤现在是**卷帘自己的事**（那三个勾选），导入来源必须是全量的。
     """
-    from app.rebuild import rebuild_exports
+    root = Path(task.out_dir)
+    for p in (
+        root / "score.abc",
+        root / "score.melody.abc",
+        root / "export" / f"{task.audio.stem}.abc",
+    ):
+        if p.is_file():
+            return p
+    return None
+
+
+def _tracks_from_score(score: Any, root: Path) -> list[dict[str, Any]]:
+    """把一份已换算到秒的 ``AbcScore`` 拆成卷帘轨道（每个声部一条）。"""
+    from app.abcp import to_simple_notes
+    from app.rebuild import voice_display, voice_kind
+
+    tracks: list[dict[str, Any]] = []
+    for voice in score.voices:
+        simple = to_simple_notes(score.notes, voice=voice)
+        if not simple:
+            continue
+        kind = voice_kind(voice) or "ins"
+        tracks.append({
+            "voice": voice,
+            "kind": kind,
+            "display": voice_display(voice),
+            "is_vocal": kind == "vocal",
+            "editable": True,
+            "notes": [
+                {"start": round(s, 4), "end": round(e, 4), "pitch": int(p), "lyric": ""}
+                for s, e, p in simple
+            ],
+        })
+    return tracks
+
+
+def _roll_all_tracks(task: Any) -> tuple[list[dict[str, Any]], str | None, dict[str, Any]]:
+    """取出**全部**声部的卷帘轨道（不受三个勾选影响）。
+
+    返回 ``(tracks, source_abc_name, header)``。
+
+    为什么不按勾选裁剪：勾选只决定"看哪些/导哪些"。若这里就裁掉，用户
+    「取消勾选器乐 → 保存 → 再勾上」就会把器乐轨的音符丢掉（``save_roll`` 的合并
+    逻辑能兜住这一点，但源头就别少给更省事）。
+    勾选在 ``get_roll`` 返回前、``save_roll`` 重建导出前各自过滤一次。
+
+    **存档自愈**：``roll.json`` 优先，但全量乐谱里有、存档里没有的声部会被补回来。
+    卷帘没有"删除整个声部"的功能，缺声部只可能来自旧版本读**过滤版**乐谱的那个 bug
+    （见 :func:`_roll_source_abc`）——不补的话，用户在那个版本下保存过一次就永远只有人声。
+    """
+    from app.abcp import notes_to_seconds, parse_abc
+    from app.rebuild import load_measures, load_roll
+
+    root = Path(task.out_dir)
+
+    # 先读全量乐谱（既用于"没有存档"时的导入，也用于给存档补声部）
+    abc_tracks: list[dict[str, Any]] = []
+    abc_header: dict[str, Any] = {}
+    abc_source: str | None = None
+    abc_file = _roll_source_abc(task)
+    if abc_file is not None:
+        try:
+            text = abc_file.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if text:
+            score = parse_abc(text)
+            notes_to_seconds(score.notes, bpm=score.bpm or 120.0, measures=load_measures(root))
+            abc_tracks = _tracks_from_score(score, root)
+            abc_header = dict(score.header)
+            abc_source = abc_file.name
+
+    stored = load_roll(root)
+    if not (stored and stored.get("tracks")):
+        return abc_tracks, abc_source, abc_header
+
+    header = dict(stored.get("header") or {})
+    # 存档里的 meter_tuple 经 JSON 变成了数组，还原成元组给 AbcScore 用
+    if isinstance(header.get("meter_tuple"), list):
+        header["meter_tuple"] = tuple(header["meter_tuple"])
+    if not header:
+        header = abc_header
+
+    stored_tracks: list[dict[str, Any]] = []
+    for t in stored["tracks"]:
+        if not isinstance(t, dict):
+            continue
+        t = dict(t)
+        t.setdefault("editable", True)
+        t.setdefault("is_vocal", str(t.get("kind")) == "vocal")
+        stored_tracks.append(t)
+
+    have = {str(t.get("voice")) for t in stored_tracks}
+    restored = [t for t in abc_tracks if str(t.get("voice")) not in have]
+    order = {str(t.get("voice")): i for i, t in enumerate(abc_tracks)}
+    merged = sorted(stored_tracks + restored,
+                    key=lambda t: order.get(str(t.get("voice")), len(order)))
+    return merged, (stored.get("source_abc") or abc_source), header
+
+
+@app.get("/api/tasks/{task_id}/roll")
+def get_roll(
+    task_id: str,
+    export_voices: str | None = None,
+    only_melody: int | None = None,
+) -> JSONResponse:
+    """返回**钢琴卷帘**所需的可编辑谱面（③ 的唯一数据源）。
+
+    返回结构::
+
+        {
+          "tracks": [ {voice, kind, display, is_vocal, editable, notes: [...]}, ... ],
+          "measures": [...], "tempo_map": [...],
+          "bpm" / "meter" / "duration" / "export_voices", "warnings": [...]
+        }
+
+    几处刻意的设计：
+    * ``measures`` 必须给前端 —— 网格线与小节号要走模型真实的小节划分（变速曲里
+      一小节的秒数不是常数），而且音符本来就是按这张表换算成秒的，前端用同一张表
+      做网格与吸附才和音符**同源**。``tempo_map`` 一并给出以便诊断。
+    * 和弦轨 ``editable=False`` —— 它来自 ``chords.mid``，**不是 ABC 声部**。允许编辑就
+      必须把它回写成新的声部，会改变导出语义（模型侧它是 ``chord.lab`` 区间推出来的）。
+    * 空歌词一律给 ``""``：卷帘上没有词就是没有，导出时落回占位词 ``la``。
+      旧的 ④ 歌词填充已按需求删除，歌词的唯一来源是卷帘上的逐音编辑与 Ctrl+L 填词。
+    """
+    from app.rebuild import (
+        CHORD_TRACK_DISPLAY,
+        load_chord_notes,
+        load_measures,
+        select_roll_tracks,
+    )
+    from app.tempo import derive_tempo_map
+
+    task = manager.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 勾选优先用请求显式带来的（页面刚切勾选、尚未落盘），否则用任务的既有意图。
+    if export_voices is not None or only_melody is not None:
+        sel = normalize_export_voices(export_voices, None if export_voices is not None else bool(only_melody))
+    else:
+        sel = _task_export_voices(task)
+
+    all_tracks, source_abc, header = _roll_all_tracks(task)
+    root = Path(task.out_dir)
+    measures = load_measures(root)
+
+    warnings: list[str] = []
+    tracks: list[dict[str, Any]] = []
+    for tr in select_roll_tracks(all_tracks, sel):
+        tracks.append({
+            "id": len(tracks),
+            "voice": tr.get("voice"),
+            "kind": tr.get("kind") or "ins",
+            "display": tr.get("display") or tr.get("voice"),
+            "is_vocal": bool(tr.get("is_vocal")),
+            "editable": True,
+            "notes": [
+                {
+                    "start": round(float(n["start"]), 4),
+                    "end": round(float(n["end"]), 4),
+                    "pitch": int(n["pitch"]),
+                    "lyric": "" if n.get("lyric") is None else str(n.get("lyric")),
+                }
+                for n in (tr.get("notes") or [])
+            ],
+        })
+
+    chord_notes = load_chord_notes(root) if "chords" in sel else []
+    if chord_notes:
+        tracks.append({
+            "id": len(tracks),
+            "voice": "chords",
+            "kind": "chords",
+            "display": CHORD_TRACK_DISPLAY,
+            "is_vocal": False,
+            # 只读：见 docstring —— 和弦轨不是 ABC 声部，改了无法无损回写。
+            "editable": False,
+            "notes": [
+                {
+                    "start": round(float(n["start"]), 4),
+                    "end": round(float(n["end"]), 4),
+                    "pitch": int(n["pitch"]),
+                    "lyric": "",
+                }
+                for n in chord_notes
+            ],
+        })
+
+    # 下面这些「为什么少了一条轨」的说明必须在**提前返回之前**算出来。
+    # 否则最需要解释的那次（所选内容一个音符都没有 → available=false）恰好不带原因，
+    # 页面只能显示一句干巴巴的「所选内容没有可用音符」。
+    in_score = sorted({str(t.get("voice")) for t in all_tracks if t.get("voice")})
+    missing_abc = [t for t in sel if t != "chords" and not any(x["kind"] == t for x in tracks)]
+    if missing_abc:
+        warnings.append("所选声部 " + "/".join(missing_abc) + " 在该片段内没有音符，未生成对应轨道")
+    if "chords" in sel and not any(x["kind"] == "chords" for x in tracks):
+        warnings.append("未找到和弦轨（chords.mid / transcription.mid 里没有和弦轨），已跳过")
+    if source_abc is None and not all_tracks:
+        warnings.append("没有找到乐谱文件（score.abc / score.melody.abc），请先完成扒谱")
+    # ④ 删掉之后 lyrics.json 不再被消费；文件还在时明确告知，别让用户以为词还在。
+    if (root / "lyrics.json").is_file():
+        warnings.append("检测到旧的 lyrics.json（④ 歌词填充的产物）已不再参与导出，请在卷帘上用 Ctrl+L 重新填词")
+
+    if not tracks:
+        # 把"这首歌里到底有哪些声部"直接写进原因里：用户看到"没有可用音符"时
+        # 最需要知道的就是"那我该勾哪个"。实测踩过：过滤后的乐谱里没有 Ins，
+        # 用户取消勾选人声后只得到一句无从下手的提示。
+        if in_score:
+            reason = ("所选内容没有可用音符：这首歌的乐谱里只有声部 " + "、".join(in_score)
+                      + "。请勾选对应的「导出内容」")
+        else:
+            reason = "所选内容没有可用音符：还没有找到乐谱文件，请先完成扒谱"
+        return JSONResponse({
+            "available": False,
+            "tracks": [],
+            "reason": reason,
+            "voices_in_score": in_score,
+            "export_voices": sel,
+            "warnings": warnings,
+        })
+
+    tempo_map = derive_tempo_map(measures) or [{"t": 0.0, "bpm": float(header.get("q") or 120.0)}]
+    duration = max(
+        [float(n["end"]) for tr in tracks for n in tr["notes"]] + [0.0]
+    )
+    meter_tuple = header.get("meter_tuple") or (4, 4)
+
+    return JSONResponse({
+        "available": True,
+        "source_abc": source_abc,
+        "voices_in_score": in_score,
+        "bpm": header.get("q"),
+        "meter": header.get("meter") or "4/4",
+        "beats_per_bar": int(meter_tuple[0]),
+        "beat_unit": int(meter_tuple[1]),
+        "unit_whole": header.get("unit_whole"),
+        "duration": round(duration, 4),
+        "tempo_map": tempo_map,
+        "measures": measures,
+        "export_voices": sel,
+        "tracks": tracks,
+        "warnings": warnings,
+    })
+
+
+@app.post("/api/tasks/{task_id}/roll")
+def save_roll(task_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    """保存卷帘的音符表，并据此重建 ``export/`` 下的 SVP 与 MIDI。
+
+    流程：
+      1. 校验音符（**不信前端**：坏音符会一路走到 SVP/MIDI 写出，报错却对不上源头）；
+      2. 与**当前全量轨**合并后落盘 ``roll.json``（按声部名，见
+         :func:`merge_roll_tracks`）—— 合并起点必须是"全量"而不是空档：
+         卷帘只上传被勾选的声部，从空档起步会在**首次保存**时把没勾的声部整条丢掉；
+      3. 取**被勾选的**声部 + 和弦轨，造一份"时间已是秒"的乐谱，
+         交给同一条导出管线（和弦轨、复音拆轨、八度、速度表全不变）。
+    """
+    from app.rebuild import (
+        merge_roll_tracks,
+        rebuild_exports,
+        sanitize_roll_tracks,
+        save_roll as _save_roll_file,
+        score_from_roll,
+        select_roll_tracks,
+    )
 
     task = manager.get(task_id)
     if task is None:
@@ -513,34 +795,44 @@ def update_abc(task_id: str, payload: dict[str, Any] = Body(...)) -> JSONRespons
     if manager.busy():
         raise HTTPException(status_code=409, detail="任务运行中，暂不能修改乐谱")
 
-    abc_text = str(payload.get("abc") or "")
-    if not abc_text.strip():
-        raise HTTPException(status_code=400, detail="ABC 内容为空")
-
-    # 「导出哪些内容」以**页面当前勾选状态**为准（前端随请求带上），
-    # 否则用户改完 ABC 保存时会被默认值悄悄改掉导出内容。
     export_voices = normalize_export_voices(payload.get("export_voices"), payload.get("only_melody"))
+    root = Path(task.out_dir)
 
+    try:
+        incoming = sanitize_roll_tracks(payload.get("tracks"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"卷帘数据有问题：{e}")
+
+    # 表头（拍号/调号/默认音符长度）沿用导入来源的 ABC：
+    # 卷帘改的是音高与时值，不该顺手把调号拍号也改掉。
+    existing, source_abc, header = _roll_all_tracks(task)
+    bpm = payload.get("bpm") or header.get("q") or (task.result or {}).get("bpm") or 120.0
+
+    merged = merge_roll_tracks(existing, incoming)
+    _save_roll_file(root, merged, source_abc=source_abc, bpm=float(bpm), header=header)
+
+    selected = select_roll_tracks(merged, export_voices)
+    score = score_from_roll(selected, bpm=float(bpm), header=header)
     result = rebuild_exports(
-        task.out_dir,
-        abc_text,
-        bpm=payload.get("bpm"),
+        root,
+        "",                       # 卷帘路径没有 ABC 文本
+        score=score,
+        bpm=float(bpm),
         export_voices=export_voices,
-        lyrics=str(payload.get("lyrics") or "la"),
         project_name=task.audio.stem,
+        # ④ 已删除：不再读 lyrics.json，歌词一律取自卷帘的逐音歌词
+        use_stored_lyrics=False,
     )
     if not result.get("ok"):
         return JSONResponse(status_code=422, content=result)
 
-    # 记回任务，便于刷新后仍能拿到编辑后的 ABC；同时把意图写进 params，
-    # 后续「歌词填充 / 清空」等重建导出走的是同一份 export_voices，不再各说各话。
+    # 记回任务，便于刷新后仍能拿到「导出过哪些声部」；歌词来源固定是逐音
     task.params = {**(task.params or {}), "export_voices": export_voices,
                    "only_melody": export_voices == ["vocal"]}
     task.result = {
         **(task.result or {}),
-        "abc_filtered": abc_text,
         "export": result,
-        "abc_edited": True,
+        "roll_edited": True,
         "export_voices": export_voices,
         "only_melody": export_voices == ["vocal"],
     }
@@ -571,7 +863,7 @@ def download_export(task_id: str, kind: str) -> FileResponse:
 def _disk_export_info(task: Any) -> list[dict[str, Any]]:
     """列出 ``export/`` 目录里**真实存在**的产物及其轨道名。
 
-    为什么不复用 ``task.result``：那份记账会在事后被 ``update_abc`` / 歌词填充改写，
+    为什么不复用 ``task.result``：那份记账会在事后被卷帘保存（``POST /roll``）改写，
     页面也可能拿着旧结果 —— 于是出现「界面说 3 轨、下载到 1 轨」这种自相矛盾。
     要回答"点导出会得到什么"，唯一可信的就是磁盘上这个文件本身。
     """
@@ -614,206 +906,6 @@ def export_info(task_id: str) -> JSONResponse:
                          "files": _disk_export_info(task)})
 
 
-# --------------------------------------------------------------------------
-# 歌词识别（独立任务；对应页面「⑤ 歌词识别」）
-# --------------------------------------------------------------------------
-def _chord_track_notes(root: Path) -> list[dict[str, Any]]:
-    """和弦音符（秒），供「取消仅主旋律乐谱」时的试听与导出。
-
-    实现见 :func:`app.rebuild.load_chord_notes`——试听与导出**共用同一处**，
-    避免「试听有和弦、导出的 SVP/MIDI 没有」这类分歧。
-    """
-    from app.rebuild import load_chord_notes
-
-    return load_chord_notes(root)
-
-
-@app.get("/api/tasks/{task_id}/notes")
-def get_notes(task_id: str, only_melody: int = 1, voices: str | None = None) -> JSONResponse:
-    """返回**当前乐谱**（含用户编辑过的版本）解析出的音符，供卷帘、试听与歌词预览。
-
-    之所以不直接用模型原始的 ``playback.json``：用户在卷帘上改过音符之后，
-    试听必须跟着改后的谱面走，否则听到的和看到的不是一回事。
-
-    优先级：``export/<歌名>.abc``（最近一次生成导出的版本）→ ``score.edited.abc``
-    → ``score.melody.abc`` → ``score.abc``。
-
-    **要哪些内容**（二选一，``voices`` 优先）：
-
-    * ``voices=vocal,ins`` —— 前端 ③ 的三个勾选。**推荐**：能精确表达
-      "只要器乐旋律"这种既不是"只人声"也不是"全都要"的组合。
-    * ``only_melody=1|0`` —— 老的布尔口径，保留兼容。``0`` 等于"全都要"。
-
-    ⚠️ 只用 ``only_melody`` 会出错：它只有两个值，而勾选有三种独立开关。
-    实测只勾「器乐旋律」时它=``0``，于是**和弦轨也一起被放进来**（预览里多出和弦、
-    卷帘上多出灰色和弦块），而导出侧其实是对的 —— 表现为"勾了器乐却带出和弦"。
-    """
-    from app.abcp import notes_to_seconds, parse_abc, to_simple_notes
-    from app.rebuild import (display_name, load_lyrics_words, load_measures,
-                             load_note_lyrics, normalize_export_voices, voice_kind,
-                             voice_sort_key)
-    from app.lyrics import assign_lyrics
-    from app.tempo import derive_tempo_map
-
-    task = manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    root = Path(task.out_dir)
-    if not getattr(task, "audio", None):
-        raise HTTPException(status_code=400, detail="任务缺少音频信息")
-
-    # ---- 要哪些内容：显式 voices 优先，否则退回 only_melody 布尔 ----
-    # 必须优先用显式的 voices：布尔只有两个值，而 ③ 的三个勾选是**三个独立开关**
-    # （只勾器乐、只勾和弦…）。只用布尔就会把"只勾器乐"当成"全都要"，
-    # 于是和弦被一并放出来 —— 实测的"勾了器乐却带出和弦"就是这个。
-    if voices is not None:
-        # 显式给了就**完全照办**（空字符串 = 什么都不勾，尊重用户）
-        want = set(normalize_export_voices(str(voices).split(","))) if str(voices).strip() else set()
-    else:
-        want = set(normalize_export_voices(None, bool(only_melody)))
-
-    # 选一个能满足 want 的谱面：缺声部时回落到模型原始谱，**绝不拿别的声部顶替**
-    abc_file, score, fell_back = _score_for(root, task, want)
-    if abc_file is None or score is None:
-        return JSONResponse({"available": False, "notes": [], "reason": "尚无乐谱"})
-
-    abc_text = abc_file.read_text(encoding="utf-8")
-    measures = load_measures(root)
-    notes_to_seconds(score.notes, bpm=score.bpm or 120.0, measures=measures)
-
-    # 主旋律声部优先（歌词按它分配）
-    all_voices = list(score.voices) or sorted({n.voice for n in score.notes})
-    melody_voices = [v for v in all_voices if voice_kind(v) == "vocal"] or all_voices
-    voice = melody_voices[0] if melody_voices else None
-    melody_simple = to_simple_notes(score.notes, voice=voice) if voice else to_simple_notes(score.notes)
-
-    # 按勾选挑声部（保持 ABC 里的声明顺序）
-    selected: list[str] = [v for v in all_voices if voice_kind(v) in want]
-    # 勾了内容但 ABC 侧一个声部都没匹配上（典型情况：**只勾了和弦**）时退回全部，
-    # 免得页面空白 —— 和弦音符由下面的 chord_notes 单独供给。
-    # want 为空（三个勾选全取消）时不退回：那时就该什么都不显示。
-    if not selected and want:
-        selected = list(all_voices)
-    # 排成**规范顺序**（人声 → 器乐 → 和弦），与导出侧 pick_voices() 同一套排序：
-    # 否则卷帘上的曲目顺序与导出的轨道顺序会不一致，而它们本该一一对应。
-    selected.sort(key=voice_sort_key)
-
-    simple: list[tuple[float, float, int]] = []
-    for v in selected:
-        simple.extend(to_simple_notes(score.notes, voice=v))
-    if not simple:
-        simple = melody_simple
-
-    # 歌词只在主旋律上分配，其余声部给占位，避免器乐把歌词吃掉。
-    words = load_lyrics_words(root)
-    lyric_of: dict[tuple[float, float, int], str] = {}
-    if words and melody_simple:
-        mel_lyrics, _ = assign_lyrics(
-            words, [(s, e) for s, e, _ in melody_simple], fallback="la"
-        )
-        lyric_of = {
-            (round(s, 4), round(e, 4), p): text
-            for (s, e, p), text in zip(melody_simple, mel_lyrics)
-        }
-
-    # 高亮：只在单声部时有意义（多声部时序号对不上）。前端卷帘已按音符自己的
-    # [start,end) 判高亮，不再依赖这份；保留它是为了兼容旧前端。
-    highlight: list[dict[str, float]] = []
-    if len(selected) <= 1:
-        hi_score = parse_abc(abc_text, merge_ties=False)
-        notes_to_seconds(hi_score.notes, bpm=hi_score.bpm or 120.0, measures=measures)
-        hi_simple = (
-            to_simple_notes(hi_score.notes, voice=voice)
-            if voice
-            else to_simple_notes(hi_score.notes)
-        )
-        highlight = [
-            {"start": round(s, 4), "end": round(e, 4), "pitch": p} for s, e, p in hi_simple
-        ]
-
-    # 和弦轨来自 chords.mid、**不是 ABC 声部**，所以单独判断：只在勾了「和弦」时给。
-    chord_notes = _chord_track_notes(root) if "chords" in want else []
-
-    # ---- 分轨结构：给**钢琴卷帘**用 ----
-    # 上面那份扁平的 ``notes`` 是给试听/高亮用的，把各声部拼在一起、**丢掉了声部归属**，
-    # 而卷帘必须按声部编辑（人声主旋律 / 器乐旋律各自一条），所以另给一份带声部的。
-    manual_lyrics = load_note_lyrics(root)
-    tracks: list[dict[str, Any]] = []
-    for v in selected:
-        sn = to_simple_notes(score.notes, voice=v)
-        lines = list(manual_lyrics.get(v) or [])
-        if len(lines) != len(sn):
-            # 没有手动歌词（或长度对不上，说明那是上一版谱面的）→ 回落到词表分配结果
-            lines = [lyric_of.get((round(s, 4), round(e, 4), p), "la") for s, e, p in sn]
-        tracks.append(
-            {
-                "voice": v,
-                "display": display_name(v),
-                # 用 voice_kind 而不是硬比字符串：拆出来的 Vocal2 也要算人声
-                "is_vocal": voice_kind(v) == "vocal",
-                "notes": [
-                    {"start": round(s, 4), "end": round(e, 4), "pitch": p, "lyric": ly}
-                    for (s, e, p), ly in zip(sn, lines)
-                ],
-            }
-        )
-
-    # 速度表：卷帘的网格与 Ctrl+G 吸附必须按**blick**走，否则变速曲上网格会越走越偏
-    # （§16/§23 的同一类坑）。这里直接把后端派生好的表交给前端，避免两套实现漂移。
-    # 只留 t/bpm 两个字段：派生过程里的 seconds/quarters/measures 是中间量，别塞给前端。
-    tempo_map = [
-        {"t": float(x["t"]), "bpm": float(x["bpm"])}
-        for x in (derive_tempo_map(measures) or [])
-        if x.get("bpm")
-    ] or [{"t": 0.0, "bpm": float(score.bpm or 120.0)}]
-
-    # 「人声主旋律有没有填歌词」——导出前的居中确认框据此决定要不要拦。
-    # 判据是**字面歌词里有没有非 "la" 的内容**，而不是"有没有 lyrics.json"：
-    # 用户可以在卷帘上逐音删空，那时也该提醒。
-    vocal_lines = [ly for t in tracks if t["is_vocal"] for ly in (n["lyric"] for n in t["notes"])]
-    has_vocal_lyrics = any(str(ly).strip() and str(ly).strip() != "la" for ly in vocal_lines)
-
-    return JSONResponse(
-        {
-            "available": True,
-            "abc_file": abc_file.name,
-            # 勾的声部在当前编辑稿里没有、于是回落到了模型原始谱 —— 前端据此提示用户
-            # （"这次推理只导出了人声，器乐旋律取自模型原始谱"），不要静默。
-            "fell_back_to_model": fell_back,
-            "voice": voice,
-            "voices": selected,
-            # 兼容字段：只有"确实只要人声主旋律"时才是 true
-            "only_melody": want == {"vocal"},
-            "want": sorted(want),
-            "bpm": score.bpm,
-            "meter": score.header.get("meter"),
-            "tempo_map": tempo_map,
-            "tracks": tracks,
-            "has_vocal_lyrics": has_vocal_lyrics,
-            "duration": max(
-                [e for _, e, _ in simple]
-                + [n["end"] for n in chord_notes]
-                + [0.0]
-            ),
-            "lyrics_source": "filled" if words else "fallback",
-            "notes": [
-                {
-                    "start": round(s, 4),
-                    "end": round(e, 4),
-                    "pitch": p,
-                    "lyrics": lyric_of.get((round(s, 4), round(e, 4), p), "la"),
-                }
-                for (s, e, p) in simple
-            ],
-            # 和弦音符（秒）。页面试听会把它叠到钢琴上，等价于整合包的 mix 渲染。
-            "chord_notes": chord_notes,
-            # 与页面上 .abcjs-note 元素按序号一一对应
-            "highlight_notes": highlight,
-        }
-    )
-
-
 def _task_export_voices(task: Any) -> list[str]:
     """任务的「导出哪些内容」意图（人声主旋律 / 器乐旋律 / 和弦）。
 
@@ -831,426 +923,6 @@ def _task_export_voices(task: Any) -> list[str]:
     return normalize_export_voices(None, result.get("only_melody") if "only_melody" in result else None)
 
 
-def _abc_candidates(root: Path, task: Any) -> list[Path]:
-    """当前谱面的候选文件，**按优先级**排列。
-
-    优先 ``export/<歌名>.abc``（最近一次生成导出的版本，也就是卷帘保存后的产物），
-    依次回落到编辑稿、单声部稿、模型原始稿。
-    """
-    return [
-        root / "export" / f"{task.audio.stem}.abc",
-        root / "score.edited.abc",
-        root / "score.melody.abc",
-        root / "score.abc",
-    ]
-
-
-def _current_abc_file(root: Path, task: Any) -> Path | None:
-    """当前谱面的 ABC 文件（最高优先级的那个存在的候选）。"""
-    return next((p for p in _abc_candidates(root, task) if p.is_file()), None)
-
-
-def _score_for(root: Path, task: Any, want: set[str]):
-    """挑一个**能满足 want** 的谱面，返回 ``(路径, AbcScore, 是否发生了回落)``。
-
-    为什么不能无脑用"当前谱面"：任务可能是用「只勾人声主旋律」跑的，那么
-    ``export/<歌名>.abc`` 与 ``score.melody.abc`` **只有 Vocal**。用户后来勾上
-    「器乐旋律」时，如果只看当前谱面，就会一个器乐声部都找不到 —— 而**绝不能**
-    拿人声顶替（那会让用户以为拿到的是器乐）。正确做法是回落到模型原始的
-    ``score.abc``，那里两条旋律都在。
-
-    返回值第三个元素 ``fell_back`` 表示**没有用最高优先级的那个文件**
-    （即真的回落了），调用方据此提示用户，而不是静默换数据。
-    """
-    from app.abcp import parse_abc
-    from app.rebuild import voice_kind
-
-    kinds_wanted = {k for k in want if k != "chords"}
-    first = None
-    for p in _abc_candidates(root, task):
-        if not p.is_file():
-            continue
-        try:
-            sc = parse_abc(p.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - 坏文件不该让整个接口 500
-            continue
-        if first is None:
-            first = (p, sc)
-        have = {voice_kind(v) for v in (sc.voices or [])}
-        if not kinds_wanted or kinds_wanted <= have:
-            # 命中的文件不是最高优先级的那个 → 才算"回落过"
-            return p, sc, (first[0] != p)
-    if first is None:
-        return None, None, False
-    return first[0], first[1], True
-
-
-def _has_vocal_lyrics(note_lyrics: Mapping[str, Sequence[str]], voices: Sequence[str]) -> bool:
-    """人声主旋律有没有**非占位**的歌词。导出前的确认框据此决定要不要拦。"""
-    from app.rebuild import voice_kind
-
-    for v in voices:
-        if voice_kind(v) != "vocal":
-            continue
-        for raw in note_lyrics.get(v) or []:
-            t = str(raw or "").strip()
-            if t and t != "la":
-                return True
-    return False
-
-
-@app.post("/api/tasks/{task_id}/roll")
-def save_roll(task_id: str, payload: dict[str, Any] | None = Body(default=None)) -> JSONResponse:
-    """保存**钢琴卷帘**的编辑结果，并重新生成导出。
-
-    卷帘是 ③ 唯一的编辑器（ABC 文本框与五线谱已删除），所以这里是"用户改了谱面"
-    的唯一入口。前端把编辑后的音符（**单位秒**）连同逐音歌词一起发来，后端：
-
-    1. :func:`app.abcp.seconds_to_score` 把秒换回记谱位置 —— 变速曲必须走小节课表，
-       不能拿单一 BPM 硬除（§16/§23 的同一类坑）；
-    2. 同一轨内有重叠就拆成 ``Vocal`` / ``Vocal2`` …：ABC 的一条 ``V:`` 天生单声部，
-       塞不进重叠。拆法复用 :func:`app.rebuild.monophonic_groups`，与导出侧同一套逻辑；
-    3. :func:`app.abcs.score_to_abc` 序列化成 ABC，写 ``score.edited.abc``；
-    4. 逐音歌词存 ``lyrics_notes.json`` —— ``-`` / ``+`` 是记号，原样保留；
-    5. :func:`app.rebuild.rebuild_exports` 重生成 SVP / MIDI / ABC。
-
-    **写盘前会做一次 ABC 往返自检**：序列化出来的文本必须能解析回同一批音符，
-    差一点点就整笔放弃并报错。宁可让用户重试，也不要把坏谱面写进产物。
-
-    请求体::
-
-        {"tracks": [{"voice": "Vocal", "notes": [{"start","end","pitch","lyric"}]}],
-         "export_voices": ["vocal"], "bpm": 120}
-    """
-    from app.abcp import parse_abc, quantize_notation, seconds_to_score
-    from app.abcs import header_from_abc, score_to_abc
-    from app.rebuild import load_measures, monophonic_groups, normalize_export_voices, rebuild_exports, save_note_lyrics
-
-    task = manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if manager.busy():
-        raise HTTPException(status_code=409, detail="任务运行中，暂不能修改谱面")
-
-    payload = dict(payload or {})
-    root = Path(task.out_dir)
-    measures = load_measures(root)
-
-    src_abc = _current_abc_file(root, task)
-    if src_abc is None:
-        raise HTTPException(status_code=400, detail="还没有可编辑的乐谱")
-    # 表头（调号/拍号/标题…）沿用当前 ABC 的：编辑音符不该把这些弄丢。
-    # 必须用 header_from_abc 而不是 parse_abc(...).header —— 后者丢 X:/T:，
-    # 而且会把 `V: Vocal clef=treble` 里的 clef/name 当成音符（实测多出 35 个幽灵音符）。
-    header = header_from_abc(src_abc.read_text(encoding="utf-8"))
-
-    raw_tracks = payload.get("tracks")
-    if not isinstance(raw_tracks, list):
-        raise HTTPException(status_code=400, detail="tracks 必须是数组")
-
-    bpm = float(payload.get("bpm") or (task.result or {}).get("bpm") or 120.0)
-    warnings: list[str] = []
-    voices: list[tuple[str, list[tuple[float, float, int]]]] = []
-    note_lyrics: dict[str, list[str]] = {}
-    total = 0
-
-    for tr in raw_tracks:
-        if not isinstance(tr, dict):
-            continue
-        name = str(tr.get("voice") or "").strip()
-        notes = tr.get("notes") or []
-        if not name or not isinstance(notes, list) or not notes:
-            continue
-
-        rows: list[tuple[float, float, int, str]] = []
-        for n in notes:
-            if not isinstance(n, dict):
-                continue
-            try:
-                start, end = float(n["start"]), float(n["end"])
-                pitch = int(round(float(n["pitch"])))
-            except (KeyError, TypeError, ValueError):
-                continue
-            if end <= start or not (0 <= pitch <= 127):
-                continue
-            lyric = n.get("lyric")
-            rows.append((start, end, pitch, str(lyric) if lyric is not None else "la"))
-        if not rows:
-            continue
-        # 按时间（同刻按音高）排序；歌词必须跟着一起排，否则会串行错位
-        rows.sort(key=lambda r: (r[0], r[2]))
-        spans = [(r[0], r[1], r[2]) for r in rows]
-        lyrics = [r[3] for r in rows]
-
-        # 秒 → 记谱位置，再**吸附到记谱网格**：不吸附的话浮点噪声会让相邻音
-        # 看起来重叠 1e-16，还会把序列化器需要的基本单位抬到 1/8192 而拒绝生成
-        # （实测 22 个真实样本里 21 个会被拒）。见 app.abcp.quantize_notation。
-        notated = quantize_notation(seconds_to_score(spans, bpm=bpm, measures=measures))
-        groups = monophonic_groups([(o, o + d, p) for o, d, p in notated])
-        if len(groups) > 1:
-            warnings.append(
-                f"{name} 同一轨内有音符重叠，已拆成 {len(groups)} 条（{name}1/{name}2…）"
-                "—— Synthesizer V 一条轨只能有一个音同时响"
-            )
-        for gi, idxs in enumerate(groups):
-            vname = name if len(groups) == 1 else f"{name}{gi + 1}"
-            voices.append((vname, [notated[i] for i in idxs]))
-            note_lyrics[vname] = [lyrics[i] for i in idxs]
-        total += len(spans)
-
-    if not voices or total == 0:
-        raise HTTPException(status_code=400, detail="卷帘里没有任何可用音符，未保存")
-
-    try:
-        abc_text = score_to_abc(header, voices)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"谱面无法写入 ABC：{exc}") from exc
-
-    # ---- 往返自检：写盘前必须证明"序列化 → 解析"是无损的 ----
-    back = parse_abc(abc_text, merge_ties=False)
-    back_notes = [
-        (n.voice, round(n.onset, 9), round(n.duration, 9), n.pitch)
-        for n in back.notes
-        if n.pitch is not None
-    ]
-    want_notes = [
-        (v, round(o, 9), round(d, 9), p) for v, ns in voices for o, d, p in ns
-    ]
-    ok = len(back_notes) == len(want_notes)
-    worst = 0.0
-    if ok:
-        for a, b in zip(sorted(back_notes), sorted(want_notes)):
-            if a[0] != b[0] or a[3] != b[3]:
-                ok = False
-                break
-            worst = max(worst, abs(a[1] - b[1]), abs(a[2] - b[2]))
-        if ok and worst > 1e-6:
-            ok = False
-    if not ok:
-        log_msg = (
-            f"ABC 往返自检失败：写 {len(want_notes)} 个音、读回 {len(back_notes)} 个，"
-            f"最大误差 {worst:.3e}"
-        )
-        raise HTTPException(status_code=500, detail=f"{log_msg}；已放弃保存，原始谱面未改动")
-
-    (root / "score.edited.abc").write_text(abc_text, encoding="utf-8")
-    save_note_lyrics(root, note_lyrics)
-
-    export_voices = normalize_export_voices(payload.get("export_voices"), payload.get("only_melody"))
-    info = rebuild_exports(
-        root,
-        abc_text,
-        bpm=bpm,
-        export_voices=export_voices,
-        project_name=task.audio.stem,
-        note_lyrics=note_lyrics,
-        use_stored_note_lyrics=False,   # 直接用刚收到的歌词，别去读盘上那份
-    )
-
-    task.params = {
-        **(task.params or {}),
-        "export_voices": export_voices,
-        "only_melody": export_voices == ["vocal"],
-    }
-    task.result = {
-        **(task.result or {}),
-        "export": info,
-        "export_voices": export_voices,
-        "only_melody": export_voices == ["vocal"],
-    }
-
-    # ⚠️ **刻意不 broadcast_result**。
-    #
-    # 广播会经 SSE 走到前端的 applyTask() → onResult() → reloadRoll() → roll.load()
-    # → fit()，于是**每次自动保存都把用户的横向缩放重置回"整首适宽"**
-    # （用户实测反馈："每次都需要重新放大…改完一个音符后失焦，又回到 100% 了"），
-    # 而且还会把正在编辑、尚未保存的改动冲掉。
-    #
-    # 这里不需要广播：**发起请求的那个客户端已经从响应体里拿到了 exports**，
-    # 自己更新界面即可（`saveRoll()` 会更新 #exportNote 并刷新试听）。
-    # 代价：另开一个标签页不会自动看到这次改动 —— 本工具是单机单人用，可接受。
-    #
-    # 另外把"缩放不该被重载重置"也补在了 `pianoroll.js::load()` 里（防御性：
-    # `/lyrics`、切换勾选等其它路径也会 reload，那些地方同样不该丢缩放）。
-
-    return JSONResponse(
-        {
-            "ok": bool(info.get("ok")),
-            "error": info.get("error"),
-            "exports": info.get("exports") or [],
-            "warnings": warnings + list(info.get("warnings") or []),
-            "voices": [v for v, _ in voices],
-            "notes": total,
-            "has_vocal_lyrics": _has_vocal_lyrics(note_lyrics, [v for v, _ in voices]),
-            "abc": abc_text,
-        }
-    )
-
-
-@app.post("/api/tasks/{task_id}/lyrics")
-def fill_lyrics_endpoint(task_id: str, payload: dict[str, Any] | None = Body(default=None)) -> JSONResponse:
-    """歌词填充：把用户提供的 **LRC 或纯文本**分配到音符，并重新生成导出。
-
-    本接口**不做歌词识别**（Qwen3-ASR 已移除）。歌词来源是用户：
-
-    * 拖入 ``.lrc`` 文件 → 有行级时间戳，按时间窗把字分配到音符（最准）；
-    * 粘贴 LRC 文本 → 同上；
-    * 粘贴纯文本 → 没有时间信息，按顺序**一字一音**铺开。
-
-    结果存到 ``lyrics.json``（词是带时间戳的），导出时再对**当前音符**做分配，
-    这样用户在乐谱编辑里改过 ABC 之后歌词也不会错位。
-    """
-    from app.lyrics import LyricWord, build_lrc, fill_lyrics, SECTION_LABELS
-    from app.rebuild import LYRICS_FILENAME, NOTE_LYRICS_FILENAME, rebuild_exports
-
-    task = manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if manager.busy():
-        raise HTTPException(status_code=409, detail="任务运行中，暂不能修改歌词")
-
-    payload = dict(payload or {})
-    text = str(payload.get("text") or "")
-    fallback = str(payload.get("fallback") or "la")
-    continuation = str(payload.get("continuation") or "auto")
-    # 分词模式：不勾「按空格切分」= auto（中文逐字、英文按词）；
-    # 勾上 = space（"wo ai ni" → wo/ai/ni）。char 是强制逐字符，界面暂不暴露。
-    split = str(payload.get("split") or "auto")
-    root = Path(task.out_dir)
-
-    # 清空歌词：删掉 lyrics.json / lyrics.lrc，并把导出重建回统一占位
-    if payload.get("clear"):
-        (root / LYRICS_FILENAME).unlink(missing_ok=True)
-        (root / NOTE_LYRICS_FILENAME).unlink(missing_ok=True)
-        (root / "lyrics.lrc").unlink(missing_ok=True)
-        abc_clear = root / "score.melody.abc"
-        if not abc_clear.is_file():
-            abc_clear = root / "score.abc"
-        info: dict[str, Any] = {"ok": False, "error": "未找到 ABC"}
-        if abc_clear.is_file():
-            info = rebuild_exports(
-                root,
-                abc_clear.read_text(encoding="utf-8"),
-                bpm=(task.result or {}).get("bpm"),
-                export_voices=_task_export_voices(task),
-                lyrics=fallback,
-                use_stored_lyrics=False,
-                project_name=task.audio.stem,
-            )
-        task.result = {**(task.result or {}), "export": info, "lyrics_filled": False}
-        manager.broadcast_result(task)
-        return JSONResponse({"ok": True, "cleared": True, "export": info, "lrc": ""})
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="歌词内容为空")
-
-    # 取当前乐谱的音符（含用户编辑过的版本）
-    notes_data = json.loads(bytes(get_notes(task_id).body).decode("utf-8"))
-    if not notes_data.get("available") or not notes_data.get("notes"):
-        raise HTTPException(status_code=400, detail="还没有可用的乐谱，无法填充歌词")
-    spans = [(n["start"], n["end"]) for n in notes_data["notes"]]
-
-    out = fill_lyrics(
-        text,
-        spans,
-        fmt=str(payload.get("format") or "auto"),
-        fallback=fallback,
-        continuation=continuation,
-        split=split,
-    )
-    # 批量导入是"重新铺一遍"，必须把之前卷帘上手动编辑的逐音歌词清掉 ——
-    # 否则 rebuild_exports 会优先用手动那份，表现为"导入了但没生效"。
-    (root / NOTE_LYRICS_FILENAME).unlink(missing_ok=True)
-
-    words = [LyricWord(w["text"], w["start"], w["end"], line=int(w.get("line", -1))) for w in out["words"]]
-    joined = "".join(w.text for w in words)
-    record = {
-        "source": "user",
-        "format": out["format"],
-        "text": joined,
-        "words_text": joined,
-        "words": [w.as_dict() for w in words],
-        "items": [[w.text, round(w.start, 3), round(w.end, 3)] for w in words],
-        "fallback": fallback,
-        "continuation": continuation,
-        "split": out.get("split", split),
-    }
-    (root / LYRICS_FILENAME).write_text(
-        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
-
-    # 顺带导出 LRC（按原曲段落插标签）
-    sections: list[dict[str, Any]] = []
-    summary_file = root / "summary.json"
-    if summary_file.is_file():
-        try:
-            sections = json.loads(summary_file.read_text(encoding="utf-8")).get("sections") or []
-        except (OSError, ValueError):
-            sections = []
-    lrc = build_lrc(words, sections=sections, section_labels=SECTION_LABELS)
-    if lrc:
-        (root / "lyrics.lrc").write_text(lrc, encoding="utf-8")
-
-    # 重新生成导出，让 SVP 立刻带上新歌词
-    abc_file = root / "score.melody.abc"
-    if not abc_file.is_file():
-        abc_file = root / "score.abc"
-    export_info: dict[str, Any] = {"ok": False, "error": "未找到 ABC"}
-    if abc_file.is_file():
-        export_info = rebuild_exports(
-            root,
-            abc_file.read_text(encoding="utf-8"),
-            bpm=(task.result or {}).get("bpm"),
-            export_voices=_task_export_voices(task),
-            lyrics=fallback,
-            lyrics_words=words,
-            continuation=continuation,
-            project_name=task.audio.stem,
-        )
-
-    task.result = {**(task.result or {}), "export": export_info, "lyrics_filled": True}
-    manager.broadcast_result(task)
-
-    return JSONResponse(
-        {
-            "ok": out["ok"],
-            "format": out["format"],
-            "lyrics_text": joined,
-            "lyrics": out["lyrics"],
-            "stats": out["stats"],
-            "warnings": out["warnings"],
-            "export": export_info,
-            "lrc": lrc,
-        }
-    )
-
-
-@app.get("/api/tasks/{task_id}/lyrics")
-def get_lyrics(task_id: str) -> JSONResponse:
-    """读取当前已填充的歌词。"""
-    task = manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    path = Path(task.out_dir) / "lyrics.json"
-    if not path.is_file():
-        return JSONResponse({"available": False})
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=f"歌词文件读取失败：{exc}") from exc
-    return JSONResponse({"available": True, **data})
-
-
-@app.get("/api/tasks/{task_id}/lrc")
-def download_lrc(task_id: str) -> FileResponse:
-    """下载已填充歌词导出的 LRC。"""
-    task = manager.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    target = Path(task.out_dir) / "lyrics.lrc"
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="尚未生成 LRC")
-    return _file_response(target, filename=target.name)
 # --------------------------------------------------------------------------
 # 环境 / 显存 / 设置
 # --------------------------------------------------------------------------

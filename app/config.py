@@ -14,9 +14,8 @@ ffmpeg        ``FFMPEG_BIN``（可执行文件）     ``runtime/ffmpeg/bin/ffmpe
 解释器        —                               ``runtime/python/python.exe``
 ============  ==============================  =================================
 
-历史路径（开发机上模型放在本项目之外的公共目录时用）由**不入库的**
-``local_paths.json`` 或环境变量提供，只在候选都不存在时兜底；
-源码分发（别人的机器上）没有这个文件，会正常走前面的包内路径或环境变量。
+历史路径（``D:\\AIGC\\YuE2\\yue2_aibbs``、``D:\\ffmpeg``）只在候选都不存在时兜底，
+作者机器不受影响；别人的机器上会因为找不到而走前面的包内路径。
 """
 
 from __future__ import annotations
@@ -36,34 +35,8 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = ROOT / "runtime"
 MODELS_DIR = ROOT / "models"
 
-#: 本机路径覆盖表，**不入 git**（见 ``.gitignore``）。格式::
-#:
-#:     {"legacy_models": "D:\\path\\to\\models", "svp_reference": "D:\\path\\to\\svp"}
-#:
-#: 存在的意义：开发机上模型权重可能放在本项目之外的公共目录，不想把作者机器
-#: 的绝对路径写进源码。没有这个文件（别人克隆仓库的情况）就走包内 ``models/``
-#: 或环境变量，行为与原来一致。
-_LOCAL_PATHS_FILE = ROOT / "local_paths.json"
-
-
-def _local_paths() -> dict[str, Any]:
-    """读取本机路径覆盖表；文件不存在或格式不对时返回空表（绝不抛异常）。"""
-    try:
-        with _LOCAL_PATHS_FILE.open(encoding="utf-8") as fp:
-            data = json.load(fp)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _optional_path(key: str, *env_names: str) -> Path | None:
-    """按「环境变量 → 本机路径覆盖表」取一个可选目录；都没有则返回 None。"""
-    for name in env_names:
-        raw = os.environ.get(name)
-        if raw:
-            return Path(raw).expanduser()
-    raw = _local_paths().get(key)
-    return Path(str(raw)).expanduser() if raw else None
+#: 开发机历史路径，仅兜底
+_LEGACY_MODELS = Path(r"D:\AIGC\YuE2\yue2_aibbs\models")
 
 
 def resolve_dir(env_name: str, *candidates: str | Path) -> Path:
@@ -84,24 +57,19 @@ def resolve_dir(env_name: str, *candidates: str | Path) -> Path:
 
 
 #: SheetSage2 权重 + 推理代码（明文可读，含 infer.py）
-_LEGACY_MODELS = _optional_path("legacy_models", "SHEETSAGE2_LEGACY_MODELS")
-
 SHEETSAGE2_DIR = resolve_dir(
     "SHEETSAGE2_MODEL_DIR",
     MODELS_DIR / "SheetSage2",
-    *([_LEGACY_MODELS / "SheetSage2"] if _LEGACY_MODELS else []),
+    _LEGACY_MODELS / "SheetSage2",
 )
 #: MERT-v2 主干
 MERT_FULLSONG_DIR = resolve_dir(
     "MERT_MODEL_DIR",
     MODELS_DIR / "MERT-v2-FullSong",
-    *([_LEGACY_MODELS / "MERT-v2-FullSong"] if _LEGACY_MODELS else []),
+    _LEGACY_MODELS / "MERT-v2-FullSong",
 )
 #: SVP 参考样本目录（仅用于校验，不在运行时依赖）
-SVP_REFERENCE_DIR = resolve_dir(
-    "SVP_REFERENCE_DIR",
-    _optional_path("svp_reference", "SVP_REFERENCE_DIR") or (ROOT / "svp-reference"),
-)
+SVP_REFERENCE_DIR = resolve_dir("SVP_REFERENCE_DIR", Path(r"D:\调"))
 
 WEB_DIR = ROOT / "web"
 OUTPUT_DIR = ROOT / "output"
@@ -206,7 +174,7 @@ def ffmpeg_path() -> str | None:
     都能吃。项目本来就依赖 ffmpeg（SheetSage2 转码也用）。
 
     查找顺序：``FFMPEG_BIN`` 环境变量 → 包内 ``runtime/ffmpeg`` → PATH →
-    ``FFMPEG_DIR`` 环境变量 / 本机路径覆盖表 → 常见安装位置。
+    作者机器历史路径。
     """
     raw = os.environ.get("FFMPEG_BIN")
     if raw and Path(raw).expanduser().is_file():
@@ -221,14 +189,7 @@ def ffmpeg_path() -> str | None:
     found = shutil.which("ffmpeg")
     if found:
         return found
-    # 最后兜底：常见安装位置。``C:\ffmpeg\bin`` 是社区惯例，跟具体哪台机器无关；
-    # 作者/使用者自己的 ffmpeg 目录走 FFMPEG_DIR 或本机路径覆盖表，不进源码。
-    candidates: list[str] = []
-    extra = _optional_path("ffmpeg_dir", "FFMPEG_DIR")
-    if extra:
-        candidates += [str(extra / name) for name in _exe_names("ffmpeg")]
-    candidates.append(str(Path(r"C:\ffmpeg\bin") / _exe_names("ffmpeg")[0]))
-    for candidate in candidates:
+    for candidate in (r"D:\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"):
         if Path(candidate).is_file():
             return candidate
     return None
@@ -274,7 +235,7 @@ def ensure_ffmpeg_on_path() -> str | None:
     八度校正（``octave.py``）走的都是 ``ffmpeg_path()`` —— 于是会出现
     「环境面板显示 ffmpeg 绿勾，一提交任务却报找不到 ffmpeg」这种自相矛盾的现象。
 
-    开发机上一直没暴露，只是因为开发机恰好把 ffmpeg 装在了系统 PATH 里；
+    开发机上一直没暴露，只是因为 ``D:\\ffmpeg\\bin`` 恰好在系统 PATH 里；
     换成任何没装过 ffmpeg 的机器（也就是绝大多数测试者）立刻就炸。
 
     只在 ``PATH`` 上追加包内目录、且 ``ffmpeg_path()`` 已经把包内路径排在

@@ -1,8 +1,8 @@
 """MIDI/音符 → Synthesizer V Studio 工程文件（SVP, version 153）。
 
 任务文档只说「SVP 本质是 JSON，version 固定为 153，notes 至少包含音高、起始、时长、歌词」，
-但真实 153 工程的字段与时间单位并未给出。本模块的结构由 **205 个真实 SVP 工程样本**
-反解得到，关键事实如下：
+但真实 153 工程的字段与时间单位并未给出。本模块的结构由 `D:\\调` 下 205 个真实
+SVP 样本反解得到，关键事实如下：
 
 * 工程音符位于 **``tracks[i].mainGroup.notes[]``**，不是 ``tracks[i].notes[]``；
   ``library[i].notes`` 是导入的参考素材，与工程音符无关。
@@ -12,7 +12,7 @@
 * 每个音符必须带齐 ``musicalType / onset / duration / lyrics / phonemes / accent /
   pitch / detune / instantMode / attributes / systemAttributes / pitchTakes / timbreTakes``。
 
-参考样本：version 153、285 音符的一份真实 SynthV 工程（比对用，不随仓库分发）。
+参考样本：``D:\\调\\AAA约稿\\扒谱\\Battleplan Arclight.svp``（version 153，285 音符）。
 """
 
 from __future__ import annotations

@@ -1,1527 +1,1632 @@
 /* ============================================================================
-   钢琴卷帘（Piano Roll）—— SheetSage2 扒谱的可编辑谱面
+   钢琴卷帘（Piano Roll）—— SheetSage2 扒谱 ③ 的可编辑谱面
    ============================================================================
 
-   为什么是独立文件而不是塞进 index.html：这个组件的体量（渲染 / 网格吸附 /
-   指针交互 / 撤销栈 / 歌词层）已经远超"页面上的一小块脚本"，内联会让
-   index.html 难以维护。没有构建步骤，直接 <script src="./pianoroll.js"> 加载。
+   为什么是独立文件：渲染 / 网格 / 指针交互 / 撤销栈加起来已经远超"页面上的一小块
+   脚本"，内联会让 index.html 无法维护。没有构建步骤，直接 <script src> 加载。
 
-   设计要点（都是踩过或想清楚才这么定的）
+   设计要点（每一条都是想清楚才这么定的）
    --------------------------------------
-   1. **时间一律用秒，网格一律用 blick。**
-      变速曲（同一首歌多个 BPM）下"每拍多少像素"不是常数，所以网格线与
-      Ctrl+G 的吸附必须在 blick（音乐位置）域里算，再换算成秒来画。
-      blick 换算与后端 app/tempo.py 是同一套分段线性公式，参数从
-      /notes 的 tempo_map 拿，避免前后端各自实现导致漂移。
+   1. **时间用秒，网格用「谱面位置」（全音符为单位）。**
+      变速曲里一小节的秒数不是常数，所以"每拍多少像素"也不是常数：网格线与吸附必须
+      在谱面位置上算，再换算成秒来画。
 
-   2. **编辑的是音符列表，不是文本。**
-      旧版让用户手改 ABC 文本，直观性差；这里直接编辑 (start,end,pitch,lyric)，
-      保存时由后端序列化回 ABC（app/abcs.py），导出链路完全不变。
+   2. **换算与后端同源。**
+      ``posToSec`` / ``secToPos`` 就是 ``app/abcp.py::_score_to_seconds`` 的镜像
+      （按 playback.json 的小节表做分段线性插值 + 末小节速度外推）。音符本来就是后端
+      用这套映射换算成秒的，前端用同一套，音符才吸得到自己所在小节的格子上；这也正是
+      **不拿拍号去硬乘**的原因 —— 模型会产出不规整小节，硬乘必然越到后面越偏。
 
-   3. **每条轨单声部。**
-      与项目既有事实一致（实测 Vocal/Ins 从不重叠）。同一轨内出现重叠会在保存时
-      被后端拆成 器乐旋律1/器乐旋律2…，这里不阻止用户拖出重叠，但要给出提示。
+   3. **网格线分三档，且按缩放自动降级。**
+      小节线 > 拍线（四分）> 细分线。哪一档太密（间距 < MIN_LINE_PX）就不画，
+      所以缩得很小时只会看到小节线，而不是糊成一片。
 
-   4. **歌词是逐音的字面字符串，包含 - 与 + 两个记号。**
-      `-` = 同一音节延续（一字多音），`+` = 同一个词的下一个音节。
-      它们必须**原样**进 SVP，所以这一层不做任何"智能"处理，只负责录入与显示。
-      中文歌词要靠输入法，所以歌词编辑一定走真实的 <input>，不能用按键直填。
+   4. **每条轨单声部。**
+      同轨内一旦重叠，导出侧会把这条轨拆成 ``器乐旋律1`` / ``器乐旋律2``……用户要的是
+      一条完整旋律线。所以编辑结束（拖动/拉伸/新增）就地规整：后一个音符的起点被推到
+      前一个的结束点（见 ``normalizeMonophonic``），而**不是**等到导出再拆。
 
-   5. **拖动期间不整屏重绘。**
-      只改被拖那几条的 style；结构变化（增删/撤销/重新加载）才整屏重建。
+   5. **滚动条是真的。**
+      宿主用原生 overflow 滚动，横向 = 时间轴，纵向 = 音高。行高固定，所以音域宽的曲子
+      纵向会出现滚动条；网格内容按可视区裁剪渲染（culling），节点数不随时长线性增长。
+
+   6. **拖动期间不整屏重绘。** 只改被拖那几条的 style；结构变化（增删/撤销/重新加载）
+      才整屏重建。
    ========================================================================== */
 (function (global) {
   "use strict";
 
-  // 与 app/tempo.py 的 BLICK_PER_QUARTER 保持一致（SVP 153 的谱面单位）
-  var BPQ = 705600000;
-
-  // ---------------------------------------------------------------- 网格档位
-  // 数值 = 一个四分音符被切成几份。标签按用户给的说法（"1/N 个四分音符"）。
+  /* ---------------------------------------------------------------- 网格档位
+     需求里点名的六档，顺序照写。div = 一个四分音符被切成几份。
+     默认 1/4 个四分音符（16 分音符）= div 4。 */
   var GRIDS = [
-    { div: 1, label: "四分音符", short: "1/4" },
-    { div: 2, label: "1/2 个四分音符（8 分音符）", short: "1/8" },
-    { div: 4, label: "1/4 个四分音符（16 分音符）", short: "1/16" },
-    { div: 6, label: "1/6 个四分音符（16 分三连音）", short: "1/16T" },
-    { div: 8, label: "1/8 个四分音符（32 分音符）", short: "1/32" },
-    { div: 12, label: "1/12 个四分音符（32 分三连音）", short: "1/32T" },
-    { div: 16, label: "1/16 个四分音符（64 分音符）", short: "1/64" },
-    { div: 24, label: "1/24 个四分音符（64 分三连音）", short: "1/64T" },
-    { div: 32, label: "1/32 个四分音符（128 分音符）", short: "1/128" }
+    { div: 1,  label: "四分音符",                    short: "1/4" },
+    { div: 2,  label: "1/2 个四分音符（8 分音符）",   short: "1/8" },
+    { div: 4,  label: "1/4 个四分音符（16 分音符）",  short: "1/16" },
+    { div: 6,  label: "1/6 个四分音符（16 分三连音）", short: "1/16T" },
+    { div: 8,  label: "1/8 个四分音符（32 分音符）",  short: "1/32" },
+    { div: 12, label: "1/12 个四分音符（32 分三连音）", short: "1/32T" }
   ];
-  var DEFAULT_GRID = 4;
+  var DEFAULT_DIV = 4;
 
-  // ---------------------------------------------------------------- 音名
+  //: 音高范围**固定为 C0–C8**（MIDI 12–108），不跟着曲子音域变。
+  //
+  //  为什么不做成"跟着数据自适应"：自适应会让键盘的行数与每行的 y 在编辑过程中变化，
+  //  于是"往上拖高五度"要分几步——拖到当前最高点、松手、等布局重算、再接着拖。
+  //  固定全音域后纵向滚动条**永远存在**，往上拖就是一路拖过去，不用停。
+  //  代价是行数多（97 行 × 14px ≈ 1.36k px），所以要靠滚动条，加载时自动滚到音符所在音区。
+  var PITCH_LO = 12, PITCH_HI = 108;
+  //: 音符可落到的音高范围（与视图一致，免得看得见却放不下）
+  var PITCH_MIN = PITCH_LO, PITCH_MAX = PITCH_HI;
+  var ROW_H = 14;                        // 行高（固定，才有纵向滚动条）
+  var MIN_LINE_PX = 6;                   // 比这更密的网格档位就不画
+  var KEYS_W = 46;                       // 左侧音名列宽
+  var RULER_H = 20;
+  var DEFAULT_DUR_WHOLE = 0.25;          // 双击新增音符的默认时值 = 一个四分音符
+  var MIN_NOTE_WHOLE = 1 / 128;          // 最短音符，防止拖出零长度
+  var UNDO_DEPTH = 50;
+  var SELECT_COLOR_TRACKS = 4;
+
   var NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   var BLACK = { 1: 1, 3: 1, 6: 1, 8: 1, 10: 1 };
+
+  function isBlack(p) { return !!BLACK[((p % 12) + 12) % 12]; }
 
   function pitchName(p) {
     return NAMES[((p % 12) + 12) % 12] + (Math.floor(p / 12) - 1);
   }
-  function isBlack(p) { return !!BLACK[((p % 12) + 12) % 12]; }
+
   function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-  // ---------------------------------------------------------------- 速度表
-  /** 秒 → blick。与 app/tempo.py::sec_to_blick 同一套分段线性公式。 */
-  function secToBlick(sec, tm) {
-    if (!(sec > 0)) return 0;
-    var m = (tm && tm.length) ? tm : [{ t: 0, bpm: 120 }];
-    var b = 0, pt = 0, pb = m[0].bpm;
-    for (var i = 1; i < m.length; i++) {
-      if (sec <= m[i].t) break;
-      b += (m[i].t - pt) * (pb / 60) * BPQ;
-      pt = m[i].t; pb = m[i].bpm;
-    }
-    return b + (sec - pt) * (pb / 60) * BPQ;
-  }
-  /** blick → 秒。与 app/tempo.py::blick_to_sec 同一套公式。 */
-  function blickToSec(b, tm) {
-    if (!(b > 0)) return 0;
-    var m = (tm && tm.length) ? tm : [{ t: 0, bpm: 120 }];
-    var remain = b, pt = 0, pb = m[0].bpm;
-    for (var i = 1; i < m.length; i++) {
-      var seg = (m[i].t - pt) * (pb / 60) * BPQ;
-      if (remain <= seg) break;
-      remain -= seg; pt = m[i].t; pb = m[i].bpm;
-    }
-    return pt + remain / ((pb / 60) * BPQ);
+  function el(tag, cls, parent) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (parent) parent.appendChild(e);
+    return e;
   }
 
-  /** 拍号字符串 → 每小节几个四分音符（"4/4"→4，"3/4"→3，"6/8"→3）。 */
-  function quartersPerBar(meter) {
-    var s = String(meter || "4/4").trim();
-    if (/^c\|?$/i.test(s)) return 4;
-    var m = s.match(/^(\d+)\s*\/\s*(\d+)$/);
-    if (!m) return 4;
-    var num = parseInt(m[1], 10), den = parseInt(m[2], 10);
-    if (!num || !den) return 4;
-    return num * (4 / den);
-  }
+  /* ==================================================================== */
+  /*  组件主体                                                             */
+  /* ==================================================================== */
 
-  /** 给歌词做点显示上的美化：- 和 + 是记号，用符号代替，一眼能认出来。 */
-  function lyricGlyph(text) {
-    var t = String(text == null ? "" : text);
-    if (t === "-") return "‿";   // 延音：连到前一个音
-    if (t === "+") return "⁀";   // 拆音节：从前一个词接着切
-    return t;
-  }
-
-  // ==========================================================================
-  //  组件
-  // ==========================================================================
-  function mount(host, opts) {
+  function create(host, opts) {
     opts = opts || {};
-    var KEYS_W = 58;
-    var RULER_H = 24;          // 必须与 CSS 里 .pr-ruler 的高度一致（抓手就那 24px）
-    var MIN_ROWH = 9;
-    var MAX_ROWH = 26;
-    // 横向缩放（每秒多少像素）的上下限
-    var MIN_PPS = 4;
-    var MAX_PPS = 4000;
-    /* 点空白处跳转进度条的**节流窗口**。
-       为什么必须节流：跳转要重建钢琴音频（几十毫秒到几百毫秒），连点会把主线程
-       打满、界面直接卡住。留 1 秒窗口是"第一次立刻响应、之后的连点被丢掉"，
-       手感上仍然即时。 */
-    var SEEK_THROTTLE_MS = 1000;
+    var onStatus = opts.onStatus || function () {};
+    var onToast = opts.onToast || function () {};
+    var onEdit = opts.onEdit || function () {};
+    var onSeek = opts.onSeek || function () {};
+    var onRequestLyrics = opts.onRequestLyrics || null;
 
+    /* ------------------------------------------------------------ 状态 */
     var S = {
-      tempoMap: [{ t: 0, bpm: 120 }],
+      tracks: [],
+      measures: [],
+      beatsPerBar: 4,
+      beatUnit: 4,
+      unitWhole: 0.0625,
       bpm: 120,
-      meter: "4/4",
       duration: 0,
-      tracks: [],          // [{voice, display, isVocal, notes:[{start,end,pitch,lyric}]}]
-      /* 当前**正在编辑**的轨下标。一次只编一条轨（与导出的 SVP 一致：一轨一条单声部线），
-         其余轨淡显成只读背景。不这么做的话 Ctrl+A 会把各轨的音符混在一起选，
-         "选中然后铺歌词"就无从谈起。 */
-      activeTrack: 0,
-      /* 非活动轨是否淡显。关掉就只剩当前轨（谱面更干净，但失去上下文）。 */
-      ghostOthers: true,
-      /* 歌词分词：auto（中文逐字、英文按词）/ space（按空格）/ char（逐字符） */
-      splitMode: "auto",
-      chords: [],          // 只读显示的和弦音（来自 chords.mid）
-      showChords: false,
-      grid: DEFAULT_GRID,
       pxPerSec: 60,
-      rowH: 14,
-      lowPitch: 48,        // 可视范围的最低音（最下面一行）
+      lowPitch: 55,
       rows: 36,
-      active: null,        // {t: 轨道下标, i: 音符下标}
-      selection: {},       // "t:i" -> true
-      dirty: false,
-      undo: [],
-      redo: [],
-      maxUndo: 80
+      gridDiv: DEFAULT_DIV,
+      snap: true,
+      follow: true,        // 播放时视图跟随走带位置
+      playing: false,
+      activeTrack: 0,
+      selection: {},        // "t:i" → true
+      active: null,         // {t, i}
+      loaded: false
     };
+    var undoStack = [], redoStack = [], dirty = false;
 
-    if (opts.grid && GRIDS.some(function (g) { return g.div === opts.grid; })) S.grid = opts.grid;
-
-    // ---------------------------------------------------------------- DOM
-    host.innerHTML = "";
+    /* ------------------------------------------------------------ 骨架 */
     host.classList.add("pr");
 
-    var bar = document.createElement("div");
-    bar.className = "pr-bar";
+    var bar = el("div", "pr-bar", host);
 
-    // 网格档位
-    var gridWrap = document.createElement("div");
-    gridWrap.className = "pr-grid-pick";
-    var gridLab = document.createElement("span");
-    gridLab.className = "pr-lab";
-    gridLab.textContent = "网格";
-    var gridSel = document.createElement("select");
-    gridSel.id = "prGrid";
-    GRIDS.forEach(function (g) {
+    // 吸附开关（Ctrl+G）。按钮本身显示状态，省得用户猜现在到底吸不吸。
+    var snapBtn = el("button", "pr-btn pr-snap", bar);
+    snapBtn.type = "button";
+
+    var snapLab = el("span", "pr-lab", bar);
+    snapLab.textContent = "SNAP:";
+
+    var gridSel = el("select", "pr-select", bar);
+    GRIDS.forEach(function (g, i) {
       var o = document.createElement("option");
       o.value = String(g.div);
       o.textContent = g.label;
+      if (g.div === DEFAULT_DIV) o.selected = true;
       gridSel.appendChild(o);
     });
-    gridSel.value = String(S.grid);
-    var snapBtn = document.createElement("button");
-    snapBtn.className = "pr-btn";
-    snapBtn.id = "prSnap";
-    snapBtn.textContent = "吸附 Ctrl+G";
-    snapBtn.title = "把选中（未选中则全部）音符量化到当前网格";
-    gridWrap.appendChild(gridLab);
-    gridWrap.appendChild(gridSel);
-    gridWrap.appendChild(snapBtn);
 
-    // 曲目切换：一次只编一条轨（与导出的 SVP 一致）
-    var trackWrap = document.createElement("div");
-    trackWrap.className = "pr-tracks";
-    var trackLab = document.createElement("span");
-    trackLab.className = "pr-lab";
-    trackLab.textContent = "曲目";
-    var trackBtns = document.createElement("div");
-    trackBtns.className = "pr-trackbtns";
-    trackBtns.id = "prTracks";
-    trackWrap.appendChild(trackLab);
-    trackWrap.appendChild(trackBtns);
+    // 网格吸附的另一种理解："把选中的音符对齐到网格"。与开关并存，消除歧义。
+    var quantBtn = el("button", "pr-btn", bar);
+    quantBtn.type = "button";
+    quantBtn.textContent = "对齐选中";
+    quantBtn.title = "把选中的音符吸附到当前网格（没选中就整条当前轨）";
 
-    // 歌词
-    var lyrWrap = document.createElement("div");
-    lyrWrap.className = "pr-lyr";
-    var lyrLab = document.createElement("span");
-    lyrLab.className = "pr-lab";
-    lyrLab.textContent = "歌词";
-    var lyrInput = document.createElement("input");
-    lyrInput.id = "prLyric";
-    lyrInput.className = "pr-lyr-input";
-    lyrInput.type = "text";
-    lyrInput.autocomplete = "off";
-    lyrInput.placeholder = "选中音符后在此输入（中文可直接用输入法）";
-    lyrInput.disabled = true;
-    var splitSel = document.createElement("select");
-    splitSel.id = "prSplit";
-    splitSel.title = "歌词怎么切分：自动 = 中文逐字、英文按词；按空格 = 只按空格切";
-    [["auto", "自动分词"], ["space", "按空格"], ["char", "逐字符"]].forEach(function (o) {
-      var op = document.createElement("option");
-      op.value = o[0];
-      op.textContent = o[1];
-      splitSel.appendChild(op);
-    });
-    var susBtn = document.createElement("button");
-    susBtn.className = "pr-btn mono";
-    susBtn.id = "prSustain";
-    susBtn.textContent = "‿";
-    susBtn.title = "延音符 -：同一音节延续到本音符（一字多音）";
-    var sylBtn = document.createElement("button");
-    sylBtn.className = "pr-btn mono";
-    sylBtn.id = "prSyllable";
-    sylBtn.textContent = "⁀";
-    sylBtn.title = "多音节 +：本音符唱上一个词的下一个音节（open → open +）";
-    var nextBtn = document.createElement("button");
-    nextBtn.className = "pr-btn";
-    nextBtn.id = "prNext";
-    nextBtn.textContent = "下一音 ▸";
-    nextBtn.title = "把焦点移到下一个音符（Enter 同效）";
-    lyrWrap.appendChild(lyrLab);
-    lyrWrap.appendChild(lyrInput);
-    lyrWrap.appendChild(splitSel);
-    lyrWrap.appendChild(susBtn);
-    lyrWrap.appendChild(sylBtn);
-    lyrWrap.appendChild(nextBtn);
+    el("span", "pr-sep", bar);
 
-    // 视图
-    var viewWrap = document.createElement("div");
-    viewWrap.className = "pr-view";
-    var octUp = document.createElement("button");
-    octUp.className = "pr-btn";
-    octUp.textContent = "八度 ▲";
-    octUp.title = "可视音域整体上移一个八度";
-    var octDn = document.createElement("button");
-    octDn.className = "pr-btn";
-    octDn.textContent = "八度 ▼";
-    octDn.title = "可视音域整体下移一个八度";
-    var zin = document.createElement("button");
-    zin.className = "pr-btn";
-    zin.textContent = "＋";
-    zin.title = "横向放大（也可以按住 Ctrl 滚滚轮，会以指针位置为中心缩放）";
-    var zout = document.createElement("button");
-    zout.className = "pr-btn";
-    zout.textContent = "－";
-    zout.title = "横向缩小（也可以按住 Ctrl 滚滚轮）";
-    var zfit = document.createElement("button");
-    zfit.className = "pr-btn";
-    zfit.textContent = "适宽";
-    zfit.title = "整首歌缩放到一屏";
-    viewWrap.appendChild(octDn); viewWrap.appendChild(octUp);
-    viewWrap.appendChild(zout); viewWrap.appendChild(zin); viewWrap.appendChild(zfit);
+    var trackWrap = el("div", "pr-tracks", bar);
+    var trackLab = el("span", "pr-lab", trackWrap);
+    trackLab.textContent = "当前轨:";
+    var trackBtns = el("div", "pr-trackbtns", trackWrap);
 
-    var legend = document.createElement("div");
-    legend.className = "pr-legend";
+    el("span", "pr-sep", bar);
 
-    bar.appendChild(trackWrap);
-    bar.appendChild(gridWrap);
-    bar.appendChild(lyrWrap);
-    bar.appendChild(viewWrap);
-    bar.appendChild(legend);
+    var undoBtn = el("button", "pr-btn", bar);
+    undoBtn.type = "button"; undoBtn.textContent = "撤销"; undoBtn.title = "Ctrl+Z";
+    var redoBtn = el("button", "pr-btn", bar);
+    redoBtn.type = "button"; redoBtn.textContent = "重做"; redoBtn.title = "Ctrl+Shift+Z / Ctrl+Y";
 
-    var body = document.createElement("div");
-    body.className = "pr-body";
-    var scroll = document.createElement("div");
-    scroll.className = "pr-scroll";
-    var canvas = document.createElement("div");
-    canvas.className = "pr-canvas";
+    el("span", "pr-sep", bar);
 
-    var ruler = document.createElement("div");
-    ruler.className = "pr-ruler";
-    // 刻度单独放一层：这样播放头手柄不会被"重画刻度"顺手清掉
-    var rulerTicks = document.createElement("div");
-    rulerTicks.className = "pr-ruler-ticks";
-    ruler.appendChild(rulerTicks);
-    // 播放头在标尺上的**抓手**：没有它，用户根本看不出进度条能拖
-    var headGrab = document.createElement("div");
-    headGrab.className = "pr-head-grab";
-    headGrab.title = "按住左右拖动 = 定位播放位置（松手才真正跳转，拖动中不会卡）";
-    ruler.appendChild(headGrab);
-    var lanes = document.createElement("div");
-    lanes.className = "pr-lanes";
+    var zoomOut = el("button", "pr-btn pr-mono", bar);
+    zoomOut.type = "button"; zoomOut.textContent = "−"; zoomOut.title = "横向缩小（也可 Ctrl+滚轮）";
+    var zoomIn = el("button", "pr-btn pr-mono", bar);
+    zoomIn.type = "button"; zoomIn.textContent = "＋"; zoomIn.title = "横向放大（也可 Ctrl+滚轮）";
+    var zoomFit = el("button", "pr-btn", bar);
+    zoomFit.type = "button"; zoomFit.textContent = "适应宽度";
+
+    var followBtn = el("button", "pr-btn", bar);
+    followBtn.type = "button";
+    followBtn.title = "播放时视图跟随走带位置（快捷键 F）";
+
+    var hint = el("span", "pr-hint", bar);
+    hint.innerHTML = "双击空白=加音符 · Delete=删除 · Shift+拖=框选 · Ctrl+A=全选本轨 · "
+      + "Ctrl+G=吸附开关 · Ctrl+滚轮=横向缩放 · 点空白=定位 · Ctrl+Z=撤销";
+
+    /* 第二行：歌词。
+       为什么用真实的 <input> 而不是"选中音符后直接按键输入"：中文歌词要走输入法，
+       输入法需要真实的可聚焦元素来挂候选框，键盘直填打不出中文。 */
+    var lyrBar = el("div", "pr-bar pr-lyrbar", host);
+    var lyrLab = el("span", "pr-lab", lyrBar);
+    lyrLab.textContent = "歌词:";
+    var lyricInput = el("input", "pr-lyr-input", lyrBar);
+    lyricInput.type = "text";
+    lyricInput.spellcheck = false;
+    lyricInput.placeholder = "选中音符后在此输入（中文可直接用输入法），Tab 到下一个音符";
+    var lyrInfo = el("span", "pr-lyr-info", lyrBar);
+
+    var lyrBtn = el("button", "pr-btn", lyrBar);
+    lyrBtn.type = "button";
+    lyrBtn.textContent = "填词…（Ctrl+L）";
+
+    var body = el("div", "pr-body", host);
+    var keysWrap = el("div", "pr-keys-wrap", body);
+    var keys = el("div", "pr-keys", keysWrap);
+    var scroll = el("div", "pr-scroll", body);
+
+    var content = el("div", "pr-content", scroll);
+    var ruler = el("div", "pr-ruler", content);
+    var rulerTicks = el("div", "pr-ruler-ticks", ruler);
+    var lanes = el("div", "pr-lanes", content);
     var gridSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     gridSvg.setAttribute("class", "pr-gridsvg");
-    var noteLayer = document.createElement("div");
-    noteLayer.className = "pr-notes";
-    var head = document.createElement("div");
-    head.className = "pr-playhead";
-    var mq = document.createElement("div");
-    mq.className = "pr-marquee";
-
     lanes.appendChild(gridSvg);
-    lanes.appendChild(noteLayer);
-    lanes.appendChild(mq);
-    lanes.appendChild(head);
-    canvas.appendChild(ruler);
-    canvas.appendChild(lanes);
-    scroll.appendChild(canvas);
-
-    // 键列放在横向滚动容器**之外**，这样左右滚动时琴键始终贴边；
-    // 纵向滚动交给 .pr-body，两列一起走，不会错位。
-    var keysWrap = document.createElement("div");
-    keysWrap.className = "pr-keys-wrap";
-    keysWrap.style.paddingTop = RULER_H + "px";
-
-    body.appendChild(keysWrap);
-    body.appendChild(scroll);
-
-    host.appendChild(bar);
-    host.appendChild(body);
-    host.tabIndex = 0;
-
-    var empty = document.createElement("div");
-    empty.className = "pr-empty";
+    var noteLayer = el("div", "pr-notes", lanes);
+    var marquee = el("div", "pr-marquee", lanes);
+    var head = el("div", "pr-playhead", lanes);
+    var empty = el("div", "pr-empty", lanes);
     empty.textContent = "扒谱完成后，这里显示可编辑的钢琴卷帘";
-    lanes.appendChild(empty);
 
-    // ---------------------------------------------------------------- 几何
-    function timeW() { return Math.max(320, S.duration * S.pxPerSec + 40); }
-    function totalH() { return S.rows * S.rowH; }
-    function pitchToY(p) { return (S.lowPitch + S.rows - 1 - p) * S.rowH; }
-    function yToPitch(y) { return S.lowPitch + S.rows - 1 - Math.floor(y / S.rowH); }
+    /* 填词框（Ctrl+L）。做成组件内部的一层覆盖，而不是页面上的模态：
+       填词要看卷帘上选中了哪些音符，放在组件里两者天然同步。
+       用 class 而不是 hidden 属性：CSS 里 .pr-dlg 要 display:flex，
+       会把 [hidden] 的 display:none 盖掉（UA 样式优先级最低）。 */
+    var dlg = el("div", "pr-dlg off", host);
+    var dlgBox = el("div", "pr-dlg-box", dlg);
+    var dlgTitle = el("div", "pr-dlg-title", dlgBox);
+    dlgTitle.textContent = "填词";
+    var dlgCount = el("div", "pr-dlg-count", dlgBox);
+    // 「按字符隔开」放在填词框里而不是工具栏：它只对这次铺词生效，
+    // 摆在框里才不会让人以为它会影响别处的行为。
+    var splitWrap = el("label", "pr-chk", dlgBox);
+    var splitChk = el("input", "", splitWrap);
+    splitChk.type = "checkbox";
+    var splitTxt = el("span", "", splitWrap);
+    splitTxt.textContent = "按字符隔开（一字一音）";
+    splitWrap.title = "勾上：一字一音（我爱你 → 我/爱/你）。不勾：按空格切词（wo ai ni → wo/ai/ni）。";
+    var dlgText = el("textarea", "pr-dlg-text", dlgBox);
+    dlgText.spellcheck = false;
+    dlgText.placeholder = "粘贴或输入歌词。\n"
+      + "勾上「按字符隔开」= 一字一音（我爱你 → 我/爱/你）；\n"
+      + "不勾 = 按空格切词（wo ai ni → wo/ai/ni）。\n"
+      + "没覆盖到的音符保持原样（默认 la）。";
+    var dlgRow = el("div", "pr-dlg-row", dlgBox);
+    var dlgApply = el("button", "pr-btn primary", dlgRow);
+    dlgApply.type = "button";
+    dlgApply.textContent = "填入";
+    var dlgCancel = el("button", "pr-btn", dlgRow);
+    dlgCancel.type = "button";
+    dlgCancel.textContent = "取消";
+    var dlgTarget = null;
+
+    var noteEls = {};         // "t:i" → element
+    var playSec = 0;
+
+    /* ================================================================ */
+    /*  坐标换算（与 app/abcp.py::_score_to_seconds 同一套）             */
+    /* ================================================================ */
+
+    function uniformWholeSec() {
+      // 没有小节表时的等速回退：一个全音符 = 4 拍
+      return S.bpm > 0 ? 240 / S.bpm : 2.0;
+    }
+
+    function measureRate(m) {
+      var span = m.score_end - m.score_start;
+      return span > 1e-9 ? (m.end - m.start) / span : uniformWholeSec();
+    }
+
+    /**
+     * 谱面位置（全音符）→ 秒。**逐条镜像**后端 ``app/abcp.py::_score_to_seconds``：
+     *   1. 位置 <= 0 → 首小节起点（不是外推）；
+     *   2. 落在某个小节内 → 该小节内按 score 跨度做线性插值；
+     *   3. 都不匹配 → 用末小节的速率外推。
+     * 边角行为也必须一致，否则"音符吸到哪个格子"和"后端把音符放在哪一秒"会分叉。
+     */
+    function posToSec(pos) {
+      var ms = S.measures;
+      if (!ms.length) return pos * uniformWholeSec();
+      if (pos <= 0) return ms[0].start;
+      for (var i = 0; i < ms.length; i++) {
+        var m = ms[i];
+        var span = m.score_end - m.score_start;
+        if (span <= 1e-9) continue;
+        if (m.score_start <= pos && pos <= m.score_end) {
+          return m.start + (pos - m.score_start) / span * (m.end - m.start);
+        }
+      }
+      var last = ms[ms.length - 1];
+      return last.end + (pos - last.score_end) * measureRate(last);
+    }
+
+    /** 秒 → 谱面位置（全音符）。上面那张分段线性映射的逆。 */
+    function secToPos(sec) {
+      var ms = S.measures;
+      if (!ms.length) return sec / uniformWholeSec();
+      for (var i = 0; i < ms.length; i++) {
+        var m = ms[i];
+        var span = m.end - m.start;
+        if (span <= 1e-9) continue;
+        if (m.start <= sec && sec <= m.end) {
+          return m.score_start + (sec - m.start) / span * (m.score_end - m.score_start);
+        }
+      }
+      var first = ms[0];
+      if (sec < first.start) {
+        var r0 = measureRate(first);
+        return r0 > 0 ? first.score_start + (sec - first.start) / r0 : first.score_start;
+      }
+      var last = ms[ms.length - 1];
+      var r = measureRate(last);
+      return r > 0 ? last.score_end + (sec - last.end) / r : last.score_end;
+    }
+
     function secToX(sec) { return sec * S.pxPerSec; }
-    function xToSec(x) { return x / S.pxPerSec; }
+    function xToSec(x) { return S.pxPerSec > 0 ? x / S.pxPerSec : 0; }
 
-    /** 当前网格在 blick 域的步长 */
-    function stepBlick() { return BPQ / S.grid; }
-    /** 把一个 blick 位置吸附到网格 */
-    function snapB(b) { var st = stepBlick(); return Math.round(b / st) * st; }
+    function topPitch() { return S.lowPitch + S.rows - 1; }
+    function pitchToY(p) { return (topPitch() - p) * ROW_H; }
+    function yToPitch(y) { return clamp(topPitch() - Math.floor(y / ROW_H), PITCH_MIN, PITCH_MAX); }
 
-    // ---------------------------------------------------------------- 撤销
-    function snapshot() {
-      return JSON.stringify(S.tracks);
-    }
-    function pushUndo() {
-      S.undo.push(snapshot());
-      if (S.undo.length > S.maxUndo) S.undo.shift();
-      S.redo.length = 0;
-      refreshUndoBtns();
-    }
-    function restore(json) {
-      var t = JSON.parse(json);
-      S.tracks = t;
-      S.selection = {};
-      S.active = null;
-      render();
-      syncActiveUI();
-    }
-    function doUndo() {
-      if (!S.undo.length) return;
-      S.redo.push(snapshot());
-      restore(S.undo.pop());
-      refreshUndoBtns();
-      changed();
-    }
-    function doRedo() {
-      if (!S.redo.length) return;
-      S.undo.push(snapshot());
-      restore(S.redo.pop());
-      refreshUndoBtns();
-      changed();
-    }
-    var undoBtn = document.createElement("button");
-    undoBtn.className = "pr-btn";
-    undoBtn.textContent = "↶ 撤销";
-    undoBtn.title = "Ctrl+Z";
-    var redoBtn = document.createElement("button");
-    redoBtn.className = "pr-btn";
-    redoBtn.textContent = "↷ 重做";
-    redoBtn.title = "Ctrl+Shift+Z / Ctrl+Y";
-    undoBtn.onclick = doUndo;
-    redoBtn.onclick = doRedo;
-    viewWrap.insertBefore(redoBtn, viewWrap.firstChild);
-    viewWrap.insertBefore(undoBtn, viewWrap.firstChild);
+    /** 当前网格的一步 = 多少全音符（一个四分音符 = 0.25 全音符）。 */
+    function stepWhole() { return 0.25 / S.gridDiv; }
 
-    function refreshUndoBtns() {
-      undoBtn.disabled = !S.undo.length;
-      redoBtn.disabled = !S.redo.length;
+    function snapPos(pos) {
+      if (!S.snap) return pos;
+      var st = stepWhole();
+      return Math.round(pos / st) * st;
     }
 
-    function changed() {
-      S.dirty = true;
-      if (opts.onChange) opts.onChange();
+    /* ================================================================ */
+    /*  布局                                                             */
+    /* ================================================================ */
+
+    function contentWidth() {
+      return Math.max(200, secToX(Math.max(S.duration, 1)) + 80);
     }
 
-    // ---------------------------------------------------------------- 命中
-    function noteAt(trackIdx, noteIdx) { return S.tracks[trackIdx].notes[noteIdx]; }
-    function key(t, i) { return t + ":" + i; }
-    function isSelected(t, i) { return !!S.selection[key(t, i)]; }
-    function selectedList() {
+    function relayout() {
+      // 音高范围固定成整个 C0–C8：行数不再随曲子音域变化，也就没有"拖到一半布局变了"
+      // 那个问题。视图该看哪一段由滚动位置决定（load 之后会滚到音符所在音区）。
+      S.rows = PITCH_HI - PITCH_LO + 1;
+      S.lowPitch = PITCH_LO;
+
+      var w = contentWidth();
+      content.style.width = w + "px";
+      ruler.style.width = w + "px";
+      lanes.style.width = w + "px";
+      lanes.style.height = (S.rows * ROW_H) + "px";
+      keys.style.height = (S.rows * ROW_H) + "px";
+      ruler.style.height = RULER_H + "px";
+      // 音名列要让出标尺那一条的高度，否则音名会和行整体错开 RULER_H。
+      // 这里用一个像素值把两侧对齐，比在 CSS 里再写一遍 20px 更不容易失配。
+      keysWrap.style.paddingTop = RULER_H + "px";
+      renderKeys();
+    }
+
+    /** 纵向滚到某个音高"居中可见"。C0–C8 全展开后不滚一下会停在最低音区。 */
+    function scrollToPitch(pitch) {
+      var visH = (scroll.clientHeight || 460) - RULER_H;
+      var y = pitchToY(clamp(pitch, PITCH_LO, PITCH_HI));
+      scroll.scrollTop = Math.max(0, y - Math.max(0, (visH - ROW_H) / 2));
+      keys.style.transform = "translateY(" + (-scroll.scrollTop) + "px)";
+    }
+
+    /** 加载后把视图带到音符所在的音区（没有音符就停在中音区 C4 附近）。 */
+    function scrollToData() {
+      var lo = PITCH_HI, hi = PITCH_LO, any = false;
+      S.tracks.forEach(function (tr) {
+        tr.notes.forEach(function (n) {
+          any = true;
+          if (n.pitch < lo) lo = n.pitch;
+          if (n.pitch > hi) hi = n.pitch;
+        });
+      });
+      scrollToPitch(any ? (lo + hi) / 2 : 60);
+    }
+
+    function renderKeys() {
+      keys.innerHTML = "";
+      for (var i = S.rows - 1; i >= 0; i--) {
+        var p = S.lowPitch + i;
+        var row = el("div", "pr-key" + (isBlack(p) ? " black" : ""), keys);
+        row.style.height = ROW_H + "px";
+        row.textContent = (!isBlack(p) || ROW_H >= 13) ? pitchName(p) : "";
+      }
+    }
+
+    /* ================================================================ */
+    /*  渲染：网格（三档层次 + 小节号）                                   */
+    /* ================================================================ */
+
+    var SVG_NS = "http://www.w3.org/2000/svg";
+
+    function visibleRange() {
+      var x0 = scroll.scrollLeft;
+      var w = scroll.clientWidth || 800;
+      return { x0: x0, x1: x0 + w, w: w };
+    }
+
+    /**
+     * 收集可视区内要画的网格线。
+     *
+     * 三级层次：小节线(0) > 拍线(1，四分位置) > 细分线(2，当前网格步长)。
+     * **太密的档位直接不画**（间距 < MIN_LINE_PX）：这既是"层次"的来源，也是缩小时
+     * 不会糊成一片的原因 —— 缩得越小，剩下的档位越粗，而不是线变多。
+     *
+     * 小节线取模型真实的小节划分（``S.measures``），不拿拍号硬乘：变速曲里一小节的
+     * 秒数不是常数，模型也可能产出不规整小节。
+     */
+    function collectGrid() {
+      var vis = visibleRange();
+      var posA = secToPos(xToSec(vis.x0));
+      var posB = secToPos(xToSec(vis.x1));
+      var st = stepWhole();
       var out = [];
-      Object.keys(S.selection).forEach(function (k) {
-        var p = k.split(":"), t = +p[0], i = +p[1];
-        if (S.tracks[t] && S.tracks[t].notes[i]) out.push({ t: t, i: i });
+
+      var subPx = Math.abs(posToSec(st) - posToSec(0)) * S.pxPerSec;
+      var beatPx = Math.abs(posToSec(0.25) - posToSec(0)) * S.pxPerSec;
+      var showBeat = beatPx >= MIN_LINE_PX;
+      var showSub = showBeat && subPx >= MIN_LINE_PX;
+
+      if (!S.measures.length) {
+        // 无小节表（没有 playback.json）：按等速的均匀小节兜底
+        var barWhole = S.beatsPerBar * 4 / S.beatUnit / 4;
+        var i0 = Math.max(0, Math.floor(posA / barWhole));
+        var i1 = Math.ceil(posB / barWhole) + 1;
+        for (var b = i0; b <= i1; b++) {
+          var base = b * barWhole;
+          pushLine(out, posToSec(base), 0, b + 1, true);
+          if (!showBeat) continue;
+          var nSteps = showSub ? Math.round(barWhole / st) : S.beatsPerBar;
+          for (var k = 1; k < nSteps; k++) {
+            var p = base + k * (showSub ? st : 0.25);
+            if (p > posB) break;
+            pushLine(out, posToSec(p), isQuarter(p) ? 1 : 2, 0, false);
+          }
+        }
+        return { lines: out, showSub: showSub };
+      }
+
+      for (var mi = 0; mi < S.measures.length; mi++) {
+        var m = S.measures[mi];
+        if (m.score_end < posA - 1e-9) continue;
+        if (m.score_start > posB + 1e-9) break;
+        pushLine(out, m.start, 0, mi + 1, true);
+
+        if (!showBeat) continue;
+        var span = m.score_end - m.score_start;
+        if (span <= 1e-9) continue;
+        // 不画小节末端那条（它就是下一个小节的小节线，重复画会加深一次）
+        var nSub = Math.min(4096, Math.round(span / (showSub ? st : 0.25)));
+        for (var s = 1; s < nSub; s++) {
+          var pp = m.score_start + s * (showSub ? st : 0.25);
+          if (pp > posB) break;
+          pushLine(out, posToSec(pp), isQuarter(pp) ? 1 : 2, 0, false);
+        }
+      }
+      return { lines: out, showSub: showSub };
+    }
+
+    function isQuarter(pos) {
+      return Math.abs(pos / 0.25 - Math.round(pos / 0.25)) < 1e-6;
+    }
+
+    function pushLine(out, sec, level, barNo, isBar) {
+      var x = secToX(sec);
+      out.push({ x: x, level: level, barNo: barNo, bar: isBar });
+    }
+
+    function renderGrid() {
+      var vis = visibleRange();
+      var g = collectGrid();
+      gridSvg.setAttribute("width", vis.w);
+      gridSvg.setAttribute("height", S.rows * ROW_H);
+      gridSvg.setAttribute("viewBox", vis.x0 + " 0 " + vis.w + " " + (S.rows * ROW_H));
+      gridSvg.style.width = vis.w + "px";
+      gridSvg.style.height = (S.rows * ROW_H) + "px";
+      gridSvg.style.left = vis.x0 + "px";
+
+      var parts = [];
+      // 黑白键行底色（层次的一部分：黑键行更深）
+      for (var i = 0; i < S.rows; i++) {
+        var p = S.lowPitch + i;
+        if (!isBlack(p)) continue;
+        parts.push('<rect class="pr-row-black" x="' + vis.x0 + '" y="' + ((S.rows - 1 - i) * ROW_H)
+          + '" width="' + vis.w + '" height="' + ROW_H + '"/>');
+      }
+      g.lines.forEach(function (L) {
+        var cls = L.level === 0 ? "pr-gl-bar" : (L.level === 1 ? "pr-gl-beat" : "pr-gl-sub");
+        parts.push('<line class="' + cls + '" x1="' + L.x.toFixed(2) + '" x2="' + L.x.toFixed(2)
+          + '" y1="0" y2="' + (S.rows * ROW_H) + '"/>');
+      });
+      gridSvg.innerHTML = parts.join("");
+    }
+
+    /** 标尺：小节号 + 前导刻度；太密时按 2/5/10 的步长抽稀。 */
+    function renderRuler() {
+      var vis = visibleRange();
+      var secA = xToSec(vis.x0), secB = xToSec(vis.x1);
+      var posA = secToPos(secA), posB = secToPos(secB);
+      var html = [];
+      var barWhole = S.measures.length
+        ? Math.max(1e-6, S.measures[0].score_end - S.measures[0].score_start)
+        : (S.beatsPerBar * 4 / S.beatUnit / 4);
+      var barPx = (S.measures.length
+        ? Math.abs(S.measures[0].end - S.measures[0].start)
+        : posToSec(barWhole) - posToSec(0)) * S.pxPerSec;
+      var step = 1;
+      if (barPx > 0) {
+        while (barPx * step < 46) step *= (step === 1 ? 2 : (step === 2 ? 2.5 : 2));
+      }
+
+      if (!S.measures.length) {
+        var i0 = Math.max(0, Math.floor(posA / barWhole));
+        var i1 = Math.ceil(posB / barWhole) + 1;
+        for (var b = i0; b <= i1; b++) {
+          if (b % step !== 0) continue;
+          var x = secToX(posToSec(b * barWhole));
+          if (x < vis.x0 - 60 || x > vis.x1 + 60) continue;
+          html.push('<i class="pr-tick" style="left:' + x.toFixed(1) + 'px"></i>'
+            + '<b class="pr-barno" style="left:' + (x + 5).toFixed(1) + 'px">' + (b + 1) + '</b>');
+        }
+      } else {
+        for (var mi = 0; mi < S.measures.length; mi++) {
+          var m = S.measures[mi];
+          if (m.score_end < posA - 1e-9) continue;
+          if (m.score_start > posB + 1e-9) break;
+          if (mi % step !== 0) continue;
+          var x2 = secToX(m.start);
+          if (x2 < vis.x0 - 60 || x2 > vis.x1 + 60) continue;
+          html.push('<i class="pr-tick" style="left:' + x2.toFixed(1) + 'px"></i>'
+            + '<b class="pr-barno" style="left:' + (x2 + 5).toFixed(1) + 'px">' + (mi + 1) + '</b>');
+        }
+      }
+      rulerTicks.innerHTML = html.join("");
+    }
+
+    /* ================================================================ */
+    /*  渲染：音符                                                       */
+    /* ================================================================ */
+
+    function noteKey(t, i) { return t + ":" + i; }
+
+    function isSelected(t, i) { return !!S.selection[noteKey(t, i)]; }
+
+    function collectVisibleNotes() {
+      var vis = visibleRange();
+      var secA = xToSec(vis.x0) - 1, secB = xToSec(vis.x1) + 1;
+      var out = [];
+      S.tracks.forEach(function (tr, t) {
+        tr.notes.forEach(function (n, i) {
+          if (n.end < secA || n.start > secB) return;
+          out.push({ t: t, i: i, n: n, tr: tr });
+        });
       });
       return out;
     }
-    function selectOnly(t, i) {
-      S.selection = {};
-      S.selection[key(t, i)] = true;
-      S.active = { t: t, i: i };
-    }
-
-    // ---------------------------------------------------------------- 渲染
-    var noteEls = {};       // "t:i" -> element
-    var rowEls = [];
-
-    function computeRange() {
-      var lo = Infinity, hi = -Infinity;
-      S.tracks.forEach(function (tr) {
-        tr.notes.forEach(function (n) { if (n.pitch < lo) lo = n.pitch; if (n.pitch > hi) hi = n.pitch; });
-      });
-      if (S.showChords) S.chords.forEach(function (n) { if (n.pitch < lo) lo = n.pitch; if (n.pitch > hi) hi = n.pitch; });
-      if (!isFinite(lo)) { lo = 60; hi = 72; }
-      return { lo: lo, hi: hi };
-    }
-
-    function layoutKeys() {
-      // 音域自动框住内容 + 上下各留 2 个半音，再夹到钢琴范围内
-      var r = computeRange();
-      var need = (r.hi + 2) - (r.lo - 2) + 1;
-      S.rows = clamp(need, 12, 96);
-      S.lowPitch = clamp(r.lo - 2, 21, 108 - S.rows + 1);
-
-      var avail = Math.max(200, body.clientHeight || 380);
-      S.rowH = clamp(Math.floor((avail - RULER_H) / S.rows), MIN_ROWH, MAX_ROWH);
-    }
-
-    function render() {
-      layoutKeys();
-
-      var W = timeW(), H = totalH();
-      canvas.style.width = W + "px";
-      lanes.style.width = W + "px";
-      lanes.style.height = H + "px";
-      ruler.style.width = W + "px";
-
-      renderKeys();
-      renderRuler(W);
-      renderGrid(W, H);
-      renderTracks();
-      renderNotes();
-      renderPlayhead();
-
-      empty.style.display = S.tracks.length ? "none" : "";
-      renderLegend();
-    }
-
-    /** 构件「曲目」切换按钮。一次只编一条轨——这是 Ctrl+A 铺歌词能成立的前提。 */
-    function renderTracks() {
-      trackBtns.innerHTML = "";
-      S.tracks.forEach(function (tr, i) {
-        var b = document.createElement("button");
-        b.className = "pr-track" + (i === S.activeTrack ? " on" : "");
-        b.dataset.t = i;
-        b.textContent = tr.display + "（" + tr.notes.length + "）";
-        b.title = i === S.activeTrack
-          ? "当前编辑中（Ctrl+A 只选这条轨）"
-          : "点一下切到这条轨编辑";
-        b.onclick = function () { setActiveTrack(i); };
-        trackBtns.appendChild(b);
-      });
-      var g = document.createElement("label");
-      g.className = "pr-chk";
-      g.title = "勾上时其他轨淡显作对照；不勾只看当前轨";
-      var cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = S.ghostOthers;
-      cb.onchange = function () { S.ghostOthers = cb.checked; render(); };
-      g.appendChild(cb);
-      g.appendChild(document.createTextNode("显示其他轨"));
-      trackBtns.appendChild(g);
-    }
-
-    /** 切换当前编辑的轨：清空选择、重画、同步歌词框。 */
-    function setActiveTrack(i) {
-      if (i < 0 || i >= S.tracks.length || i === S.activeTrack) return;
-      S.activeTrack = i;
-      S.selection = {};
-      S.active = null;
-      render();
-      syncActiveUI();
-      var tr = S.tracks[i];
-      if (opts.onToast) opts.onToast("已切到「" + tr.display + "」，Ctrl+A 可全选这条轨", "");
-    }
-
-    function renderLegend() {
-      legend.innerHTML = "";
-      S.tracks.forEach(function (tr, i) {
-        var s = document.createElement("span");
-        s.className = "pr-lg pr-lg-" + (i % 4);
-        s.textContent = tr.display + "（" + tr.notes.length + "）";
-        legend.appendChild(s);
-      });
-      if (S.showChords && S.chords.length) {
-        var c = document.createElement("span");
-        c.className = "pr-lg pr-lg-chord";
-        c.textContent = "和弦（只读，" + S.chords.length + "）";
-        legend.appendChild(c);
-      }
-      var hint = document.createElement("span");
-      hint.className = "pr-lg pr-lg-hint";
-      hint.textContent = "一次只编一条轨（上方「曲目」切换）· 双击空白新增 · 拖动改音高与时间 · "
-        + "右边缘拉伸 · Delete 删除 · Shift+拖框选 · Ctrl+A 全选本轨 · Ctrl+G 吸附 · "
-        + "Ctrl+L 导入歌词 · Ctrl+滚轮 横向缩放 · 拖标尺/点空白定位 · Ctrl+Z 撤销";
-      legend.appendChild(hint);
-    }
-
-    function renderRuler(W) {
-      rulerTicks.innerHTML = "";
-      var qpb = quartersPerBar(S.meter);
-      var barB = qpb * BPQ;
-      var total = secToBlick(S.duration + 2, S.tempoMap);
-      var i = 0;
-      // 小节线太密时按 2/4/8… 间隔标注
-      var perBar = W > 2400 ? 1 : W > 1200 ? 2 : 4;
-      for (var b = 0; b <= total; b += barB) {
-        var x = secToX(blickToSec(b, S.tempoMap));
-        if (i % perBar === 0) {
-          var t = document.createElement("div");
-          t.className = "pr-tick";
-          t.style.left = x + "px";
-          t.textContent = String(Math.round(b / barB) + 1);
-          rulerTicks.appendChild(t);
-        }
-        i++;
-      }
-    }
-
-    function renderGrid(W, H) {
-      var NS = "http://www.w3.org/2000/svg";
-      gridSvg.setAttribute("width", W);
-      gridSvg.setAttribute("height", H);
-      gridSvg.setAttribute("viewBox", "0 0 " + W + " " + H);
-      while (gridSvg.firstChild) gridSvg.removeChild(gridSvg.firstChild);
-
-      var frag = document.createDocumentFragment();
-
-      // 行底色：黑键行深一点，方便对齐音高
-      for (var p = S.lowPitch; p < S.lowPitch + S.rows; p++) {
-        if (!isBlack(p)) continue;
-        var r = document.createElementNS(NS, "rect");
-        r.setAttribute("x", 0);
-        r.setAttribute("y", pitchToY(p));
-        r.setAttribute("width", W);
-        r.setAttribute("height", S.rowH);
-        r.setAttribute("class", "pr-row-black");
-        frag.appendChild(r);
-      }
-
-      // 网格竖线：按当前档位画；三连音档位用不同样式，避免和 2 的幂混淆
-      var step = stepBlick();
-      var total = secToBlick(S.duration + 2, S.tempoMap);
-      var isTriplet = (S.grid % 3 === 0) && (S.grid & (S.grid - 1)) !== 0;
-      // 线太密就不画细线，只保留小节线
-      var pxPerStep = (BPQ / S.grid) / BPQ * 60 / S.tempoMap[0].bpm * S.pxPerSec;
-      var drawFine = pxPerStep >= 5;
-      if (drawFine) {
-        for (var b = 0; b <= total; b += step) {
-          var x = secToX(blickToSec(b, S.tempoMap));
-          var ln = document.createElementNS(NS, "line");
-          ln.setAttribute("x1", x); ln.setAttribute("x2", x);
-          ln.setAttribute("y1", 0); ln.setAttribute("y2", H);
-          ln.setAttribute("class", "pr-gl" + (isTriplet ? " pr-gl-trip" : ""));
-          frag.appendChild(ln);
-        }
-      }
-      // 小节线
-      var barB = quartersPerBar(S.meter) * BPQ;
-      for (var bb = 0; bb <= total; bb += barB) {
-        var bx = secToX(blickToSec(bb, S.tempoMap));
-        var bl = document.createElementNS(NS, "line");
-        bl.setAttribute("x1", bx); bl.setAttribute("x2", bx);
-        bl.setAttribute("y1", 0); bl.setAttribute("y2", H);
-        bl.setAttribute("class", "pr-gl-bar");
-        frag.appendChild(bl);
-      }
-      gridSvg.appendChild(frag);
-    }
 
     function renderNotes() {
-      noteLayer.innerHTML = "";
-      noteEls = {};
-      S.tracks.forEach(function (tr, t) {
-        var editable = (t === S.activeTrack);
-        var ghost = !editable && S.ghostOthers;
-        if (!editable && !S.ghostOthers) return;      // 只看当前轨
-        tr.notes.forEach(function (n, i) {
-          var el = document.createElement("div");
-          el.className = "pr-note pr-v" + (t % 4) + (editable ? "" : " pr-ghost");
-          el.dataset.t = t; el.dataset.i = i;
-          var body = document.createElement("span");
-          body.className = "pr-note-ly";
-          // 淡显的背景轨不显示歌词：它们不可编辑，显示歌词只会干扰读谱
-          body.textContent = editable ? lyricGlyph(n.lyric) : "";
-          el.appendChild(body);
-          var grip = document.createElement("i");
-          grip.className = "pr-grip";
-          el.appendChild(grip);
-          el.title = pitchName(n.pitch) + "  " + n.start.toFixed(2) + "–" + n.end.toFixed(2) + "s"
-            + (editable ? "" : "（" + tr.display + "，切到该轨才能编辑）");
-          noteLayer.appendChild(el);
-          noteEls[key(t, i)] = el;
-          placeNote(el, n);
-          if (editable && isSelected(t, i)) el.classList.add("sel");
-          if (S.active && S.active.t === t && S.active.i === i) el.classList.add("act");
-        });
+      var vis = collectVisibleNotes();
+      var seen = {};
+      vis.forEach(function (it) {
+        var k = noteKey(it.t, it.i);
+        seen[k] = true;
+        var e = noteEls[k];
+        if (!e) {
+          e = el("div", "pr-note", noteLayer);
+          e.dataset.t = String(it.t);
+          e.dataset.i = String(it.i);
+          var gripL = el("i", "pr-grip pr-grip-l", e);
+          var gripR = el("i", "pr-grip pr-grip-r", e);
+          gripL.dataset.grip = "l"; gripR.dataset.grip = "r";
+          el("span", "pr-ly", e);
+          noteEls[k] = e;
+        }
+        styleNote(e, it.n, it.tr, it.t, it.i);
       });
-      if (S.showChords) {
-        S.chords.forEach(function (n) {
-          var el = document.createElement("div");
-          el.className = "pr-note pr-chord";
-          el.style.pointerEvents = "none";
-          placeNote(el, n);
-          noteLayer.appendChild(el);
-        });
-      }
+      // 移出可视区的音符元素回收
+      Object.keys(noteEls).forEach(function (k) {
+        if (seen[k]) return;
+        noteEls[k].remove();
+        delete noteEls[k];
+      });
+      syncLyricInput();
     }
 
-    function placeNote(el, n) {
-      var x = secToX(n.start), w = Math.max(3, secToX(n.end) - x);
-      el.style.left = x + "px";
-      el.style.width = w + "px";
-      el.style.top = pitchToY(n.pitch) + "px";
-      el.style.height = Math.max(3, S.rowH - 1) + "px";
-      var ly = el.querySelector(".pr-note-ly");
-      if (ly) ly.style.display = w >= 16 ? "" : "none";
+    function styleNote(e, n, tr, t, i) {
+      var x = secToX(n.start);
+      var w = Math.max(3, secToX(n.end) - x);
+      e.style.left = x + "px";
+      e.style.width = w + "px";
+      e.style.top = pitchToY(n.pitch) + "px";
+      e.style.height = (ROW_H - 1) + "px";
+      for (var k = 0; k < SELECT_COLOR_TRACKS; k++) {
+        e.classList.toggle("pr-v" + k, k === (t % SELECT_COLOR_TRACKS));
+      }
+      e.classList.toggle("pr-ghost", !tr.editable);
+      e.classList.toggle("sel", isSelected(t, i));
+      e.classList.toggle("act", !!S.active && S.active.t === t && S.active.i === i);
+      e.classList.toggle("playing", noteKey(t, i) === playingKey);
+      var ly = e.querySelector(".pr-ly");
+      var txt = n.lyric == null ? "" : String(n.lyric);
+      if (ly.textContent !== txt) ly.textContent = txt;
+      ly.style.display = w >= 14 ? "" : "none";
     }
 
     function renderPlayhead() {
-      var x = secToX(playSec);
-      head.style.left = x + "px";
-      headGrab.style.left = x + "px";
+      head.style.left = secToX(playSec) + "px";
+      head.style.height = (S.rows * ROW_H) + "px";
     }
 
-    // ---------------------------------------------------------------- 键列
-    function renderKeys() {
-      keysWrap.innerHTML = "";
-      for (var p = S.lowPitch + S.rows - 1; p >= S.lowPitch; p--) {
-        var row = document.createElement("div");
-        row.className = "pr-key" + (isBlack(p) ? " black" : "");
-        row.style.height = S.rowH + "px";
-        // 行太矮时黑键不写音名，否则文字挤成一团反而看不清
-        row.textContent = (!isBlack(p) || S.rowH >= 13) ? pitchName(p) : "";
-        row.onclick = (function (pp) {
-          return function () { if (opts.onAudition) opts.onAudition(pp); };
-        })(p);
-        keysWrap.appendChild(row);
-      }
-    }
-
-    // ---------------------------------------------------------------- 播放头
-    var playSec = 0;
-    function setPlayhead(sec) {
-      playSec = Math.max(0, sec || 0);
-      renderPlayhead();
-      var lo = playSec;
-      // 正在发声的音符高亮（参考项目没做这个，这里顺手做了）
-      Object.keys(noteEls).forEach(function (kk) {
-        var p = kk.split(":"), n = S.tracks[+p[0]].notes[+p[1]];
-        if (!n) return;
-        noteEls[kk].classList.toggle("playing", lo >= n.start && lo < n.end);
+    function renderTracks() {
+      trackBtns.innerHTML = "";
+      S.tracks.forEach(function (tr, t) {
+        var b = el("button", "pr-track" + (t === S.activeTrack ? " on" : ""), trackBtns);
+        b.type = "button";
+        b.textContent = tr.display + "（" + tr.notes.length + "）";
+        if (!tr.editable) b.title = "和弦轨来自 chords.mid，不是 ABC 声部，只能查看";
+        b.onclick = function () {
+          S.activeTrack = t;
+          renderTracks();
+          onStatus("当前轨：" + tr.display);
+        };
       });
     }
 
-    // ---------------------------------------------------------------- 交互
-    var drag = null;
+    function render() {
+      empty.style.display = S.tracks.length ? "none" : "";
+      snapBtn.textContent = S.snap ? "吸附：开（Ctrl+G）" : "吸附：关（Ctrl+G）";
+      snapBtn.classList.toggle("primary", S.snap);
+      followBtn.textContent = S.follow ? "跟随：开（F）" : "跟随：关（F）";
+      followBtn.classList.toggle("primary", S.follow);
+      renderGrid();
+      renderRuler();
+      renderNotes();
+      renderPlayhead();
+      renderTracks();
+      syncLyricInput();
+    }
+
+    /* ================================================================ */
+    /*  撤销 / 重做                                                       */
+    /* ================================================================ */
+
+    function snapshot() {
+      return JSON.stringify(S.tracks.map(function (tr) {
+        return {
+          voice: tr.voice, display: tr.display, kind: tr.kind,
+          editable: tr.editable, isVocal: tr.isVocal,
+          notes: tr.notes.map(function (n) {
+            return { start: n.start, end: n.end, pitch: n.pitch, lyric: n.lyric };
+          })
+        };
+      }));
+    }
+
+    function restore(json) {
+      S.tracks = JSON.parse(json).map(function (tr) { tr.is_vocal = tr.isVocal; return tr; });
+      S.selection = {};
+      S.active = null;
+      relayout();
+      render();
+    }
+
+    function pushUndo() {
+      undoStack.push(snapshot());
+      if (undoStack.length > UNDO_DEPTH) undoStack.shift();
+      redoStack.length = 0;
+      markDirty();
+    }
+
+    function undo() {
+      if (!undoStack.length) { onStatus("没有可撤销的操作"); return; }
+      redoStack.push(snapshot());
+      restore(undoStack.pop());
+      markDirty();
+      onStatus("已撤销");
+    }
+
+    function redo() {
+      if (!redoStack.length) { onStatus("没有可重做的操作"); return; }
+      undoStack.push(snapshot());
+      restore(redoStack.pop());
+      markDirty();
+      onStatus("已重做");
+    }
+
+    function markDirty() {
+      dirty = true;
+      onEdit();
+    }
+
+    /* ================================================================ */
+    /*  选中                                                             */
+    /* ================================================================ */
+
+    function clearSelection() { S.selection = {}; S.active = null; }
+
+    function selectOnly(t, i) { clearSelection(); S.selection[noteKey(t, i)] = true; S.active = { t: t, i: i }; }
+
+    function toggleSelect(t, i) {
+      var k = noteKey(t, i);
+      if (S.selection[k]) delete S.selection[k];
+      else S.selection[k] = true;
+      S.active = { t: t, i: i };
+    }
+
+    function selectedList() {
+      return Object.keys(S.selection).map(function (k) {
+        var p = k.split(":");
+        return { t: +p[0], i: +p[1] };
+      });
+    }
+
+    function editable(t) { return S.tracks[t] && S.tracks[t].editable; }
+
+    function noteAt(t, i) {
+      var tr = S.tracks[t];
+      return tr ? tr.notes[i] : null;
+    }
+
+    /* ================================================================ */
+    /*  同轨不重叠                                                       */
+    /* ================================================================ */
+
+    /**
+     * 同一条轨内**不允许重叠**：后一个音符的起点被推到前一个的结束点。
+     *
+     * 为什么不等到导出再处理：ABC 的一个 ``V:`` 天生单声部，重叠音符在导出侧会被
+     * ``monophonic_groups()`` 拆成 ``器乐旋律1`` / ``器乐旋律2``……用户要的是一条完整
+     * 旋律线，不是碎片。所以在编辑时就维持单声部。
+     *
+     * **谁被拖动谁赢**（用户 2026 反馈后定的规则）：
+     *   * 后一个音符被左拖、压到前一个 → **把前一个的尾巴收到它的起点**（"侵占"）；
+     *   * 前一个被右拖、压到后一个 → 把后一个往后推（原来的行为，一个音都不少）。
+     *
+     * 一开始只有"把后一个往后推"一种处理，结果是**后一个音符永远没法往左拖过前一个的
+     * 结束点**——一松手就被推回来，看着像"拖不动"。谁在动就得让谁说话。
+     *
+     * 就地改对象、**不重排 ``tr.notes``**：重排会让 ``S.selection`` / ``S.active`` 里
+     * 存的按下标错位，选中状态会莫名跳到别的音符上。
+     *
+     * Args:
+     *     movedIdx: 本次手势刚动过的音符下标集合；``null`` 表示不知道谁动的
+     *         （比如整体规整、加载），此时一律退化成"把后一个往后推"。
+     *
+     * Returns: 被调整过的音符个数。
+     */
+    function normalizeMonophonic(t, movedIdx) {
+      var tr = S.tracks[t];
+      if (!tr || tr.notes.length < 2) return 0;
+      var isMoved = function (i) { return !!movedIdx && movedIdx[i]; };
+      var ns = tr.notes.map(function (n, i) { return { n: n, i: i }; })
+        .sort(function (a, b) { return a.n.start - b.n.start || a.n.pitch - b.n.pitch; });
+      var touched = 0;
+      for (var k = 1; k < ns.length; k++) {
+        var prev = ns[k - 1], cur = ns[k];
+        if (cur.n.start >= prev.n.end - 1e-9) continue;
+
+        if (isMoved(cur.i) && !isMoved(prev.i)) {
+          // 被拖的是后一个 → 它侵占前一个：前一个的尾巴收到它的起点。
+          // 前一个至少要留 MIN_NOTE_WHOLE：压成零长度后端会直接 400（"音符时长为 0"）。
+          var keep = MIN_NOTE_WHOLE;
+          if (cur.n.start - prev.n.start >= keep + 1e-9) {
+            var newEnd = Math.max(prev.n.start + keep, cur.n.start);
+            if (newEnd < prev.n.end - 1e-9) { prev.n.end = newEnd; touched++; }
+          }
+          // 前一个已经短到不能再短（两者起点几乎重合，例如模型给的 `[CEG]` 同时音）
+          // → 只能把后一个整体推回去，保证不重叠。
+          if (cur.n.start < prev.n.end - 1e-9) {
+            var d = Math.max(MIN_NOTE_WHOLE, cur.n.end - cur.n.start);
+            cur.n.start = prev.n.end;
+            cur.n.end = cur.n.start + d;
+            touched++;
+          }
+          continue;
+        }
+
+        // 其余情况（拖的是前一个 / 两个都动了 / 不知道谁动的）→ 把后一个**整体往后推**：
+        // 起点和终点一起走，**时值原样保留**。只挪起点会把音符越推越短（实测出来的），
+        // 而"推"的语义就是整条让开，不是被压扁。
+        var dur = Math.max(MIN_NOTE_WHOLE, cur.n.end - cur.n.start);
+        cur.n.start = prev.n.end;
+        cur.n.end = cur.n.start + dur;
+        touched++;
+      }
+      return touched;
+    }
+
+    /** 全部轨规整。``movedByTrack`` 形如 ``{轨下标: {音符下标: true}}``。 */
+    function normalizeAll(movedByTrack) {
+      var touched = 0;
+      S.tracks.forEach(function (tr, t) {
+        if (!tr.editable) return;
+        touched += normalizeMonophonic(t, movedByTrack ? movedByTrack[t] : null);
+      });
+      return touched;
+    }
+
+    /** 保存前的重叠自检（给页面层弹提示用）。 */
+    function overlaps() {
+      var out = [];
+      S.tracks.forEach(function (tr) {
+        if (!tr.editable) return;
+        var bad = 0;
+        var ns = tr.notes.slice().sort(function (a, b) { return a.start - b.start; });
+        for (var i = 1; i < ns.length; i++) {
+          if (ns[i].start < ns[i - 1].end - 1e-9) bad++;
+        }
+        if (bad) out.push(tr.display + " 有 " + bad + " 处重叠");
+      });
+      return out;
+    }
+
+    /* ================================================================ */
+    /*  编辑操作                                                         */
+    /* ================================================================ */
+
+    function deleteSelected() {
+      var list = selectedList().filter(function (m) { return editable(m.t); });
+      if (!list.length) { onStatus("没有可删除的音符（和弦轨不可编辑）"); return; }
+      pushUndo();
+      // 按轨分组、从后往前删，避免下标位移
+      var byTrack = {};
+      list.forEach(function (m) { (byTrack[m.t] = byTrack[m.t] || []).push(m.i); });
+      Object.keys(byTrack).forEach(function (t) {
+        byTrack[t].sort(function (a, b) { return b - a; })
+          .forEach(function (i) { S.tracks[t].notes.splice(i, 1); });
+      });
+      clearSelection();
+      relayout(); render();
+      onStatus("已删除 " + list.length + " 个音符");
+    }
+
+    function addNote(t, pos, pitch) {
+      var tr = S.tracks[t];
+      if (!tr || !tr.editable) { onToast("和弦轨不可编辑，请先切到人声/器乐轨", "warn"); return; }
+      pushUndo();
+      var start = snapPos(pos);
+      var dur = Math.max(stepWhole(), DEFAULT_DUR_WHOLE);
+      // 默认时值对齐网格，但至少一步
+      if (S.snap) dur = Math.max(stepWhole(), Math.round(dur / stepWhole()) * stepWhole());
+      tr.notes.push({
+        start: posToSec(start),
+        end: posToSec(start + dur),
+        pitch: clamp(pitch, PITCH_MIN, PITCH_MAX),
+        lyric: "la"
+      });
+      var idx = tr.notes.length - 1;
+      // 新音符就是"这次在动的那一个"：双击落在一条长音符中间时，长音符收到新音符的
+      // 起点（侵占）；落在前一个之前则把前一个往后推。见 normalizeMonophonic。
+      var moved = {};
+      moved[idx] = true;
+      normalizeMonophonic(t, moved);
+      selectOnly(t, idx);
+      render();
+      onStatus("已插入音符（默认歌词 la）");
+    }
+
+    function quantizeSelected() {
+      // 选中优先；没选中就整条当前轨（与 Ctrl+A 的语义一致）
+      var targets = selectedList().filter(function (m) { return editable(m.t); });
+      if (!targets.length) {
+        var at = S.tracks[S.activeTrack];
+        if (at && at.editable) {
+          targets = at.notes.map(function (_, i) { return { t: S.activeTrack, i: i }; });
+        }
+      }
+      if (!targets.length) { onStatus("没有可吸附的音符"); return; }
+      pushUndo();
+      var st = stepWhole(), n = 0;
+      var movedByTrack = {};
+      targets.forEach(function (m) {
+        var note = noteAt(m.t, m.i);
+        if (!note) return;
+        (movedByTrack[m.t] = movedByTrack[m.t] || {})[m.i] = true;
+        var ps = snapPos(secToPos(note.start));
+        var pe = snapPos(secToPos(note.end));
+        if (pe - ps < st) pe = ps + st;
+        var ns = posToSec(ps), ne = posToSec(pe);
+        if (Math.abs(ns - note.start) > 1e-9 || Math.abs(ne - note.end) > 1e-9) n++;
+        note.start = ns; note.end = ne;
+      });
+      normalizeAll(movedByTrack);
+      relayout(); render();
+      onStatus("已吸附 " + n + " 个音符到 " + currentGrid().label);
+    }
+
+    function currentGrid() {
+      for (var i = 0; i < GRIDS.length; i++) if (GRIDS[i].div === S.gridDiv) return GRIDS[i];
+      return GRIDS[2];
+    }
+
+    function selectAllInActiveTrack() {
+      var tr = S.tracks[S.activeTrack];
+      if (!tr) return;
+      clearSelection();
+      tr.notes.forEach(function (_, i) { S.selection[noteKey(S.activeTrack, i)] = true; });
+      if (tr.notes.length) S.active = { t: S.activeTrack, i: 0 };
+      renderNotes();
+      onStatus("已全选「" + tr.display + "」的 " + tr.notes.length + " 个音符");
+    }
+
+    function setGridDiv(div) {
+      S.gridDiv = div;
+      render();
+      onStatus("网格：" + currentGrid().label + "（吸附随网格）");
+    }
+
+    function setSnap(on) {
+      S.snap = !!on;
+      render();
+      onStatus(S.snap ? "吸附已打开" : "吸附已关闭（可自由摆放）");
+    }
+
+    function setZoom(pps, anchorClientX) {
+      var next = clamp(pps, 4, 2000);
+      var wrapRect = scroll.getBoundingClientRect();
+      var px = (anchorClientX == null ? wrapRect.width / 2 : anchorClientX - wrapRect.left);
+      var secAt = xToSec(scroll.scrollLeft + px);
+      S.pxPerSec = next;
+      content.style.width = contentWidth() + "px";
+      ruler.style.width = contentWidth() + "px";
+      lanes.style.width = contentWidth() + "px";
+      scroll.scrollLeft = Math.max(0, secToX(secAt) - px);
+      render();
+    }
+
+    /** 把整首歌缩放到可视宽度，并**回到开头**。
+     *
+     *  不能复用 setZoom：那个是"以锚点为中心缩放"，专门用来保持用户当前看的位置。
+     *  拟合时若还去保持锚点，加载完曲子视图会停在中间（首屏就看不到第 1 小节）。 */
+    function fitWidth() {
+      var w = scroll.clientWidth || 800;
+      S.pxPerSec = clamp((w - 24) / Math.max(1, S.duration || 1), 4, 2000);
+      content.style.width = contentWidth() + "px";
+      ruler.style.width = contentWidth() + "px";
+      lanes.style.width = contentWidth() + "px";
+      scroll.scrollLeft = 0;
+      render();
+      onStatus("已适应宽度");
+    }
+
+    /* ================================================================ */
+    /*  指针交互                                                         */
+    /* ================================================================ */
+
+    var gesture = null;
 
     function localPoint(ev) {
       var r = lanes.getBoundingClientRect();
       return { x: ev.clientX - r.left, y: ev.clientY - r.top };
     }
 
-    function beginGesture(ev) {
-      host.focus();
-      var pt = localPoint(ev);
-      var target = ev.target;
-      var noteEl = target.closest ? target.closest(".pr-note") : null;
+    function hitNote(target) {
+      var e = target.closest ? target.closest(".pr-note") : null;
+      if (!e || e.dataset.t == null) return null;
+      return { t: +e.dataset.t, i: +e.dataset.i, el: e, grip: target.dataset ? target.dataset.grip : null };
+    }
 
-      if (noteEl && noteEl.dataset.t != null && !noteEl.classList.contains("pr-chord")) {
-        var t = +noteEl.dataset.t, i = +noteEl.dataset.i;
-        if (ev.shiftKey) {
-          var kk = key(t, i);
-          if (S.selection[kk]) delete S.selection[kk]; else S.selection[kk] = true;
-          S.active = { t: t, i: i };
-          refreshSelectionUI();
-          syncActiveUI();
+    function beginGesture(ev) {
+      if (!S.loaded || ev.button !== 0) return;
+      var pt = localPoint(ev);
+      var hit = hitNote(ev.target);
+
+      if (hit) {
+        if (!editable(hit.t)) {
+          onToast("和弦轨来自 chords.mid，不能编辑", "warn");
           return;
         }
-        if (!isSelected(t, i)) { selectOnly(t, i); refreshSelectionUI(); syncActiveUI(); }
-        var resizing = target.classList && target.classList.contains("pr-grip");
-        var members = selectedList();
-        pushUndo();
-        drag = {
-          mode: resizing ? "resize" : "move",
-          x0: pt.x, y0: pt.y,
-          members: members.map(function (m) {
+        if (ev.shiftKey) toggleSelect(hit.t, hit.i);
+        else if (!isSelected(hit.t, hit.i)) selectOnly(hit.t, hit.i);
+        else S.active = { t: hit.t, i: hit.i };
+
+        var notes = selectedList().filter(function (m) { return editable(m.t); });
+        gesture = {
+          mode: hit.grip ? "resize" : "move",
+          grip: hit.grip,
+          x0: pt.x,
+          // y0 必须一起记：纵向位移是拿 pt.y 减它算的，漏了它 dPitch 会变成 NaN，
+          // 音符音高直接被写成 NaN（表现为"拖一下就没了 / 拖不动"）。
+          y0: pt.y,
+          moved: false,
+          pushed: false,     // 第一次真正移动时才压撤销快照
+          items: notes.map(function (m) {
             var n = noteAt(m.t, m.i);
-            return { t: m.t, i: m.i, s: n.start, e: n.end, p: n.pitch };
+            return { t: m.t, i: m.i, s0: n.start, e0: n.end, p0: n.pitch, el: noteEls[noteKey(m.t, m.i)] };
           })
         };
         lanes.setPointerCapture(ev.pointerId);
         ev.preventDefault();
+        renderNotes();
         return;
       }
 
-      // 空白处：拖 = 框选，**只是点一下 = 跳转进度条**
-      if (!ev.shiftKey) { S.selection = {}; S.active = null; refreshSelectionUI(); syncActiveUI(); }
-      drag = {
-        mode: "marquee", x0: pt.x, y0: pt.y, add: !!ev.shiftKey,
-        base: Object.assign({}, S.selection), moved: false
+      // 空白：Shift+拖 = 框选；不按 Shift 拖 = 也是框选（松手没动就是定位）
+      gesture = {
+        mode: "marquee",
+        x0: pt.x, y0: pt.y, additive: ev.shiftKey,
+        moved: false, base: ev.shiftKey ? Object.assign({}, S.selection) : {}
       };
+      marquee.style.display = "block";
+      marquee.style.left = pt.x + "px";
+      marquee.style.top = pt.y + "px";
+      marquee.style.width = "0px";
+      marquee.style.height = "0px";
       lanes.setPointerCapture(ev.pointerId);
       ev.preventDefault();
     }
 
-    /* 进度条定位。**节流改成"合并"而不是"丢弃"**：
-       丢弃会让用户"拖了三下只有一下生效"，而且线条（跟着手走）与音频（没跳）
-       会脱节。现在窗口内的多次请求合并成窗口末尾的一次 —— 第一次立刻响应，
-       之后的连点/拖动只在最后落一次，既不会卡也不会漏。 */
-    var lastSeekAt = 0, seekTimer = null, seekPending = null;
-
-    function flushSeek() {
-      if (seekTimer) { clearTimeout(seekTimer); seekTimer = null; }
-      if (seekPending == null) return;
-      var sec = seekPending;
-      seekPending = null;
-      lastSeekAt = Date.now();
-      if (opts.onSeek) opts.onSeek(Math.max(0, sec));
-    }
-
-    function seekAtTime(sec) {
-      seekPending = sec;
-      var wait = SEEK_THROTTLE_MS - (Date.now() - lastSeekAt);
-      if (wait <= 0) { flushSeek(); return true; }
-      if (!seekTimer) seekTimer = setTimeout(flushSeek, wait);
-      return false;
-    }
-
-    // ---------------------------------------------------------------- 拖动定位
-    /* 标尺上按住左右拖 = 定位。**拖动过程中只动线条**（改一个 style，几乎零成本），
-       松手才真正跳转 —— 跳转要重建钢琴音频，跟着指针每像素跳一次必然卡死。 */
-    var scrubbing = false;
-
-    function rulerX(ev) {
-      return ev.clientX - ruler.getBoundingClientRect().left;
-    }
-    function scrubTo(ev) {
-      var sec = xToSec(rulerX(ev));
-      if (sec < 0) sec = 0;
-      if (S.duration > 0 && sec > S.duration) sec = S.duration;
-      playSec = sec;
-      renderPlayhead();
-    }
-    function beginScrub(ev) {
-      host.focus();
-      scrubbing = true;
-      try { ruler.setPointerCapture(ev.pointerId); } catch (e) { /* 老浏览器 */ }
-      scrubTo(ev);
-      ev.preventDefault();
-    }
-    function moveScrub(ev) { if (scrubbing) scrubTo(ev); }
-    function endScrub(ev) {
-      if (!scrubbing) return;
-      scrubbing = false;
-      try { ruler.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
-      seekAtTime(playSec);          // 松手才真正跳
-    }
-    ruler.addEventListener("pointerdown", beginScrub);
-    ruler.addEventListener("pointermove", moveScrub);
-    ruler.addEventListener("pointerup", endScrub);
-    ruler.addEventListener("pointercancel", endScrub);
-    headGrab.addEventListener("pointerdown", beginScrub);
-
     function moveGesture(ev) {
-      if (!drag) return;
+      if (!gesture) return;
       var pt = localPoint(ev);
-      if (drag.mode === "marquee") {
-        if (Math.abs(pt.x - drag.x0) > 3 || Math.abs(pt.y - drag.y0) > 3) drag.moved = true;
-        var x = Math.min(pt.x, drag.x0), y = Math.min(pt.y, drag.y0);
-        var w = Math.abs(pt.x - drag.x0), h = Math.abs(pt.y - drag.y0);
-        mq.style.display = "";
-        mq.style.left = x + "px"; mq.style.top = y + "px";
-        mq.style.width = w + "px"; mq.style.height = h + "px";
-        // 实时把框内的音符加进选择集。**只收当前轨**：跨轨混合选择会让
-        // "选中然后铺歌词"失去意义（一轨一条单声部线，歌词只铺在一条线上）。
-        S.selection = drag.add ? Object.assign({}, drag.base) : {};
-        var s0 = xToSec(x), s1 = xToSec(x + w);
-        var pHi = yToPitch(y), pLo = yToPitch(y + h);
-        var only = S.tracks[S.activeTrack];
-        if (only) {
-          only.notes.forEach(function (n, i) {
-            if (n.end > s0 && n.start < s1 && n.pitch >= pLo && n.pitch <= pHi) {
-              S.selection[key(S.activeTrack, i)] = true;
-            }
-          });
-        }
-        refreshSelectionUI();
+      var dxs = pt.x - gesture.x0;
+
+      if (gesture.mode === "marquee") {
+        var dy = pt.y - gesture.y0;
+        if (Math.abs(dxs) > 3 || Math.abs(dy) > 3) gesture.moved = true;
+        var w = Math.abs(dxs), h = Math.abs(dy);
+        marquee.style.left = (Math.min(pt.x, gesture.x0)) + "px";
+        marquee.style.top = (Math.min(pt.y, gesture.y0)) + "px";
+        marquee.style.width = w + "px";
+        marquee.style.height = h + "px";
         return;
       }
 
-      var dSec = xToSec(pt.x - drag.x0);
-      var dPitch = -Math.round((pt.y - drag.y0) / S.rowH);
+      // 纵向也要算"动过了"：只看横向位移的话，纯上下拖会被 endGesture 当成"没动"，
+      // 于是不规整、不标脏、**改动不会被保存**（音高明明已经变了）。
+      if (Math.abs(dxs) > 2 || Math.abs(pt.y - gesture.y0) > 2) gesture.moved = true;
+      // 第一次真正动到音符时压一次撤销快照 —— 必须在**改之前**压，
+      // 而且只压一次（否则每帧一个快照，撤销要按到天荒地老）。
+      // 之前拖动/改时值完全没有压栈，导致"拖完撤不回去"。
+      if (gesture.moved && !gesture.pushed) { pushUndo(); gesture.pushed = true; }
+      // 位移在**谱面位置域**里算：指针这次与按下时的位置差，就是音符该走的距离。
+      // 变速曲里同样一段像素在不同 BPM 段对应不同时值，用像素差直接改秒会拉伸音符。
+      var dPos = secToPos(xToSec(pt.x)) - secToPos(xToSec(gesture.x0));
+      var dPitch = Math.round(-(pt.y - gesture.y0) / ROW_H);
+      dPitch = clamp(dPitch, -48, 48);
 
-      drag.members.forEach(function (m) {
-        var n = noteAt(m.t, m.i);
+      gesture.items.forEach(function (it) {
+        var n = noteAt(it.t, it.i);
         if (!n) return;
-        if (drag.mode === "move") {
-          var ns = m.s + dSec;
-          if (ns < 0) ns = 0;
-          n.start = ns;
-          n.end = ns + (m.e - m.s);
-          n.pitch = clamp(m.p + dPitch, 21, 108);
+        if (gesture.mode === "move") {
+          n.start = posToSec(snapPos(secToPos(it.s0) + dPos));
+          n.end = posToSec(snapPos(secToPos(it.e0) + dPos));
+          if (n.start < 0) { n.end -= n.start; n.start = 0; }
+          n.pitch = clamp(it.p0 + dPitch, PITCH_MIN, PITCH_MAX);
+        } else if (gesture.grip === "l") {
+          var s = snapPos(secToPos(it.s0) + dPos);
+          var maxS = secToPos(it.e0) - MIN_NOTE_WHOLE;
+          n.start = posToSec(Math.min(s, maxS));
         } else {
-          var ne = m.e + dSec;
-          if (ne <= n.start + 0.01) ne = n.start + 0.01;
-          n.end = ne;
+          var e2 = snapPos(secToPos(it.e0) + dPos);
+          n.end = posToSec(Math.max(e2, secToPos(it.s0) + MIN_NOTE_WHOLE));
         }
-        placeNote(noteEls[key(m.t, m.i)], n);
+        if (it.el) styleNote(it.el, n, S.tracks[it.t], it.t, it.i);
       });
     }
 
     function endGesture(ev) {
-      if (!drag) return;
-      if (drag.mode === "marquee") {
-        mq.style.display = "none";
-        var wasClick = !drag.moved;            // 没怎么动 = 就是"点了一下"
-        drag = null;
-        try { lanes.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
-        if (wasClick && ev) {
-          // 点空白处 → 进度条跳到那一秒（节流 1 秒，见 SEEK_THROTTLE_MS）
-          seekAtTime(xToSec(localPoint(ev).x));
+      if (!gesture) return;
+      var g = gesture;
+      gesture = null;
+      try { lanes.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
+      marquee.style.display = "none";
+
+      if (g.mode === "marquee") {
+        if (!g.moved) {
+          // 点空白而不拖 = 定位进度条（需求：立即跳转）
+          var sec = Math.max(0, xToSec(localPoint(ev).x));
+          setPlayhead(sec);
+          onSeek(sec);
+          if (!g.additive) { clearSelection(); renderNotes(); }
+          return;
         }
+        applyMarquee(g);
         return;
       }
-      drag = null;
-      // 拖动结束才吸附：拖动过程中跟手，松手落格（与参考项目"实时吸附"不同，
-      // 实时吸附会让慢速拖动一卡一卡的，手感差）
-      if (opts.snapWhileDragging !== false) quantize(selectedList(), true);
-      // 拖完立刻恢复"同轨不重叠"：把被压到的后续音符往后推
-      normalizeMonophonic(S.activeTrack);
-      render();
-      changed();
-      try { lanes.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
-    }
 
-    /** 同一条轨内**不允许重叠**：后一个音符的起点被推到前一个的结束点。
-     *
-     *  为什么必须这样：ABC 的一条 ``V:`` 天生单声部，重叠的音符在导出侧会被
-     *  `monophonic_groups()` 拆成 `器乐旋律1` / `器乐旋律2`…… 用户要的是**一条完整
-     *  的旋律线**，不是被拆开的碎片。所以在编辑时就维持单声部，而不是等到导出再拆。
-     *
-     *  就地改对象、**不重排 `tr.notes`**：重排会让 `S.selection` / `S.active` 里存的
-     *  下标全部错位，选中状态会莫名其妙跳到别的音符上。
-     *
-     *  Returns: 被推动过的音符个数。
-     */
-    function normalizeMonophonic(ti) {
-      var tr = S.tracks[ti];
-      if (!tr || tr.notes.length < 2) return 0;
-      var ns = tr.notes.slice().sort(function (a, b) {
-        return a.start - b.start || a.pitch - b.pitch;
+      if (!g.moved) return;
+      // 告诉规整逻辑"这次是谁在动"：拖谁谁赢，另一个让位（见 normalizeMonophonic）。
+      var movedByTrack = {};
+      g.items.forEach(function (it) {
+        (movedByTrack[it.t] = movedByTrack[it.t] || {})[it.i] = true;
       });
-      var moved = 0;
-      for (var i = 1; i < ns.length; i++) {
-        var prev = ns[i - 1], cur = ns[i];
-        if (cur.start >= prev.end - 1e-9) continue;
-        // 至少保一个网格步长，绝不产出零长度音符（那在后端是非法输入）
-        var minDur = Math.max(0.01,
-          blickToSec(secToBlick(prev.end, S.tempoMap) + stepBlick(), S.tempoMap) - prev.end);
-        var dur = Math.max(minDur, cur.end - cur.start);
-        cur.start = prev.end;
-        if (cur.end <= cur.start) cur.end = cur.start + dur;
-        moved++;
-      }
-      return moved;
+      normalizeAll(movedByTrack);
+      relayout(); render();
+      markDirty();
+      onStatus(g.mode === "move" ? "已移动音符" : "已改变音符长度");
     }
 
-    /** 把给定音符量化到当前网格；silent=true 时不推撤销（调用方已推过）。 */
-    function quantize(list, silent) {
-      if (!list.length) return 0;
-      if (!silent) pushUndo();
-      var st = stepBlick();
-      var tm = S.tempoMap;
-      var n = 0;
-      list.forEach(function (m) {
-        var note = noteAt(m.t, m.i);
-        if (!note) return;
-        var bs = snapB(secToBlick(note.start, tm));
-        var be = snapB(secToBlick(note.end, tm));
-        if (be - bs < st) be = bs + st;
-        var ns = blickToSec(bs, tm), ne = blickToSec(be, tm);
-        if (Math.abs(ns - note.start) > 1e-9 || Math.abs(ne - note.end) > 1e-9) n++;
-        note.start = ns; note.end = ne;
+    /** 按选框矩形（存于 marquee 的 style）挑选音符；Shift 时为追加选择。 */
+    function applyMarquee(g) {
+      var left = parseFloat(marquee.style.left) || 0;
+      var top = parseFloat(marquee.style.top) || 0;
+      var w = parseFloat(marquee.style.width) || 0;
+      var h = parseFloat(marquee.style.height) || 0;
+
+      S.selection = g.additive ? Object.assign({}, g.base) : {};
+      S.tracks.forEach(function (tr, t) {
+        if (!tr.editable) return;                    // 和弦轨不参与框选
+        tr.notes.forEach(function (n, i) {
+          var nx0 = secToX(n.start), nx1 = Math.max(nx0 + 1, secToX(n.end));
+          var ny0 = pitchToY(n.pitch), ny1 = ny0 + ROW_H;
+          if (nx1 < left || nx0 > left + w || ny1 < top || ny0 > top + h) return;
+          S.selection[noteKey(t, i)] = true;
+        });
       });
-      return n;
+      renderNotes();
+      onStatus("框选 " + Object.keys(S.selection).length + " 个音符");
     }
 
-    function refreshSelectionUI() {
-      Object.keys(noteEls).forEach(function (kk) {
-        var p = kk.split(":");
-        noteEls[kk].classList.toggle("sel", isSelected(+p[0], +p[1]));
-      });
-    }
-
+    /* ------------------------------------------------------------ 指针接线 */
+    /* ⚠️ 这四行是**必须**的：没有它们，拖动音符、拖边缘改长度、框选、点空白取消选择
+       全都不会发生（表现是"卷帘是死的"，但代码看起来又都对）。
+       曾经在一次大改里被整段删掉而没人发现 —— 现在 tools/check_web_js.py 里有一组
+       直接派发合成指针事件的行为测试守着它。 */
     lanes.addEventListener("pointerdown", beginGesture);
     lanes.addEventListener("pointermove", moveGesture);
     lanes.addEventListener("pointerup", endGesture);
     lanes.addEventListener("pointercancel", endGesture);
 
-    // 双击空白 → 在最近的半音/网格上新增一个当前网格长度的音符
+    /* ------------------------------------------------------------ 标尺定位 */
+    // 标尺是 lanes 的兄弟节点（不属于 lanes），所以它的点击不会被 lanes 的指针逻辑
+    // 接住；这里单独接一条，否则标尺上那个 ew-resize 光标是骗人的。
+    ruler.addEventListener("pointerdown", function (ev) {
+      if (!S.loaded || ev.button !== 0) return;
+      var r = lanes.getBoundingClientRect();
+      var sec = Math.max(0, xToSec(ev.clientX - r.left));
+      setPlayhead(sec);
+      onSeek(sec);
+    });
+
+    /* ------------------------------------------------------------ 双击新增 */
     lanes.addEventListener("dblclick", function (ev) {
-      var noteEl = ev.target.closest ? ev.target.closest(".pr-note") : null;
-      if (noteEl && !noteEl.classList.contains("pr-chord")) {
-        // 双击已有音符 → 去编辑它的歌词，比"新增"更符合直觉
-        S.active = { t: +noteEl.dataset.t, i: +noteEl.dataset.i };
-        selectOnly(S.active.t, S.active.i);
-        refreshSelectionUI();
-        syncActiveUI();
-        lyrInput.focus();
-        lyrInput.select();
+      if (!S.loaded) return;
+      var hit = hitNote(ev.target);
+      if (hit) {
+        // 双击已有音符 → 选中它（P3 起用于编辑歌词）
+        if (editable(hit.t)) { selectOnly(hit.t, hit.i); renderNotes(); }
         return;
       }
-      var tr = S.tracks[S.activeTrack];
-      if (!tr) return;
       var pt = localPoint(ev);
-      var tm = S.tempoMap;
-      var bs = snapB(secToBlick(xToSec(pt.x), tm));
-      var be = bs + stepBlick();
-      var note = {
-        start: blickToSec(bs, tm),
-        end: blickToSec(be, tm),
-        pitch: clamp(yToPitch(pt.y), 21, 108),
-        lyric: "la"
-      };
-      pushUndo();
-      tr.notes.push(note);
-      tr.notes.sort(function (a, b) { return a.start - b.start || a.pitch - b.pitch; });
-      var idx = tr.notes.indexOf(note);
-      selectOnly(S.activeTrack, idx);
-      normalizeMonophonic(S.activeTrack);
-      render();
-      syncActiveUI();
-      changed();
+      addNote(S.activeTrack, secToPos(xToSec(pt.x)), yToPitch(pt.y));
     });
 
-    // 右键删除（与参考项目一致的手感）
-    lanes.addEventListener("contextmenu", function (ev) {
-      var noteEl = ev.target.closest ? ev.target.closest(".pr-note") : null;
-      if (!noteEl || noteEl.classList.contains("pr-chord")) return;
+    /* ------------------------------------------------------------ 滚轮缩放 */
+    function onWheel(ev) {
+      if (!(ev.ctrlKey || ev.metaKey)) return;   // 普通滚轮留给纵向翻页
       ev.preventDefault();
-      pushUndo();
-      S.tracks[+noteEl.dataset.t].notes.splice(+noteEl.dataset.i, 1);
-      S.selection = {}; S.active = null;
-      render(); syncActiveUI(); changed();
-    });
-
-    /** Ctrl+G 与「吸附」按钮的共同实现：选中优先，没选中就整条当前轨。 */
-    function doSnap() {
-      var list = selectedList();
-      var all = [];
-      var cur = S.tracks[S.activeTrack];
-      if (cur) {
-        cur.notes.forEach(function (_n, i) { all.push({ t: S.activeTrack, i: i }); });
-      }
-      if (!all.length) return;
-      var useAll = list.length === 0;
-      var n = quantize(useAll ? all : list, false);
-      normalizeMonophonic(S.activeTrack);
-      render();
-      if (n) changed();
-      if (opts.onToast) {
-        var g = GRIDS.filter(function (x) { return x.div === S.grid; })[0];
-        opts.onToast(
-          useAll
-            ? "已把「" + (cur ? cur.display : "当前轨") + "」全部 " + all.length
-              + " 个音符吸附到 " + (g ? g.label : S.grid)
-            : "已吸附 " + n + " 个音符到 " + (g ? g.label : S.grid),
-          n ? "ok" : ""
-        );
-      }
-    }
-
-    // ---------------------------------------------------------------- 键盘
-    host.addEventListener("keydown", function (ev) {
-      var tag = (ev.target.tagName || "").toLowerCase();
-      if (tag === "input" || tag === "select" || tag === "textarea") return;
-      var mod = ev.ctrlKey || ev.metaKey;
-
-      if (mod && ev.key.toLowerCase() === "z") {
-        ev.preventDefault();
-        if (ev.shiftKey) doRedo(); else doUndo();
-        return;
-      }
-      if (mod && ev.key.toLowerCase() === "y") { ev.preventDefault(); doRedo(); return; }
-
-      // ★ Ctrl+A：全选**当前曲目**的音符。
-      // 刻意不跨轨：卷帘一次只编一条轨（与导出的 SVP 一致，一轨一条单声部线），
-      // 全选当前轨之后再输入歌词，就能一个字一个音符地铺下去。
-      if (mod && ev.key.toLowerCase() === "a") {
-        ev.preventDefault();
-        S.selection = {};
-        var cur = S.tracks[S.activeTrack];
-        if (cur) {
-          cur.notes.forEach(function (_n, i) { S.selection[key(S.activeTrack, i)] = true; });
-          // 让歌词框可用（它靠 S.active 判断"有没有在编的音符"）
-          if (cur.notes.length) S.active = { t: S.activeTrack, i: 0 };
-        }
-        refreshSelectionUI();
-        if (opts.onToast) {
-          opts.onToast(cur
-            ? ("已全选「" + cur.display + "」的 " + cur.notes.length + " 个音符，可直接输入歌词")
-            : "当前没有曲目", "");
-        }
-        syncActiveUI();
-        return;
-      }
-
-      // ★ Ctrl+L：歌词填充（弹窗在 index.html，这里只转发）
-      if (mod && ev.key.toLowerCase() === "l") {
-        ev.preventDefault();
-        if (opts.onLyrics) opts.onLyrics();
-        return;
-      }
-
-      // ★ Ctrl+G：一键把选中（或全部）吸附到当前网格
-      if (mod && ev.key.toLowerCase() === "g") {
-        ev.preventDefault();
-        doSnap();
-        return;
-      }
-
-      if (ev.key === "Delete" || ev.key === "Backspace") {
-        var sel = selectedList();
-        if (!sel.length) return;
-        ev.preventDefault();
-        pushUndo();
-        // 从后往前删，避免下标错位
-        sel.sort(function (a, b) { return b.t - a.t || b.i - a.i; });
-        sel.forEach(function (m) { S.tracks[m.t].notes.splice(m.i, 1); });
-        S.selection = {}; S.active = null;
-        render(); syncActiveUI(); changed();
-        return;
-      }
-
-      if (ev.key === "Enter") {
-        ev.preventDefault();
-        lyrInput.focus();
-        lyrInput.select();
-        return;
-      }
-
-      var dirs = { ArrowUp: 1, ArrowDown: -1, ArrowLeft: -1, ArrowRight: 1 };
-      if (dirs[ev.key] !== undefined) {
-        var l2 = selectedList();
-        if (!l2.length) return;
-        ev.preventDefault();
-        pushUndo();
-        var oct = ev.shiftKey ? 12 : 1;
-        var tm2 = S.tempoMap;
-        var st2 = stepBlick();
-        l2.forEach(function (m) {
-          var n = noteAt(m.t, m.i);
-          if (ev.key === "ArrowUp" || ev.key === "ArrowDown") {
-            n.pitch = clamp(n.pitch + dirs[ev.key] * oct, 21, 108);
-          } else {
-            var d = dirs[ev.key] * st2 * oct;
-            var bs = snapB(secToBlick(n.start, tm2) + d);
-            var dur = secToBlick(n.end, tm2) - secToBlick(n.start, tm2);
-            n.start = blickToSec(bs, tm2);
-            n.end = blickToSec(bs + dur, tm2);
-          }
-        });
-        normalizeMonophonic(S.activeTrack);
-        render(); changed();
-      }
-    });
-
-    // ---------------------------------------------------------------- 工具栏
-    gridSel.onchange = function () {
-      S.grid = +gridSel.value;
-      render();
-      if (opts.onGrid) opts.onGrid(S.grid);
-    };
-    snapBtn.onclick = doSnap;
-    octUp.onclick = function () { S.lowPitch = clamp(S.lowPitch + 12, 21, 108 - S.rows + 1); render(); };
-    octDn.onclick = function () { S.lowPitch = clamp(S.lowPitch - 12, 21, 108 - S.rows + 1); render(); };
-    // 缩放按钮也走同一套"以中心为锚"的缩放，保证与 Ctrl+滚轮行为一致
-    zin.onclick = function () { zoomAt(1.3); };
-    zout.onclick = function () { zoomAt(1 / 1.3); };
-    zfit.onclick = function () { fit(); render(); };
-
-    /** 横向缩放。**以 clientX 处的时间点为锚**——锚点下面的音符保持不动，
-        否则每缩放一次视图就整体往左跑，根本没法对着某个音看细节。
-        clientX 省略时用可视区中心（工具栏的 ＋/－ 按钮走这条）。 */
-    function zoomAt(factor, clientX) {
-      var rect = scroll.getBoundingClientRect();
-      var localX = (clientX == null || !isFinite(clientX)) ? rect.width / 2 : (clientX - rect.left);
-      var tAt = (scroll.scrollLeft + localX) / S.pxPerSec;
-      var next = clamp(S.pxPerSec * factor, MIN_PPS, MAX_PPS);
-      if (next === S.pxPerSec) return false;
-      S.pxPerSec = next;
-      render();
-      scroll.scrollLeft = Math.max(0, tAt * S.pxPerSec - localX);
-      return true;
-    }
-
-    /* ★ Ctrl（macOS 上是 Cmd）+ 滚轮 = **卷帘横向缩放**，而不是浏览器整页缩放。
-       两件事必须一起做：
-         1. `passive:false` 才拦得住 —— 用默认的 passive 监听器调 preventDefault 无效，
-            Chrome 照样去缩放整个页面；
-         2. 触控板的双指捏合在 Chrome 里就是**以 ctrlKey 的 wheel 事件**送达的，
-            所以这一处顺手把"在卷帘上捏合缩放页面"也挡掉了，正合预期。
-       普通滚轮不拦：那是纵向翻页，用户还需要它。 */
-    function onWheelZoom(ev) {
-      if (!ev.ctrlKey && !ev.metaKey) return;
-      ev.preventDefault();
-      // 不同设备的 deltaY 量级差很多（鼠标滚轮 ±100、触控板 ±1、按行模式 ±3），
-      // 所以先把 deltaMode 归一成像素，再取指数 —— 这样滚轮和触控板手感一致。
       var d = ev.deltaY;
       if (ev.deltaMode === 1) d *= 16;
-      else if (ev.deltaMode === 2) d *= 400;
-      var step = clamp(Math.exp(-d * 0.0015), 0.5, 2);
-      zoomAt(step, ev.clientX);
+      else if (ev.deltaMode === 2) d *= 100;
+      var k = Math.exp(-d * 0.0015);
+      setZoom(S.pxPerSec * k, ev.clientX);
     }
-    // 挂在整块卷帘上（含工具栏）：在卷帘范围内按 Ctrl+滚轮都算缩放卷帘
-    host.addEventListener("wheel", onWheelZoom, { passive: false });
+    host.addEventListener("wheel", onWheel, { passive: false });
 
-    function fit() {
-      var w = Math.max(200, scroll.clientWidth - 8);
-      if (S.duration > 0) S.pxPerSec = clamp(w / S.duration, MIN_PPS, MAX_PPS);
+    /* ------------------------------------------------------------ 滚动重绘 */
+    var rafPending = false;
+    function onScroll() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(function () {
+        rafPending = false;
+        renderGrid();
+        renderRuler();
+        renderNotes();
+        renderPlayhead();
+      });
     }
+    scroll.addEventListener("scroll", onScroll);
+    // 键盘列要跟着纵向滚，否则音名和行对不上
+    scroll.addEventListener("scroll", function () {
+      keys.style.transform = "translateY(" + (-scroll.scrollTop) + "px)";
+    });
 
-    // ---------------------------------------------------------------- 歌词
+    /* ------------------------------------------------------------ 快捷键 */
+    function onKey(ev) {
+      if (!S.loaded) return;
+      var tag = (ev.target && ev.target.tagName) || "";
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+
+      var mod = ev.ctrlKey || ev.metaKey;
+      var key = (ev.key || "").toLowerCase();
+
+      // 焦点还在工具栏按钮上时空格是"再按一次这个按钮"，不该被当成播放开关
+      if ((key === " " || ev.code === "Space") && tag === "BUTTON") return;
+      if (key === " " || ev.code === "Space") {
+        ev.preventDefault();
+        // 按住空格会连发 keydown；不过滤的话播放/停止会被切成一串抖动
+        if (!ev.repeat && opts.onTogglePlay) opts.onTogglePlay();
+        return;
+      }
+      if (key === "delete" || key === "backspace") { ev.preventDefault(); deleteSelected(); return; }
+      if (key === "escape") { clearSelection(); renderNotes(); onStatus("已取消选择"); return; }
+      if (mod && key === "a") { ev.preventDefault(); selectAllInActiveTrack(); return; }
+      if (mod && key === "g") { ev.preventDefault(); setSnap(!S.snap); return; }
+      if (key === "f" && !mod) { ev.preventDefault(); setFollow(!S.follow); return; }
+      if (mod && key === "l") {
+        ev.preventDefault();
+        // 页面层可以接管（老实现挂在 ④ 歌词卡片上）；没人接管就用组件自带的填词框
+        if (onRequestLyrics) onRequestLyrics(); else openLyricDialog();
+        return;
+      }
+      if (mod && key === "z") { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
+      if (mod && key === "y") { ev.preventDefault(); redo(); return; }
+      if (mod && key === "s") { ev.preventDefault(); if (opts.onSave) opts.onSave(); return; }
+
+      if (ev.key && ev.key.indexOf("Arrow") === 0) {
+        var list = selectedList().filter(function (m) { return editable(m.t); });
+        if (!list.length) return;
+        ev.preventDefault();
+        pushUndo();
+        var st = stepWhole();
+        var movedByTrack = {};
+        list.forEach(function (m) {
+          var n = noteAt(m.t, m.i);
+          if (!n) return;
+          (movedByTrack[m.t] = movedByTrack[m.t] || {})[m.i] = true;
+          if (ev.key === "ArrowLeft") {
+            var s = Math.max(0, secToPos(n.start) - st), d = secToPos(n.end) - secToPos(n.start);
+            n.start = posToSec(s); n.end = posToSec(s + d);
+          } else if (ev.key === "ArrowRight") {
+            var s2 = secToPos(n.start) + st, d2 = secToPos(n.end) - secToPos(n.start);
+            n.start = posToSec(s2); n.end = posToSec(s2 + d2);
+          } else if (ev.key === "ArrowUp") n.pitch = clamp(n.pitch + 1, PITCH_MIN, PITCH_MAX);
+          else if (ev.key === "ArrowDown") n.pitch = clamp(n.pitch - 1, PITCH_MIN, PITCH_MAX);
+        });
+        normalizeAll(movedByTrack);
+        relayout(); render();
+        onStatus("已按方向键移动选中音符");
+        return;
+      }
+    }
+    global.addEventListener("keydown", onKey);
+
+    /* ------------------------------------------------------------ 工具栏事件 */
+    snapBtn.onclick = function () { setSnap(!S.snap); };
+    gridSel.onchange = function () { setGridDiv(+gridSel.value); };
+    quantBtn.onclick = quantizeSelected;
+    undoBtn.onclick = undo;
+    redoBtn.onclick = redo;
+    zoomIn.onclick = function () { setZoom(S.pxPerSec * 1.3, null); };
+    zoomOut.onclick = function () { setZoom(S.pxPerSec / 1.3, null); };
+    zoomFit.onclick = fitWidth;
+    followBtn.onclick = function () { setFollow(!S.follow); };
+
+    window.addEventListener("resize", function () {
+      if (!S.loaded) return;
+      renderGrid(); renderRuler(); renderPlayhead();
+    });
+
+    /* ================================================================ */
+    /*  歌词编辑                                                         */
+    /* ================================================================ */
+
+    function selCount() { return Object.keys(S.selection).length; }
+
     function activeNote() {
       if (!S.active) return null;
-      var tr = S.tracks[S.active.t];
-      return tr ? tr.notes[S.active.i] : null;
+      return noteAt(S.active.t, S.active.i);
     }
 
-    /** 选中的音符按时间排序（同刻按音高）—— 铺歌词的顺序。 */
-    function selectedOrdered() {
-      return selectedList().sort(function (a, b) {
+    var lyricPushed = false;
+    var lyricKey = null;
+
+    /** 输入框跟随"当前音符"。多选时不猜用户想改哪一个，直接禁用并说明。
+     *
+     *  什么时候可以覆盖输入框里正在输入的内容？——只有当**当前音符换了**的时候。
+     *  用"正在输入"当作保护条件是不行的：点/敲到另一个音符时焦点可能还在输入框里，
+     *  那样输入框会一直显示上一个音符的歌词，填错音高还看不出来。 */
+    function syncLyricInput() {
+      if (!S.loaded) return;
+      var key = S.active ? noteKey(S.active.t, S.active.i) : null;
+      var switched = key !== lyricKey;
+      lyricKey = key;
+
+      var n = selCount() > 1 ? null : activeNote();
+      if (selCount() > 1) {
+        lyricInput.value = "";
+        lyricInput.disabled = true;
+        lyricInput.placeholder = "已选中 " + selCount() + " 个音符：用「填词…（Ctrl+L）」按顺序铺词";
+        lyrInfo.textContent = "已选 " + selCount() + " 个";
+        return;
+      }
+      lyricInput.disabled = !n;
+      lyrInfo.textContent = "";
+      if (!n) {
+        lyricInput.value = "";
+        lyricInput.placeholder = "选中音符后在此输入（中文可直接用输入法），Tab 到下一个音符";
+        return;
+      }
+      lyricInput.placeholder = "「" + S.tracks[S.active.t].display + "」第 "
+        + (S.active.i + 1) + " 个音符的歌词，Tab 到下一个";
+      if (switched || document.activeElement !== lyricInput) {
+        lyricInput.value = n.lyric == null ? "" : String(n.lyric);
+      }
+    }
+
+    /** 输入框 → 当前音符。按第一次键时压一次撤销，整段输入算一步。 */
+    function commitLyricInput() {
+      var n = activeNote();
+      if (!n || !editable(S.active.t)) return;
+      if (!lyricPushed) { pushUndo(); lyricPushed = true; }
+      n.lyric = lyricInput.value;
+      var e = noteEls[noteKey(S.active.t, S.active.i)];
+      if (e) styleNote(e, n, S.tracks[S.active.t], S.active.t, S.active.i);
+      markDirty();
+    }
+
+    /** 当前轨的音符按时间排序后，移动到上/下一个。连续填词靠它。 */
+    function stepActiveNote(dir) {
+      var tr = S.tracks[S.activeTrack];
+      if (!tr || !tr.notes.length) return;
+      var order = tr.notes.map(function (n, i) { return { n: n, i: i }; })
+        .sort(function (a, b) { return a.n.start - b.n.start || a.n.pitch - b.n.pitch; });
+      var cur = -1;
+      if (S.active && S.active.t === S.activeTrack) {
+        for (var k = 0; k < order.length; k++) if (order[k].i === S.active.i) { cur = k; break; }
+      }
+      if (cur < 0) cur = dir > 0 ? -1 : order.length;
+      var next = clamp(cur + dir, 0, order.length - 1);
+      selectOnly(S.activeTrack, order[next].i);
+      scrollNoteIntoView(S.activeTrack, order[next].i);
+      renderNotes();
+      syncLyricInput();
+      if (!lyricInput.disabled) { lyricInput.focus(); lyricInput.select(); }
+    }
+
+    /** 把某个音符横向滚进可视区（跑出屏幕还继续 Tab 就看不见在填哪个了）。 */
+    function scrollNoteIntoView(t, i) {
+      var n = noteAt(t, i);
+      if (!n) return;
+      var x = secToX(n.start);
+      var visW = scroll.clientWidth || 800;
+      if (x < scroll.scrollLeft + 40) scroll.scrollLeft = Math.max(0, x - 80);
+      else if (x > scroll.scrollLeft + visW - 60) scroll.scrollLeft = Math.max(0, x - visW + 160);
+    }
+
+    /** 填词的目标：**有选中就从选中的第一个开始**，没选中才整条当前轨。
+     *
+     *  用户明确要求过这个语义：框选之后填词要从第一个被框选的音符开始，
+     *  而不是永远从这条轨的第一个音符开始。 */
+    function lyricFillTarget() {
+      var sel = selectedList().filter(function (m) { return editable(m.t); });
+      if (sel.length) return { list: sel, picked: true };
+      var tr = S.tracks[S.activeTrack];
+      if (tr && tr.editable) {
+        return {
+          list: tr.notes.map(function (_, i) { return { t: S.activeTrack, i: i }; }),
+          picked: false
+        };
+      }
+      return { list: [], picked: false };
+    }
+
+    /* ------------------------------------------------------------ 填词框 */
+    function openLyricDialog() {
+      if (!S.loaded) return;
+      var got = lyricFillTarget();
+      var target = got.list;
+      if (!target.length) { onToast("没有可填词的音符（和弦轨不可编辑）", "warn"); return; }
+      var tr = S.tracks[S.activeTrack];
+      dlgTarget = target;
+      dlgCount.textContent = got.picked
+        ? "将按时间顺序填入选中的 " + target.length + " 个音符（从最早选中的那个开始）"
+        : "未选中音符，将填入当前轨「" + (tr ? tr.display : "") + "」的全部 " + target.length + " 个音符";
+      dlg.classList.remove("off");
+      dlgText.value = "";
+      dlgText.focus();
+    }
+
+    function closeLyricDialog() {
+      dlg.classList.add("off");
+      dlgTarget = null;
+    }
+
+    /**
+     * 歌词文本 → 词表。
+     *
+     * 勾上「按字符隔开」= **一字一音**，且先去掉所有空白（中文歌词常按词组排版，
+     * 空格是排版不是发音）；不勾 = 按空白切词（拼音/英文按词走，wo ai ni → wo/ai/ni）。
+     */
+    function splitLyricTokens(raw, byChar) {
+      var s = String(raw == null ? "" : raw);
+      if (byChar) return Array.from(s.replace(/\s/g, ""));
+      return s.split(/[\s\u3000]+/).filter(function (x) { return x; });
+    }
+
+    /**
+     * 把词表按时间顺序铺到给定音符上（**就地改 lyric**，不推撤销）。
+     *
+     * 词比音符少时，多出来的音符**保持原样** —— 不覆盖是有意的：用户常常只想补
+     * 后半段，不想把前面已经填好的词冲掉（默认值本来就是 ``la``）。
+     * 词比音符多时，多出来的词被忽略，并把数量报回去，让调用方明确告知用户，
+     * 而不是静默丢掉。
+     *
+     * Returns: ``{filled, dropped, kept}``。
+     */
+    function fillLyricsOn(target, parts) {
+      var ordered = (target || []).slice().sort(function (a, b) {
         var na = noteAt(a.t, a.i), nb = noteAt(b.t, b.i);
         if (!na || !nb) return 0;
         return na.start - nb.start || na.pitch - nb.pitch;
       });
-    }
-
-    /** 歌词分词。**必须与后端 `app.lyrics._split_units` 同一套规则** ——
-        两边不一致的话，同一句话在"卷帘上手动铺"和"批量导入"里会切出不同结果。 */
-    function splitUnits(text, mode) {
-      var t = String(text == null ? "" : text);
-      if (mode === "char") {
-        return t.split("").filter(function (c) { return !/\s/.test(c) && c !== "\u3000"; });
-      }
-      if (mode === "space") {
-        return t.split(/[\s\u3000]+/).filter(function (u) { return u.length > 0; });
-      }
-      var units = [], buf = "";
-      function flush() { if (buf) { units.push(buf); buf = ""; } }
-      for (var i = 0; i < t.length; i++) {
-        var ch = t.charAt(i);
-        var isAscii = t.charCodeAt(i) < 128;
-        if (isAscii && (/[0-9A-Za-z]/.test(ch) || ch === "'" || ch === "-")) {
-          buf += ch;
-        } else if (/\s/.test(ch) || ch === "\u3000") {
-          flush();
-        } else if (/[\p{L}\p{N}]/u.test(ch)) {
-          flush();
-          units.push(ch);              // CJK 等非拉丁字母：各自成一个单元
-        } else if (buf) {
-          buf += ch;                   // 标点并入当前拉丁单元；中文标点丢弃
-        }
-      }
-      flush();
-      return units;
-    }
-
-    /** 歌词编辑的撤销粒度：一次"聚焦到失焦"算一步，而不是每个按键一步。
-        否则打个五个字的歌词要按五次 Ctrl+Z。 */
-    var lyricUndoMarked = false;
-    function beginLyricEdit() {
-      if (lyricUndoMarked) return;
-      pushUndo();
-      lyricUndoMarked = true;
-    }
-
-    /** 把一段文字按时间顺序铺到**选中的音符**上（一个字/词一个音符）。
-        这是 Ctrl+A 之后输入歌词的实现：选中 12 个音符、贴一句 12 个字的歌词
-        （或直接一个字一个字打），依次落到 12 个音符上。
-        Returns: 实际填了几个音符。 */
-    function distributeLyrics(text) {
-      var sel = selectedOrdered();
-      if (sel.length < 2) return 0;
-      var units = splitUnits(text, S.splitMode);
-      if (!units.length) return 0;
-      beginLyricEdit();
-      var n = Math.min(units.length, sel.length);
+      var n = Math.min(ordered.length, parts.length);
       for (var k = 0; k < n; k++) {
-        var note = noteAt(sel[k].t, sel[k].i);
-        if (!note) continue;
-        note.lyric = units[k];
-        var el = noteEls[key(sel[k].t, sel[k].i)];
-        if (el) {
-          var ly = el.querySelector(".pr-note-ly");
-          if (ly) ly.textContent = lyricGlyph(units[k]);
-        }
+        var note = noteAt(ordered[k].t, ordered[k].i);
+        if (note) note.lyric = parts[k];
       }
-      changed();
-      return n;
+      return { filled: n, dropped: parts.length - n, kept: ordered.length - n };
     }
 
-    /** 输入框内容变了：**多选就铺开、单选就改那一个**。
-        这个分派是"卷帘上填歌词"的全部逻辑，所以放在一个地方，别散开。 */
-    function applyLyricInput() {
-      if (selectedList().length > 1) {
-        distributeLyrics(lyrInput.value);
-        updateLyricHint();
-      } else {
-        setActiveLyric(lyrInput.value);
-      }
+    /* 工具栏与填词框的事件 */
+    function applyLyricDialog() {
+      var parts = splitLyricTokens(dlgText.value, splitChk.checked);
+      if (!parts.length) { onToast("填词框是空的", "warn"); return; }
+      pushUndo();
+      var r = fillLyricsOn(dlgTarget || [], parts);
+      markDirty();
+      renderNotes();
+      syncLyricInput();
+      closeLyricDialog();
+      onStatus("已填词 " + r.filled + " 个音符"
+        + (r.dropped > 0 ? "（还有 " + r.dropped + " 个词没地方放，已忽略）" : "")
+        + (r.kept > 0 ? "（剩余 " + r.kept + " 个音符保持原样）" : ""));
     }
 
-    function updateLyricHint() {
-      var sel = selectedList().length;
-      var cur = S.tracks[S.activeTrack];
-      if (sel > 1) {
-        lyrInput.placeholder = "已选中 " + sel + " 个音符：输入/粘贴歌词会按时间顺序铺上去";
-        lyrInput.classList.add("bulk");
-      } else {
-        lyrInput.placeholder = cur
-          ? "「" + cur.display + "」——选中音符后在此输入（Ctrl+A 全选后可整段铺歌词）"
-          : "选中音符后在此输入（中文可直接用输入法）";
-        lyrInput.classList.remove("bulk");
-      }
-    }
-
-    function syncActiveUI() {
-      var n = activeNote();
-      var sel = selectedList().length;
-      lyrInput.disabled = !n && sel === 0;
-      // 多选时输入框是"待铺的整段文字"，不要去回填某个音符的歌词，
-      // 否则一按 Ctrl+A 就把它清成第一个音符的 la，看着像坏了。
-      lyrInput.value = (sel > 1 || !n) ? "" : String(n.lyric == null ? "" : n.lyric);
-      // 第一个音符不可能"延续"，给了 - 就是错的，直接标出来
-      lyrInput.classList.toggle("bad",
-        sel <= 1 && !!n && n.lyric === "-" && isFirstNote());
-      updateLyricHint();
-    }
-    function isFirstNote() {
-      if (!S.active) return false;
-      var tr = S.tracks[S.active.t];
-      if (!tr || !tr.notes.length) return false;
-      var sorted = tr.notes.slice().sort(function (a, b) { return a.start - b.start; });
-      return sorted[0] === tr.notes[S.active.i];
-    }
-    function setActiveLyric(v) {
-      var n = activeNote();
-      if (!n) return;
-      if (n.lyric === v) return;
-      beginLyricEdit();
-      n.lyric = v;
-      var el = noteEls[key(S.active.t, S.active.i)];
-      if (el) {
-        var ly = el.querySelector(".pr-note-ly");
-        if (ly) ly.textContent = lyricGlyph(v);
-      }
-      syncActiveUI();
-      changed();
-    }
-
-    /** 把一个记号（`-` / `+`）写到**所有选中**的音符上。 */
-    function setSelectionLyric(v) {
-      var sel = selectedOrdered();
-      if (!sel.length) { setActiveLyric(v); return; }
-      beginLyricEdit();
-      sel.forEach(function (m) {
-        var note = noteAt(m.t, m.i);
-        if (!note) return;
-        note.lyric = v;
-        var el = noteEls[key(m.t, m.i)];
-        if (el) {
-          var ly = el.querySelector(".pr-note-ly");
-          if (ly) ly.textContent = lyricGlyph(v);
-        }
-      });
-      changed();
-      syncActiveUI();
-    }
-
-    /* 输入法（中文）组合期间不要铺歌词：组合过程中的拼音字母会被当成内容铺出去，
-       音符上会闪出一串 a/o/n/i。用 compositionstart/end 把它挡掉。 */
-    var composing = false;
-    lyrInput.addEventListener("compositionstart", function () { composing = true; });
-    lyrInput.addEventListener("compositionend", function () {
-      composing = false;
-      applyLyricInput();
-    });
-    lyrInput.addEventListener("focus", function () {
-      lyricUndoMarked = false;      // 一次编辑会话 = 一步撤销
-      updateLyricHint();
-    });
-    lyrInput.addEventListener("input", function () {
-      if (composing) return;
-      applyLyricInput();
-    });
-    lyrInput.addEventListener("keydown", function (ev) {
-      if (ev.key === "Enter") {
+    lyricInput.addEventListener("input", commitLyricInput);
+    lyricInput.addEventListener("focus", function () { lyricPushed = false; });
+    lyricInput.addEventListener("blur", function () { lyricPushed = false; });
+    lyricInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Tab") {
         ev.preventDefault();
-        if (selectedList().length > 1) {
-          // 多选时内容已经随输入实时铺开了，回车只是"收工"
-          var cnt = selectedList().length;
-          if (opts.onToast) opts.onToast("已把歌词按顺序铺到 " + cnt + " 个音符上", "ok");
-          host.focus();
-          syncActiveUI();
-        } else {
-          stepActive(ev.shiftKey ? -1 : 1);
-        }
+        commitLyricInput();
+        lyricPushed = false;
+        stepActiveNote(ev.shiftKey ? -1 : 1);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        commitLyricInput();
+        lyricPushed = false;
+        lyricInput.blur();
       } else if (ev.key === "Escape") {
         ev.preventDefault();
-        host.focus();
+        syncLyricInput();
+        lyricInput.blur();
+      } else if ((ev.ctrlKey || ev.metaKey) && (ev.key || "").toLowerCase() === "l") {
+        ev.preventDefault();
+        openLyricDialog();
       }
     });
-    splitSel.onchange = function () {
-      S.splitMode = splitSel.value;
-      if (selectedList().length > 1) applyLyricInput();
-      if (opts.onToast) {
-        opts.onToast("歌词分词："
-          + (S.splitMode === "space" ? "按空格切" : S.splitMode === "char" ? "逐字符" : "自动（中文逐字、英文按词）"),
-          "");
-      }
-    };
-    susBtn.onclick = function () { setSelectionLyric("-"); lyrInput.focus(); };
-    sylBtn.onclick = function () { setSelectionLyric("+"); lyrInput.focus(); };
-    nextBtn.onclick = function () { stepActive(1); };
+    lyrBtn.onclick = openLyricDialog;
+    dlgApply.onclick = applyLyricDialog;
+    dlgCancel.onclick = closeLyricDialog;
+    // 点遮罩空白处也关掉（点框体内部不算）
+    dlg.addEventListener("click", function (ev) {
+      if (ev.target === dlg) closeLyricDialog();
+    });
 
-    /** 在**同一条轨**内按时间顺序移动到上/下一个音符。 */
-    function stepActive(d) {
-      if (!S.active) return;
-      var tr = S.tracks[S.active.t];
-      if (!tr) return;
-      var order = tr.notes.map(function (n, i) { return { i: i, s: n.start }; })
-        .sort(function (a, b) { return a.s - b.s; });
-      var pos = order.findIndex(function (o) { return o.i === S.active.i; });
-      var nxt = order[pos + d];
-      if (!nxt) return;
-      selectOnly(S.active.t, nxt.i);
-      refreshSelectionUI();
-      syncActiveUI();
-      lyrInput.focus();
-      lyrInput.select();
-      // 让激活的音符滚进视野
-      var el = noteEls[key(S.active.t, S.active.i)];
-      if (el) {
-        var x = parseFloat(el.style.left);
-        if (x < scroll.scrollLeft + 40 || x > scroll.scrollLeft + scroll.clientWidth - 40) {
-          scroll.scrollLeft = Math.max(0, x - scroll.clientWidth / 3);
-        }
+    /* ================================================================ */
+    /*  对外 API                                                         */
+    /* ================================================================ */
+
+    function setPlayhead(sec) {
+      playSec = Math.max(0, sec || 0);
+      renderPlayhead();
+      updatePlaying();
+      followPlayhead();
+    }
+
+    /**
+     * 播放时让视图跟着走带位置走（用户要求）。
+     *
+     * 只在**播放中**且**走带跑出可视区**时才滚 —— 每帧无条件居中会让视图一直抖，
+     * 而且用户手动滚去看别处时会被立刻拽回来，那样没法边听边看。
+     * 留 15% 的右边距：走带贴到右边缘才滚，视线有提前量。
+     */
+    function followPlayhead() {
+      if (!S.playing || !S.follow) return;
+      var visW = scroll.clientWidth || 0;
+      if (!visW) return;
+      var x = secToX(playSec);
+      var left = scroll.scrollLeft;
+      var pad = Math.max(24, visW * 0.15);
+      if (x < left || x > left + visW - pad) {
+        scroll.scrollLeft = Math.max(0, x - visW * 0.3);
       }
     }
 
-    // ---------------------------------------------------------------- 公开 API
-    function load(payload) {
-      payload = payload || {};
-      // 重新加载**同一首歌**（保存后、切勾选后、导入歌词后）时，不要重置横向缩放：
-      // 用户放大到能看清单个音符，一保存就跳回"整首适宽"，非常难用（用户实测反馈）。
-      // 判据是"已经有数据且时长没变"——换歌时仍然该适宽。
-      var prevPps = S.pxPerSec;
-      var prevScroll = scroll.scrollLeft;
-      var sameSong = S.tracks.length > 0
-        && Math.abs((payload.duration || 0) - S.duration) < 0.05;
+    function setPlaying(on) {
+      S.playing = !!on;
+      // 开始播放也当成一次"跟上"：否则从末尾倒回去再播时会停在老位置
+      if (S.playing) followPlayhead();
+    }
 
-      S.tempoMap = (payload.tempo_map && payload.tempo_map.length) ? payload.tempo_map : [{ t: 0, bpm: payload.bpm || 120 }];
-      S.bpm = payload.bpm || 120;
-      S.meter = payload.meter || "4/4";
-      S.duration = payload.duration || 0;
-      S.tracks = (payload.tracks || []).map(function (tr) {
+    function setFollow(on) {
+      S.follow = !!on;
+      render();
+      onStatus(S.follow ? "已打开跟随走带位置" : "已关闭跟随");
+    }
+
+    /* 播放到哪个音，就在卷帘上点亮哪个音。
+       只记录"当前在响的是哪一个"，位置没跨过音符边界时直接返回 ——
+       播放循环每帧都会调进来，每帧全量改 classList 会让长曲子掉帧。 */
+    var playingKey = null;
+    function updatePlaying() {
+      var key = null;
+      for (var t = 0; t < S.tracks.length; t++) {
+        var ns = S.tracks[t].notes;
+        for (var i = 0; i < ns.length; i++) {
+          if (playSec >= ns[i].start && playSec < ns[i].end) { key = noteKey(t, i); break; }
+        }
+        if (key) break;
+      }
+      if (key === playingKey) return;
+      if (playingKey && noteEls[playingKey]) noteEls[playingKey].classList.remove("playing");
+      playingKey = key;
+      if (key && noteEls[key]) noteEls[key].classList.add("playing");
+    }
+
+    function clearPlaying() {
+      if (playingKey && noteEls[playingKey]) noteEls[playingKey].classList.remove("playing");
+      playingKey = null;
+    }
+
+    function load(data) {
+      S.tracks = (data.tracks || []).map(function (tr) {
         return {
-          voice: tr.voice,
-          display: tr.display || tr.voice,
-          isVocal: !!tr.is_vocal,
+          voice: tr.voice, kind: tr.kind, display: tr.display,
+          isVocal: !!tr.is_vocal, is_vocal: !!tr.is_vocal,
+          editable: tr.editable !== false,
           notes: (tr.notes || []).map(function (n) {
-            return {
-              start: +n.start, end: +n.end, pitch: +n.pitch,
-              lyric: n.lyric == null ? "la" : String(n.lyric)
-            };
-          }).sort(function (a, b) { return a.start - b.start || a.pitch - b.pitch; })
+            return { start: +n.start, end: +n.end, pitch: +n.pitch, lyric: n.lyric == null ? "la" : String(n.lyric) };
+          })
         };
       });
-      S.chords = payload.chord_notes || [];
-      S.showChords = S.chords.length > 0;
-      S.active = null;
-      S.selection = {};
-      S.undo.length = 0; S.redo.length = 0;
-      S.dirty = false;
-      // 新数据到达时把"当前编辑的轨"夹回合法范围，并默认落在**人声主旋律**上
-      // （歌词主要填这条），其次第一条。
-      var prefer = S.tracks.findIndex(function (t) { return t.isVocal; });
-      S.activeTrack = clamp(prefer >= 0 ? prefer : 0, 0, Math.max(0, S.tracks.length - 1));
-      splitSel.value = S.splitMode;
-      refreshUndoBtns();
-      if (sameSong) {
-        // 只夹一下范围，不动用户的缩放；并把横向滚动位置也还原回去
-        S.pxPerSec = clamp(prevPps, MIN_PPS, MAX_PPS);
-        render();
-        scroll.scrollLeft = prevScroll;
-      } else {
-        fit();
-        render();
-      }
-      syncActiveUI();
-    }
-
-    function state() {
-      return {
-        tracks: S.tracks.map(function (tr) {
-          return {
-            voice: tr.voice,
-            notes: tr.notes.map(function (n) {
-              return { start: n.start, end: n.end, pitch: n.pitch, lyric: n.lyric };
-            })
-          };
-        })
-      };
-    }
-
-    /** 检查同一轨内的重叠，返回提示文本数组（保存前给用户看）。 */
-    function overlaps() {
-      var out = [];
-      S.tracks.forEach(function (tr) {
-        var ns = tr.notes.slice().sort(function (a, b) { return a.start - b.start; });
-        var bad = 0;
-        for (var i = 1; i < ns.length; i++) if (ns[i].start < ns[i - 1].end - 1e-9) bad++;
-        if (bad) out.push(tr.display + " 有 " + bad + " 处重叠，导出时会自动拆成 " + tr.display + "1/" + tr.display + "2…");
-      });
-      return out;
-    }
-
-    function setGrid(div) {
-      if (!GRIDS.some(function (g) { return g.div === div; })) return;
-      S.grid = div;
-      gridSel.value = String(div);
+      S.measures = (data.measures || []).map(function (m) {
+        return { start: +m.start, end: +m.end, score_start: +m.score_start, score_end: +m.score_end };
+      }).sort(function (a, b) { return a.score_start - b.score_start; });
+      S.beatsPerBar = +data.beats_per_bar || 4;
+      S.beatUnit = +data.beat_unit || 4;
+      S.unitWhole = +data.unit_whole || 0.0625;
+      S.bpm = +data.bpm || 120;
+      S.duration = +data.duration || 0;
+      S.activeTrack = Math.max(0, S.tracks.findIndex(function (t) { return t.editable; }));
+      undoStack.length = 0; redoStack.length = 0;
+      dirty = false;
+      clearSelection();
+      S.loaded = true;
+      relayout();
+      fitWidth();
       render();
+      // 音域固定成 C0–C8 之后，默认视口停在最低那一段；把视图带到音符所在的音区，
+      // 否则扒完谱打开卷帘只看到一片空行。
+      scrollToData();
     }
 
-    // 首屏就要画一次：否则没有任务时 lanes 高度为 0，连"扒谱完成后这里显示…"
-    // 那句占位提示都看不见。load() 之后还会再画一次。
-    render();
+    function getTracks() { return S.tracks; }
 
-    // 窗口变化时重算"多少像素一秒"与行高（行高是按可用高度反推的）
-    var resizeTimer = null;
-    window.addEventListener("resize", function () {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(function () {
-        if (!host.isConnected) return;   // 组件已从页面上摘掉就别再动它
-        render();
-      }, 150);
-    });
+    function isDirty() { return dirty; }
+    function markSaved() { dirty = false; }
 
     return {
       load: load,
-      state: state,
+      render: render,
       setPlayhead: setPlayhead,
-      setGrid: setGrid,
-      grid: function () { return S.grid; },
-      dirty: function () { return S.dirty; },
-      clearDirty: function () { S.dirty = false; },
+      setGridDiv: setGridDiv,
+      setSnap: setSnap,
+      setFollow: setFollow,
+      setPlaying: setPlaying,
+      setZoom: setZoom,
+      fitWidth: fitWidth,
+      normalizeAll: normalizeAll,
       overlaps: overlaps,
-      // ---- 给验收脚本用的只读访问器（闭包里的东西外面看不到） ----
-      /** 当前选中的音符（{t,i} 列表）。 */
-      selection: function () {
-        return selectedList().map(function (m) { return { t: m.t, i: m.i }; });
+      getTracks: getTracks,
+      isDirty: isDirty,
+      markSaved: markSaved,
+      selectedCount: function () { return Object.keys(S.selection).length; },
+      activeTrackDisplay: function () {
+        var tr = S.tracks[S.activeTrack];
+        return tr ? tr.display : "";
       },
-      /** 当前正在编辑的轨下标。 */
-      activeTrack: function () { return S.activeTrack; },
-      /** 切到某条轨（等价于点上方「曲目」按钮）。 */
-      setActiveTrack: setActiveTrack,
-      /** 界面上实际渲染出来的音符元素个数（淡显隐藏时会更少）。 */
-      renderedNotes: function () { return Object.keys(noteEls).length; },
-      /** 当前歌词分词模式。 */
-      splitMode: function () { return S.splitMode; },
-      /** 当前播放头位置（秒），给验收脚本用。 */
-      playhead: function () { return playSec; },
-      /** 横向缩放（每秒像素）与缩放函数，给验收脚本用。 */
-      pxPerSec: function () { return S.pxPerSec; },
-      zoomAt: zoomAt,
-      /** 手动跑一次「同轨不重叠」规整（正常编辑路径会自动跑），给验收脚本用。 */
-      normalizeMonophonic: function (ti) {
-        return normalizeMonophonic(ti == null ? S.activeTrack : ti);
-      },
-      requireVocalLyrics: function () {
-        // 人声主旋律一个非 la 的歌词都没有 → 返回 true（导出前要弹确认框）
-        var found = false;
+      /** 试听用的扁平音符表（含只读的和弦轨，与页面试听"总谱"语义一致）。 */
+      getPlaybackNotes: function () {
+        var out = [];
         S.tracks.forEach(function (tr) {
-          if (!tr.isVocal) return;
           tr.notes.forEach(function (n) {
-            var t = String(n.lyric == null ? "" : n.lyric).trim();
-            if (t && t !== "la") found = true;
+            out.push({ start: n.start, end: n.end, pitch: n.pitch });
           });
         });
-        return !found;
+        out.sort(function (a, b) { return a.start - b.start || a.pitch - b.pitch; });
+        return out;
       },
-      resize: function () { fit(); render(); },
-      GRIDS: GRIDS
+      /** 当前音符的结束时间（编辑后弦长会变，不能用加载时的 duration）。 */
+      totalSeconds: function () {
+        var d = 0;
+        S.tracks.forEach(function (tr) {
+          tr.notes.forEach(function (n) { if (n.end > d) d = n.end; });
+        });
+        return d;
+      },
+      clearPlaying: clearPlaying,
+      openLyricDialog: openLyricDialog,
+      addNote: addNote,
+      GRIDS: GRIDS,
+
+      /* 给验收脚本（tools/check_web_js.py）用。
+         "秒 ↔ 谱面位置"必须和后端逐点一致，否则音符会吸到别的格子上；这条一致性
+         没法靠肉眼看，只能拿后端的实现当基准做逐点比对。 */
+      _debug: {
+        posToSec: posToSec,
+        secToPos: secToPos,
+        stepWhole: stepWhole,
+        measureRate: measureRate,
+        collectGrid: collectGrid,
+        splitLyricTokens: splitLyricTokens,
+        fillLyricsOn: fillLyricsOn,
+        selectAll: selectAllInActiveTrack,
+        selectedList: selectedList,
+        lyricFillTarget: lyricFillTarget,
+        setActiveTrack: function (t) { S.activeTrack = t; renderTracks(); },
+        // 交互测试要从"外面"派发指针事件，所以得拿到真实元素与几何
+        els: {
+          host: host, scroll: scroll, lanes: lanes, marquee: marquee,
+          noteLayer: noteLayer, ruler: ruler, lyricInput: lyricInput
+        },
+        rowH: ROW_H,
+        secToX: secToX,
+        pitchToY: pitchToY,
+        state: S
+      }
     };
   }
 
-  global.PianoRoll = { mount: mount, GRIDS: GRIDS, DEFAULT_GRID: DEFAULT_GRID };
+  global.PianoRoll = { create: create, GRIDS: GRIDS, DEFAULT_DIV: DEFAULT_DIV };
 })(window);

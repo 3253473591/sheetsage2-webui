@@ -7,9 +7,8 @@
 <!-- 空 data URI 图标：避免浏览器请求 /favicon.ico 产生 404 控制台噪音 -->
 <link rel="icon" href="data:,">
 <script src="./vendor/abcjs/abcjs-basic-min.js"></script>
-<!-- 钢琴卷帘：独立文件，无构建步骤。见 web/pianoroll.js 顶部注释。
-     走 /assets（本项目自己的前端脚本），不是 /vendor（那是第三方库）。 -->
-<script src="/assets/pianoroll.js"></script>
+<!-- 钢琴卷帘：独立文件、无构建步骤。见 web/pianoroll.js 顶部注释。 -->
+<script src="./pianoroll.js"></script>
 <style>
 :root{
   --bg-app:#fff; --bg-subtle:#f5f4fa; --bg-card:#fff;
@@ -150,19 +149,9 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .filter-chip::before{content:"○";font-size:10px}
 .filter-chip.on{border-color:var(--primary);background:var(--primary-weak);color:var(--primary);font-weight:500}
 .filter-chip.on::before{content:"✓"}
-.filters-hint{margin-left:auto;font-size:11px;color:#9a99ab}
-.editor{display:grid;grid-template-columns:minmax(300px,.85fr) 1.15fr;gap:14px}
-@media(max-width:1000px){.editor{grid-template-columns:1fr}}
-.pane{border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
-.pane-head{display:flex;align-items:center;gap:8px;padding:7px 11px;background:var(--bg-subtle);
-           border-bottom:1px solid var(--border);font-size:12px;color:var(--text-2)}
+/* 「有未保存的改动」提示（③ 顶部） */
 .dirty{color:var(--warn);font-size:11px;display:none}
 .dirty.on{display:inline}
-.abc-area{width:100%;height:340px;border:0;resize:vertical;padding:12px;
-          font:12px/1.7 Consolas,"Cascadia Mono",monospace;color:#2f3040;background:#fff;outline:none}
-.abc-area:focus{background:#fdfcff;box-shadow:inset 0 0 0 2px var(--primary-weak)}
-.score-body{padding:8px 12px;background:#fff;overflow:auto;height:340px;position:relative}
-.empty{color:#b9b7c7;font-size:12px;text-align:center;padding:60px 12px}
 .transport{display:flex;align-items:center;gap:12px;margin-top:12px;padding:10px 12px;
            border:1px solid var(--border);border-radius:10px;background:var(--bg-subtle);flex-wrap:wrap}
 .tp-btn{border:1px solid var(--border);background:#fff;width:28px;height:28px;border-radius:7px;
@@ -177,35 +166,102 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .tp-speed input{width:80px}
 .tone-hint{font-size:11px;color:var(--text-2)}
 
-/* ④ 歌词 */
-.switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none;font-size:13px}
-.track{width:36px;height:20px;border-radius:10px;background:#d6d3e6;position:relative;transition:background .18s;flex:none}
-.track>i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;
-         transition:left .18s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
-.switch.on .track{background:var(--primary)}
-.switch.on .track>i{left:18px}
-.lyr-note{font-size:12px;color:var(--text-2);margin-top:10px}
-.lyr-drop{border:1.5px dashed #d6d3e6;border-radius:10px;background:var(--bg-subtle);
-          padding:16px;text-align:center;color:var(--text-2);cursor:pointer;transition:.15s;margin-bottom:10px}
-.lyr-drop:hover,.lyr-drop.over{border-color:var(--primary);background:var(--primary-weak)}
-.lyr-drop .big{font-size:13px;color:var(--text-1)}
-.lyr-drop .hint{font-size:11px;margin-top:5px;color:#9a99ab}
+/* ==================== ③ 钢琴卷帘 ====================
+   网格线三档层次：小节线 > 拍线 > 细分线。三档的颜色/粗细集中在这里改，
+   组件的 JS 只负责给线挂 pr-gl-bar / pr-gl-beat / pr-gl-sub 三个类名。 */
+.pr{--pr-bar:#b7b3c9;--pr-beat:#dcd9e8;--pr-sub:#efedf6;--pr-row-black:#f2f1f8;
+    border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#fff}
+.pr-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px;
+        background:var(--bg-subtle);border-bottom:1px solid var(--border);font-size:12px}
+.pr-lab{font-size:11px;color:var(--text-2);white-space:nowrap}
+.pr-sep{width:1px;height:18px;background:var(--border);flex:none}
+.pr-btn{border:1px solid var(--border);background:#fff;color:var(--text-1);font:inherit;font-size:12px;
+        padding:4px 9px;border-radius:var(--radius-ctl);cursor:pointer;white-space:nowrap}
+.pr-btn:hover:not(:disabled){border-color:#cfcbdd}
+.pr-btn.primary{background:var(--primary-weak);border-color:var(--primary);color:var(--primary);font-weight:500}
+.pr-btn.pr-mono{width:26px;padding:4px 0;text-align:center}
+.pr-select{border:1px solid var(--border);background:#fff;color:var(--text-1);font:inherit;font-size:12px;
+           padding:4px 8px;border-radius:var(--radius-ctl);cursor:pointer;max-width:260px}
+.pr-hint{font-size:11px;color:#9a99ab;margin-left:auto}
+.pr-tracks{display:flex;align-items:center;gap:6px;min-width:0}
+.pr-trackbtns{display:flex;gap:4px;flex-wrap:wrap}
+.pr-track{border:1px solid var(--border);background:#fff;color:var(--text-2);font:inherit;font-size:11px;
+          padding:3px 8px;border-radius:999px;cursor:pointer;white-space:nowrap;max-width:180px;
+          overflow:hidden;text-overflow:ellipsis}
+.pr-track.on{border-color:var(--primary);background:var(--primary-weak);color:var(--primary);font-weight:500}
+.pr-body{display:flex;align-items:flex-start;background:#fff}
+.pr-keys-wrap{flex:none;width:46px;height:460px;overflow:hidden;border-right:1px solid var(--border);background:#fbfaff}
+.pr-keys{will-change:transform}
+.pr-key{display:flex;align-items:center;justify-content:flex-end;padding-right:6px;
+        font-size:10px;font-family:Consolas,monospace;color:#8b8998;
+        background:#fff;border-bottom:1px solid var(--border)}
+.pr-key.black{background:var(--pr-key-black,#eceae4);color:#6f6d7e}
+/* 真正的滚动条：横向 = 时间轴，纵向 = 音高。两条都能拖。 */
+.pr-scroll{flex:1 1 auto;min-width:0;height:460px;overflow:auto;position:relative;background:#fff}
+.pr-content{position:relative}
+.pr-ruler{position:sticky;top:0;z-index:6;height:20px;background:#fbfaff;
+          border-bottom:1px solid var(--border);cursor:ew-resize}
+.pr-ruler-ticks{position:relative;height:100%}
+.pr-tick{position:absolute;top:6px;width:1px;height:9px;background:#b7b3c9}
+.pr-barno{position:absolute;top:2px;font-size:10px;font-weight:500;color:#8b8998;font-family:Consolas,monospace}
+.pr-lanes{position:relative;overflow:hidden;touch-action:none}
+.pr-gridsvg{position:absolute;top:0;pointer-events:none}
+.pr-gridsvg line{stroke-width:1;shape-rendering:crispEdges}
+.pr-gridsvg .pr-gl-bar{stroke:var(--pr-bar)}
+.pr-gridsvg .pr-gl-beat{stroke:var(--pr-beat)}
+.pr-gridsvg .pr-gl-sub{stroke:var(--pr-sub)}
+.pr-gridsvg .pr-row-black{fill:var(--pr-row-black)}
+.pr-notes{position:absolute;left:0;top:0}
+.pr-note{position:absolute;box-sizing:border-box;border-radius:3px;cursor:grab;
+         background:#9c86ff;border:1px solid #7c4dff;overflow:hidden;
+         display:flex;align-items:center;padding:0 3px}
+.pr-note.pr-v0{background:#9c86ff;border-color:#7c4dff}
+.pr-note.pr-v1{background:#6fc7d8;border-color:#3aa9be}
+.pr-note.pr-v2{background:#f0a6c8;border-color:#e0409b}
+.pr-note.pr-v3{background:#f5c26b;border-color:#dd9a20}
+.pr-note.sel{outline:2px solid #1f2033;outline-offset:-1px;z-index:2}
+.pr-note.act{box-shadow:0 0 0 2px #fff,0 0 0 3px var(--primary);z-index:3}
+.pr-note.pr-ghost{opacity:.42;cursor:not-allowed;background:#c9c6d6;border-color:#b0adc0}
+.pr-note .pr-ly{font-size:10px;line-height:1;color:#fff;pointer-events:none;
+                overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}
+.pr-grip{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;background:rgba(255,255,255,.42)}
+.pr-grip-l{left:0}.pr-grip-r{right:0}
+/* 框选框要看得见：1px + 14% 透明度在浅色底上几乎看不出来 */
+.pr-marquee{position:absolute;display:none;border:1.5px solid var(--primary);background:rgba(124,77,255,.18);
+            box-shadow:0 0 0 1px rgba(255,255,255,.75) inset;pointer-events:none;z-index:6}
+.pr-playhead{position:absolute;top:0;width:1px;background:#e0409b;pointer-events:none;z-index:5}
+.pr-playhead::before{content:"";position:absolute;top:0;left:-3px;border:3px solid transparent;
+                     border-top-color:#e0409b}
+.pr-empty{position:absolute;left:0;right:0;top:60px;text-align:center;color:#b9b7c7;font-size:12px}
+/* 歌词行 */
+.pr-lyrbar{gap:8px}
+.pr-lyr-input{flex:1 1 240px;min-width:160px;border:1px solid var(--border);border-radius:var(--radius-ctl);
+              font:inherit;font-size:12px;padding:4px 9px;color:var(--text-1);background:#fff;outline:none}
+.pr-lyr-input:focus{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-weak)}
+.pr-lyr-input:disabled{background:var(--bg-subtle);color:#9a99ab;cursor:not-allowed}
+.pr-lyr-info{font-size:11px;color:var(--text-2)}
+.pr-chk{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-2);
+        cursor:pointer;user-select:none;white-space:nowrap}
+/* 填词框：组件自己的一层覆盖，不是页面模态 */
+.pr{position:relative}
+.pr-dlg{position:absolute;left:0;right:0;top:0;bottom:0;z-index:20;display:flex;
+        align-items:center;justify-content:center;background:rgba(31,32,51,.34)}
+.pr-dlg.off{display:none}
+.pr-dlg-box{width:min(560px,92%);max-height:86%;overflow:auto;background:#fff;border-radius:12px;
+            padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.24)}
+.pr-dlg-title{font-size:14px;font-weight:600;margin-bottom:6px}
+.pr-dlg-count{font-size:11px;color:var(--text-2);margin-bottom:8px}
+.pr-dlg-text{width:100%;height:150px;border:1px solid var(--border);border-radius:9px;padding:10px;
+             font:13px/1.7 inherit;color:var(--text-1);resize:vertical;outline:none}
+.pr-dlg-text:focus{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-weak)}
+.pr-dlg-row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+.pr-note.playing{background:#e0409b !important;border-color:#b0155c !important;
+                 box-shadow:0 0 0 2px #fff,0 0 0 3px #e0409b;z-index:4}
+.roll-state{font-size:11px;color:var(--text-2);margin:8px 2px 0}
+.roll-state.warn{color:var(--warn)}
+.roll-state.err{color:var(--danger)}
+@media(max-width:1000px){.pr-hint{display:none}}
 
-/* 播放到哪个音，谱面对应音符高亮 */
-.abcjs-note.playing path,
-.abcjs-note.playing .abcjs-notehead,
-.abcjs-note.playing .abcjs-stem,
-.abcjs-note.playing .abcjs-flag,
-.abcjs-note.playing .abcjs-beam { fill:#e0409b !important; stroke:#e0409b !important }
-.abcjs-note.playing .abcjs-notehead { fill:#e0409b !important }
-.abcjs-note.playing .abcjs-dotted,
-.abcjs-note.playing .abcjs-augmentation { fill:#e0409b !important; stroke:#e0409b !important }
-.abcjs-note.playing { filter:drop-shadow(0 0 4px rgba(224,64,155,.55)) }
-#scoreBody.playing { cursor:default }
-.lyr-when-on{margin-top:14px;display:none}
-.lyr-when-on.show{display:block}
-.lyr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:12px}
-.lyr-grid label{font-size:12px;color:var(--text-2);display:block;margin-bottom:4px}
 .btn{border:1px solid var(--border);background:#fff;color:var(--text-1);font:inherit;
      padding:7px 14px;border-radius:var(--radius-ctl);cursor:pointer}
 .btn:hover:not(:disabled){border-color:#cfcbdd}
@@ -213,11 +269,6 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
 .btn.primary:hover:not(:disabled){filter:brightness(1.06)}
 .btn.sm{padding:5px 10px;font-size:12px}
-.lyr-text{width:100%;height:120px;border:1px solid var(--border);border-radius:8px;padding:10px;
-          font:13px/1.8 inherit;color:var(--text-1);resize:vertical;outline:none}
-.lyr-text:focus{box-shadow:inset 0 0 0 2px var(--primary-weak)}
-.lrc{background:#1f2033;color:#e6e6f0;border-radius:8px;padding:12px;font:12px/1.8 Consolas,monospace;
-     max-height:180px;overflow:auto;white-space:pre-wrap}
 
 /* ⑤ 导出 */
 .export-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -253,109 +304,6 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .toast.err{background:#b91c1c}
 .toast.ok{background:#15803d}
 body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
-/* ==================== ③ 钢琴卷帘 ==================== */
-.pr-host{margin-top:10px}
-.pr{outline:none}
-.pr-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-bottom:8px}
-.pr-lab{font-size:12px;color:var(--text-2)}
-.pr-grid-pick,.pr-lyr,.pr-view,.pr-tracks{display:flex;align-items:center;gap:6px}
-/* 曲目切换：一次只编一条轨（与导出的 SVP 一致，一轨一条单声部线） */
-.pr-trackbtns{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
-.pr-track{border:1px solid var(--border);background:#fff;color:var(--text-2);font:inherit;
-  font-size:12px;padding:3px 9px;border-radius:999px;cursor:pointer;white-space:nowrap}
-.pr-track:hover{border-color:#cfcbdd;color:var(--text-1)}
-.pr-track.on{border-color:var(--primary);background:var(--primary-weak);color:var(--primary);font-weight:600}
-.pr-trackbtns .pr-chk{margin-left:6px;font-size:11px;color:var(--text-2)}
-/* 非当前轨：淡显作对照，不可点（一次只编一条轨） */
-.pr-note.pr-ghost{opacity:.22;pointer-events:none}
-.pr-btn{border:1px solid var(--border);background:#fff;color:var(--text-2);font:inherit;
-  font-size:12px;padding:3px 8px;border-radius:var(--radius-ctl);cursor:pointer;white-space:nowrap}
-.pr-btn:hover:not(:disabled){border-color:#cfcbdd;color:var(--text-1)}
-.pr-btn:disabled{opacity:.45;cursor:not-allowed}
-.pr-btn.mono{font-size:14px;min-width:30px;padding:2px 6px;text-align:center}
-.pr select{font:inherit;font-size:12px;padding:3px 6px;border:1px solid var(--border);
-  border-radius:var(--radius-ctl);background:#fff;color:var(--text-1);max-width:210px}
-.pr-lyr-input{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--border);
-  border-radius:var(--radius-ctl);width:180px;color:var(--text-1)}
-.pr-lyr-input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-weak)}
-/* 多选时输入框是"待铺开的整段歌词"，用颜色提示它现在的语义变了 */
-.pr-lyr-input.bulk{border-color:var(--primary);background:var(--primary-weak)}
-.pr-lyr-input.bad{border-color:var(--warn);background:#fffaf0}
-.pr-legend{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--text-2);width:100%}
-.pr-lg::before{content:"\25A0";margin-right:3px}
-.pr-lg-0::before{color:#7c4dff}.pr-lg-1::before{color:#0fa98f}
-.pr-lg-2::before{color:#e0409b}.pr-lg-3::before{color:#f59e0b}
-.pr-lg-chord::before{color:#b9b6c9}
-.pr-lg-hint{color:var(--text-3)}
-.pr-body{display:flex;align-items:flex-start;border:1px solid var(--border);
-  border-radius:var(--radius-ctl);overflow:auto;max-height:440px;background:#fff;min-height:220px}
-.pr-keys-wrap{flex:0 0 auto;position:sticky;left:0;z-index:3;background:#fff;
-  border-right:1px solid var(--border);width:58px}
-.pr-key{font-size:9px;line-height:1;padding-left:4px;display:flex;align-items:center;
-  color:#5b5870;background:#fff;border-bottom:1px solid #f0eef7;cursor:pointer;box-sizing:border-box}
-.pr-key.black{background:#f3f2f8;color:#8a8798}
-.pr-key:hover{background:var(--primary-weak)}
-.pr-scroll{flex:1 1 auto;overflow-x:auto;overflow-y:hidden}
-.pr-canvas{position:relative}
-.pr-ruler{position:relative;height:24px;background:var(--bg-subtle);
-  border-bottom:1px solid var(--border);overflow:hidden;cursor:ew-resize}
-.pr-ruler-ticks{position:absolute;left:0;top:0;right:0;bottom:0}
-.pr-tick{position:absolute;top:0;height:24px;border-left:1px solid var(--border);
-  font-size:10px;color:var(--text-2);padding-left:3px;line-height:24px;pointer-events:none}
-/* 播放头在标尺上的**抓手**：没有它用户根本看不出进度条能拖 */
-.pr-head-grab{position:absolute;top:0;height:24px;width:15px;margin-left:-7.5px;
-  cursor:ew-resize;z-index:6;
-  background:linear-gradient(180deg,#e0409b 0,#e0409b 15px,transparent 15px)}
-.pr-head-grab::after{content:"";position:absolute;left:3px;top:15px;
-  border-left:4.5px solid transparent;border-right:4.5px solid transparent;
-  border-top:7px solid #e0409b}
-.pr-head-grab:hover{filter:brightness(1.12)}
-.pr-lanes{position:relative;overflow:hidden}
-.pr-gridsvg{position:absolute;left:0;top:0;pointer-events:none}
-.pr-row-black{fill:#faf9fd}
-.pr-gl{stroke:#eeecf6;stroke-width:1}
-.pr-gl-trip{stroke:#e6e0f7;stroke-dasharray:2 3}
-.pr-gl-bar{stroke:#d9d5e8;stroke-width:1}
-.pr-notes{position:absolute;left:0;top:0;right:0;bottom:0}
-.pr-note{position:absolute;border-radius:3px;box-sizing:border-box;display:flex;
-  align-items:center;overflow:hidden;cursor:grab;border:1px solid rgba(0,0,0,.14);
-  user-select:none;touch-action:none}
-.pr-note .pr-note-ly{font-size:10px;line-height:1;padding:0 3px;color:#fff;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
-/* 音符右边缘的拉伸手柄：原来 4px 半透明白几乎看不见 */
-.pr-note .pr-grip{position:absolute;right:0;top:0;bottom:0;width:6px;cursor:ew-resize;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.8));
-  border-left:1px solid rgba(255,255,255,.85)}
-.pr-note:hover .pr-grip{background:linear-gradient(90deg,transparent,#fff)}
-.pr-v0{background:#7c4dff}.pr-v1{background:#0fa98f}
-.pr-v2{background:#e0409b}.pr-v3{background:#f59e0b}
-.pr-note.sel{outline:2px solid #1b1730;outline-offset:-2px}
-.pr-note.act{box-shadow:inset 0 0 0 2px #fff}
-.pr-note.playing{filter:brightness(1.4);box-shadow:0 0 8px rgba(224,64,155,.75)}
-.pr-chord{background:#c9c6d8;opacity:.7;border-radius:2px}
-.pr-playhead{position:absolute;top:0;bottom:0;width:3px;margin-left:-1px;background:#e0409b;
-  pointer-events:none;z-index:4;box-shadow:0 0 4px rgba(224,64,155,.45)}
-/* 框选矩形：原来太淡，看不出在框 */
-.pr-marquee{position:absolute;border:1.5px dashed var(--primary);background:rgba(124,77,255,.18);
-  display:none;pointer-events:none;z-index:5;border-radius:2px}
-.pr-empty{position:absolute;left:0;right:0;top:70px;text-align:center;
-  color:var(--text-3);font-size:13px;pointer-events:none}
-
-/* ==================== 通用居中弹窗 ==================== */
-.modal-mask{position:fixed;inset:0;background:rgba(28,24,45,.45);display:flex;
-  align-items:center;justify-content:center;z-index:200;padding:20px}
-.modal-mask[hidden]{display:none}
-.modal{background:#fff;border-radius:var(--radius-card);box-shadow:0 18px 50px rgba(0,0,0,.25);
-  width:min(580px,92vw);max-height:86vh;overflow:auto;padding:20px 22px}
-.modal h3{margin:0 0 10px;font-size:16px}
-.modal-body{font-size:13px;color:var(--text-1);line-height:1.75}
-.modal-body textarea{width:100%;min-height:130px;font:inherit;font-size:13px;padding:8px;
-  border:1px solid var(--border);border-radius:var(--radius-ctl);box-sizing:border-box;resize:vertical}
-.modal-body .opt-row{margin-top:10px}
-.pr-chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-1);cursor:pointer}
-.pr-chk input{margin:0}
-.modal-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
-
 </style>
 </head>
 <body data-state="idle">
@@ -462,7 +410,7 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
     <div class="card-head">
       <span class="num">3</span><h2>钢琴卷帘</h2>
       <span class="spacer"></span>
-      <span class="ghost" id="prHint">扒谱完成后，在这里编辑音符与歌词</span>
+      <span class="ghost">直接改音符与歌词；改完点「保存」，导出即刻重生成</span>
       <button class="fold" data-fold="scoreCard">展开 ▸</button>
     </div>
     <div class="card-body">
@@ -471,31 +419,28 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
         <button class="filter-chip" data-voice="vocal">人声主旋律</button>
         <button class="filter-chip" data-voice="ins">器乐旋律</button>
         <button class="filter-chip" data-voice="chords">和弦</button>
-        <span class="filters-hint">勾什么就导什么；卷帘上改完点「保存」即刻重生成导出，无需重跑推理</span>
+        <span class="spacer"></span>
+        <span class="dirty" id="rollDirty">● 有未保存的改动，导出前需先保存</span>
+        <button class="btn sm" id="rollReload" disabled>放弃改动，重新加载</button>
+        <button class="btn sm primary" id="rollSave" disabled>保存并重新生成导出</button>
       </div>
-      <div class="pr-host" id="prHost"></div>
-      <div class="export-row" style="margin-top:10px">
-        <button class="btn primary sm" id="prSave" disabled>保存并重新生成</button>
-        <button class="btn sm" id="prRevert" disabled>还原</button>
-        <button class="btn sm" id="lyrImport" disabled>导入歌词…</button>
-        <button class="btn sm" id="lrcDownload" disabled>导出 LRC</button>
-        <span class="dirty" id="prDirty">● 已修改，需重新生成导出</span>
-        <span class="ghost" id="prStats">—</span>
-      </div>
+      <!-- 钢琴卷帘：③ 的唯一编辑区。渲染与交互全在 web/pianoroll.js 里。 -->
+      <div id="rollHost"></div>
+      <div class="roll-state" id="rollState">尚未加载卷帘数据</div>
       <div class="transport">
-        <button class="tp-btn" id="tpPlay" disabled title="播放/暂停">▶</button>
+        <button class="tp-btn" id="tpPlay" disabled title="播放/暂停（空格）">▶</button>
         <div class="seek" id="tpSeek"><i id="tpFill"></i></div>
         <span class="tp-time" id="tpTime">0:00</span>
         <div class="tp-speed"><input type="range" id="tpSpeed" min="50" max="150" value="100"><span id="tpSpeedLabel">100% (BPM)</span></div>
         <div class="tp-speed" title="试听音量"><span>音量</span><input type="range" id="tpVol" min="0" max="200" value="100"><span id="tpVolLabel">100%</span></div>
-        <span class="tone-hint" id="toneHint">可试听旋律（离线钢琴音色）</span>
+        <span class="tone-hint" id="toneHint">可试听（离线大钢琴音色）</span>
       </div>
     </div>
   </section>
 
-  <!-- ④ 导出 -->
+  <!-- ⑤ 导出 -->
   <section class="card">
-    <div class="card-head"><span class="num">4</span><h2>导出</h2></div>
+    <div class="card-head"><span class="num">5</span><h2>导出</h2></div>
     <div class="export-row">
       <button class="btn primary" id="dlSvp" disabled>导出 SVP</button>
       <button class="btn" id="dlMidi" disabled>导出 MIDI</button>
@@ -503,15 +448,6 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
       <span class="export-note" id="exportNote">暂无产物</span>
     </div>
   </section>
-</div>
-
-<!-- 通用居中弹窗（导出前的未填歌词提醒 / 导入歌词） -->
-<div class="modal-mask" id="modalMask" hidden>
-  <div class="modal" role="dialog" aria-modal="true">
-    <h3 id="modalTitle"></h3>
-    <div class="modal-body" id="modalBody"></div>
-    <div class="modal-acts" id="modalActs"></div>
-  </div>
 </div>
 
 <div class="statusbar">
@@ -536,21 +472,16 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
 const S = {
   token:null, fileName:"", fileSize:0, duration:null,
   taskId:null, state:"idle",
-  result:null, rawAbc:"", chords:[],
+  result:null, chords:[],
   // ③ 的三个勾选：**勾什么导什么**。默认只勾「人声主旋律」（用户 2026-09-15 定）
   filter:{voices:{vocal:true, ins:false, chords:false}, dropIntroOutro:false},
-  playback:null, notesSig:"", hasVocalLyrics:false,
-  abcShownOnce:false, es:null,
+  // 试听数据来自卷帘（notesSig 用来判断卷帘是否真的换了，从而作废已渲染的钢琴音频）
+  playback:null, notesSig:"",
+  rollShownOnce:false, es:null,
 };
 const STAGES = ["加载模型","读取音频","识别音乐","生成乐谱","完成"];
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-// 钢琴卷帘实例。**在这里声明**（而不是在 ③ 那一段旁边）：
-// refreshButtons() 会调 rollEdited() 读它，而 refreshButtons 定义在前面，
-// 用 let 声明在后面会落进 TDZ —— 一旦有谁在脚本解析完之前调到就 ReferenceError。
-let roll = null;
-// 卷帘上是否有未保存的改动（供 refreshButtons / 切换勾选时判断）
-function rollEdited(){ return roll ? roll.dirty() : false; }
 
 /* ============================ 工具 ============================ */
 function fmt(sec){ sec=Math.max(0,Math.round(sec||0)); const m=Math.floor(sec/60); return m+":"+String(sec%60).padStart(2,"0"); }
@@ -686,11 +617,8 @@ function refreshButtons(){
   $("#btnStop").disabled = !busy;
   document.body.dataset.busy = busy?"1":"0";
   $("#fDel").disabled = busy;
-  const ready = !busy && !!S.taskId && S.state==="done";
-  $("#lyrImport").disabled = !ready;
-  $("#lrcDownload").disabled = !ready;
-  $("#prSave").disabled = !ready || !rollEdited();
-  $("#prRevert").disabled = !ready || !rollEdited();
+  $("#rollSave").disabled = busy || !S.taskId || S.state!=="done" || !roll;
+  $("#rollReload").disabled = busy || !S.taskId || S.state!=="done" || !roll;
   const hasOut = S.state==="done" && S.result;
   $("#dlSvp").disabled = !hasOut; $("#dlMidi").disabled = !hasOut; $("#openDir").disabled = !hasOut;
   $("#tpPlay").disabled = !hasOut;
@@ -845,9 +773,11 @@ function renderStages(names, current, state){
   }).join("");
 }
 function bindStartButtons(){
-  if($("#scoreCard").classList.contains("collapsed") && S.rawAbc){
+  // 结果里有乐谱 → 自动展开 ③（卷帘展开后必须重算尺寸，折叠时容器是 0 宽）
+  if($("#scoreCard").classList.contains("collapsed") && S.result && S.result.abc){
     $("#scoreCard").classList.remove("collapsed");
     $("#scoreCard").querySelector(".fold").textContent="折叠 ▾";
+    refitRoll();
   }
 }
 
@@ -873,29 +803,22 @@ function onResult(t){
   renderSegbar(r.sections||[]);
   renderChords(r);
   if(r.abc){
-    setRawAbc(r.abc||"");
     // 新结果一律以本次推理的 export_voices 为准，并同步三个勾选
     syncVoicesFromResult(r);
     // 有了乐谱就自动展开「③ 钢琴卷帘」，省一次点击
-    if(!S.abcShownOnce){
-      S.abcShownOnce=true;
+    if(!S.rollShownOnce){
+      S.rollShownOnce=true;
       $("#scoreCard").classList.remove("collapsed");
       $("#scoreCard").querySelector(".fold").textContent="折叠 ▾";
+      refitRoll();
     }
   }
   if(r.export){ const svp=(r.export.exports||[]).find(x=>x.kind==="svp");
     $("#exportNote").textContent = svp
-      ? `SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符${r.export.lyrics_source==="recognized"?" · 已写入识别歌词":""}`
+      ? `SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符`
       : "暂无产物"; }
   loadPlayback();
-  // 卷帘有**未保存**的改动时不要重载 —— 那会把用户正在编辑的东西连同缩放一起冲掉。
-  // （正常路径上自动保存 300ms 内就落盘了，所以这里很少真的拦住；
-  //   它兜的是"其它来源的广播"这类意外。）
-  if(roll && roll.dirty()){
-    log("卷帘有未保存的改动，已跳过自动重载（编辑与缩放都保留）","warn");
-  } else {
-    reloadRoll();
-  }
+  loadRoll();
   refreshButtons();
 }
 function renderSegbar(sections){
@@ -1022,60 +945,34 @@ $("#chordCopy").onclick=async()=>{
   catch(e){ toast("复制失败，请用「下载 .txt」","err"); }
 };
 
-/* ============================ ③ 乐谱编辑 ============================ */
-const VOICE_KIND={vocal:"vocal",melody:"vocal",lead:"vocal",voice:"vocal",
-                  ins:"ins",instrumental:"ins",accompaniment:"ins"};
-function voiceKind(name){ return VOICE_KIND[String(name||"").trim().toLowerCase()]||null; }
-/** 认不出来的声部一律保留，免得误删。 */
-function keepVoice(name, voices){
-  const k=voiceKind(name);
-  return k===null ? true : !!voices[k];
-}
-function filterAbc(raw,f){
-  const voices=(f&&f.voices)||{vocal:true,ins:false,chords:false};
-  const out=[]; let cur=null, skip=false;
-  for(const line of (raw||"").split("\n")){
-    const sec=line.match(/^\s*%\s*([A-Za-z][\w \-]*?)\s*$/);
-    if(sec){ const n=sec[1].toLowerCase();
-      if(f&&f.dropIntroOutro&&(n==="intro"||n==="outro")){ skip=true; continue; }
-      skip=false; out.push(line); continue; }
-    if(/^\s*%/.test(line)){ if(!skip) out.push(line); continue; }
-    if(skip) continue;
-    const decl=line.match(/^\s*V:\s*([^\s=]+)(.*)$/);
-    if(decl&&decl[2].includes("=")){ if(!keepVoice(decl[1],voices)) continue; out.push(line); continue; }
-    const sw=line.match(/^\s*V:\s*([^\s=%]+)\s*$/);
-    if(sw){ cur=sw[1]; if(!keepVoice(cur,voices)) continue; out.push(line); continue; }
-    if(cur&&!keepVoice(cur,voices)) continue;
-    out.push(line);
-  }
-  return out.join("\n");
-}
-function setRawAbc(abc){ S.rawAbc=abc||""; }
+/* ============================ ③ 导出内容（三个勾选） ============================ */
 function syncFilterChips(){
   $$(".filter-chip").forEach(c=>c.classList.toggle("on", !!S.filter.voices[c.dataset.voice]));
 }
-/** 当前勾选的内容（提交 / 重新生成导出时带上）。 */
+/** 当前勾选的内容（读卷帘 / 提交保存时带上）。 */
 function selectedVoices(){ return ["vocal","ins","chords"].filter(k=>!!S.filter.voices[k]); }
 /** ③ 三个勾选（人声主旋律 / 器乐旋律 / 和弦）的唯一真相入口。
  *
- *  勾选状态存在 `S.filter.voices`，它同时决定四件事：
- *    编辑器里的 ABC、试听放哪些声部、提交给后端的 `export_voices`、导出的轨道数。
+ *  勾选状态存在 `S.filter.voices`，它同时决定三件事：
+ *    卷帘上显示/可编辑哪些轨、提交给后端的 `export_voices`、导出的轨道数。
  *  **勾什么就导什么 —— 由用户决定**（2026-09-15 用户定的默认：只勾人声主旋律）。
+ *
+ *  改动（旧版是"删掉 ABC 里另一个声部"）：现在勾选只影响**读取与导出**，
+ *  不再动任何文本。所以切换勾选不会再"丢弃手动修改"，也就不需要确认框。
  */
-function toggleVoice(kind, on, force){
+function toggleVoice(kind, on){
   on = !!on;
-  if(!force && rollEdited()
-     && !confirm("重新加载卷帘会丢弃你还没保存的音符/歌词改动，继续吗？")){
-    syncFilterChips();          // 用户放弃：UI 回到真正生效的状态
-    return;
-  }
-  const changed = !!S.filter.voices[kind] !== on;
   S.filter.voices[kind] = on;
   syncFilterChips();
-  if(S.taskId && S.state==="done"){
-    // 勾选变了 → 卷帘要按新的声部集合重载（导出内容 = 卷帘显示内容）
-    reloadRoll();
-    if(!force && changed) loadPlayback();
+  // 勾选变了 → 卷帘要按新的声部集合重载（显示内容 = 导出内容），
+  // 磁盘上的 export/*.svp|mid 也还是上一次的内容，标一下「需重新生成」。
+  if(S.taskId && !running()){
+    if(rollEdited() && !confirm("切换导出内容会重新加载卷帘，放弃还没保存的改动？")){
+      S.filter.voices[kind] = !on;      // 用户放弃：UI 回到真正生效的状态
+      syncFilterChips();
+      return;
+    }
+    loadRoll();
   }
 }
 $$(".filter-chip").forEach(chip=>chip.onclick=()=>{
@@ -1085,6 +982,163 @@ $$(".filter-chip").forEach(chip=>chip.onclick=()=>{
 // 首屏必须同步一次：HTML 里 chip 不带 on 态，默认「只勾人声主旋律」靠这一行画出来。
 // 少了它，页面看起来一个都没勾，实际提交的却是 export_voices=["vocal"] —— UI 与行为脱节。
 syncFilterChips();
+
+/* ==================== ③ 钢琴卷帘（渲染与交互在 web/pianoroll.js） ====================
+   数据流：GET /api/tasks/{id}/roll → 卷帘（单位秒）→ 用户编辑 → POST /roll
+          → 后端把音符表交给同一条导出管线（和弦轨 / 复音拆轨 / 八度 / 速度表都不变）。
+   页面层只做三件事：取数据、喂给组件、把组件的回调接到既有的状态栏/日志/进度条上。 */
+let roll=null;
+/** 卷帘上是否有未保存的改动。 */
+function rollEdited(){ return !!(roll && roll.isDirty()); }
+function setRollState(msg, level){
+  const el=$("#rollState"); if(!el) return;
+  el.textContent=msg||"";
+  el.className="roll-state"+(level?" "+level:"");
+}
+/** 懒创建：没有任务时不必白建一堆节点。 */
+function ensureRoll(){
+  if(roll) return roll;
+  const host=$("#rollHost");
+  if(!host || !window.PianoRoll) return null;
+  roll=window.PianoRoll.create(host,{
+    onStatus:(m,lv)=>{ log("卷帘："+m); if(lv==="warn") toast(m,"warn"); },
+    onToast:(m,lv)=>toast(m,lv||"warn"),
+    onEdit:()=>{
+      // 改了就把试听音频作废（loadPlayback 按音符指纹判断并 resetPiano），
+      // 并启动自动保存的防抖计时
+      loadPlayback();
+      scheduleAutoSave();
+      refreshButtons();
+    },
+    onSeek:(sec)=>seekToSeconds(sec),           // 点卷帘空白 / 点标尺 → 进度条立即跳过去
+    // 空格播放：直接走页面既有的播放按钮，速度/音量/进度条自然就是同一套
+    onTogglePlay:()=>{ const b=$("#tpPlay"); if(b && !b.disabled) b.click(); },
+    onSave:()=>saveRoll(false)
+  });
+  // 焦点离开卷帘（含歌词输入框）→ 立刻落盘，不等那 300ms
+  host.addEventListener("focusout",()=>{ flushAutoSave(); });
+  return roll;
+}
+
+/* ---------------- 自动保存：最后一次改动后 300ms ----------------
+   用户要求：「修改完之后失焦 300ms，失焦后自动保存并更新预览」。
+   这里的"失焦"按**改动停下来**理解 —— 不要求鼠标点出卷帘之外再算，
+   否则一直在卷帘里编辑的人永远等不到保存。所以：
+     * 每次编辑重置一个 300ms 计时器，停下来就自动保存 + 刷新预览；
+     * 焦点真的离开卷帘（focusout）时立刻落盘，不等计时器；
+     * 保存是静默的（不弹 toast），否则每拖一下弹一个会烦死人。 */
+const AUTOSAVE_DELAY_MS=300;
+let autoSaveTimer=null, autoSaveBusy=false, autoSavePending=false;
+function scheduleAutoSave(){
+  $("#rollDirty").classList.add("on");
+  if(autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer=setTimeout(()=>{ autoSaveTimer=null; flushAutoSave(); },AUTOSAVE_DELAY_MS);
+}
+async function flushAutoSave(){
+  if(autoSaveTimer){ clearTimeout(autoSaveTimer); autoSaveTimer=null; }
+  if(!roll || !S.taskId || !rollEdited()) return;
+  // 一次保存要重建 SVP/MIDI，慢的话几百毫秒到一两秒。正在存的时候又改了，
+  // 就记一个"待补存"，存完再存一次 —— 保证**最后一次改动一定落盘**。
+  if(autoSaveBusy){ autoSavePending=true; return; }
+  autoSaveBusy=true;
+  try{ await saveRoll(true); } finally{ autoSaveBusy=false; }
+  if(autoSavePending){ autoSavePending=false; if(rollEdited()) flushAutoSave(); }
+}
+// 切走标签页 / 关窗口前尽量落盘一次，别让最后一下改动丢掉
+window.addEventListener("blur",()=>{ flushAutoSave(); });
+window.addEventListener("beforeunload",(e)=>{
+  if(!rollEdited()) return;
+  flushAutoSave();
+  e.preventDefault(); e.returnValue="卷帘上还有改动正在保存，确定离开？";
+});
+/** 折叠/展开后必须重算：折叠时容器宽高为 0，卷帘会按 0 宽去裁剪可视区。 */
+function refitRoll(){
+  requestAnimationFrame(()=>{ if(roll) roll.fitWidth(); });
+}
+/** 按当前勾选重新拉卷帘数据。**会丢弃卷帘上未保存的改动**，调用方负责先确认。 */
+async function loadRoll(){
+  const inst=ensureRoll();
+  if(!inst) return;
+  if(!S.taskId){ setRollState("扒谱完成后，这里显示可编辑的钢琴卷帘"); inst.load({tracks:[]}); return; }
+  setRollState("正在读取卷帘数据…");
+  try{
+    const qs=new URLSearchParams({export_voices:selectedVoices().join(",")});
+    const r=await fetch(`/api/tasks/${S.taskId}/roll?`+qs);
+    if(!r.ok){ setRollState(`读取卷帘数据失败：HTTP ${r.status}`,"err"); return; }
+    const j=await r.json();
+    const warns=j.warnings||[];
+    if(!j.available){
+      // 原因 + 告警都摆到状态行上；只写一句"没有可用音符"用户不知道该勾哪个
+      const bits=[j.reason||"尚无可用乐谱"].concat(warns);
+      setRollState(bits.join("　·　"),"warn");
+      inst.load({tracks:[]});
+      warns.forEach(w=>log("卷帘："+w,"warn"));
+      $("#rollDirty").classList.remove("on");
+      refreshButtons();
+      return;
+    }
+    inst.load(j);
+    warns.forEach(w=>log("卷帘："+w,"warn"));
+    // 试听数据来自卷帘，所以必须等卷帘装好之后再刷新（顺序反了会听到上一首）
+    loadPlayback();
+    const n=(j.tracks||[]).reduce((a,t)=>a+t.notes.length,0);
+    const names=(j.tracks||[]).map(t=>t.display).join("、");
+    setRollState(`卷帘就绪：${(j.tracks||[]).length} 条轨（${names}）/ ${n} 个音符 / ${(j.measures||[]).length} 小节`
+      + (warns.length?`　⚠ ${warns.length} 条提示：${warns[0]}`:""), warns.length?"warn":"");
+    log(`卷帘就绪：${(j.tracks||[]).length} 轨（${names}）/ ${n} 音符 / ${(j.measures||[]).length} 小节`
+      + `　来源 ${j.source_abc||"-"}　乐谱声部 [${(j.voices_in_score||[]).join("/")}]`);
+    warns.forEach(w=>log("卷帘："+w,"warn"));
+  }catch(e){
+    setRollState("读取卷帘数据失败："+e.message,"err");
+    log("读取卷帘失败："+e.message,"error");
+  }
+  $("#rollDirty").classList.remove("on");
+  refreshButtons();
+}
+/** 保存卷帘并按当前勾选重生成导出。silent=true 用于"导出前顺手存一次"。 */
+async function saveRoll(silent){
+  if(!S.taskId || !roll) return false;
+  const btn=$("#rollSave");
+  if(!silent) btn.disabled=true;      // 自动保存不去闪按钮
+  try{
+    // 这里**故意不做 normalizeAll**：模型的一条声部里本来就可能同时响着好几个音
+    // （ABC 的 `[CEG]` 和弦写法），整体规整会把它们推成一条旋律线，等于把和弦拆坏。
+    // 编辑时的规整已经在手势结束那一刻按「谁被拖谁赢」做过了；
+    // 剩下的重叠交给导出侧拆成 名字1/名字2…（那里一个音都不会丢）。
+    const ov=roll.overlaps();
+    ov.forEach(w=>log("卷帘："+w,"warn"));
+    const r=await fetch(`/api/tasks/${S.taskId}/roll`,{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tracks:roll.getTracks(), export_voices:selectedVoices()})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||j.detail||"保存失败");
+    roll.markSaved();
+    $("#rollDirty").classList.remove("on");
+    const svp=(j.exports||[]).find(x=>x.kind==="svp");
+    $("#exportNote").textContent = svp
+      ? `SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符`
+      : "已重新生成";
+    if(!silent) toast("已按卷帘重新生成导出","ok");
+    log(`卷帘已保存：${(j.exports||[]).length} 个产物；声部 [${(j.exports||[]).map(x=>x.kind).join("/")}]`
+        + `；SVP 轨 [${svp?(svp.tracks||[]).join("/"):"-"}]`);
+    (j.warnings||[]).forEach(w=>log("导出："+w,"warn"));
+    return true;
+  }catch(e){
+    toast("保存失败："+e.message,"err");
+    log("保存卷帘失败："+e.message,"error");
+    return false;
+  }finally{
+    refreshButtons();
+  }
+}
+/** 放弃卷帘上还没保存的改动，重新从后端加载。 */
+async function reloadRoll(){
+  if(rollEdited() && !confirm("放弃卷帘上还没保存的改动？")) return;
+  await loadRoll();
+}
+$("#rollSave").onclick=()=>saveRoll(false);
+$("#rollReload").onclick=()=>reloadRoll();
+
 /** 按任务结果里的 export_voices 同步三个勾选（老结果只有 only_melody 时回退）。 */
 function syncVoicesFromResult(r){
   let sel=null;
@@ -1096,127 +1150,14 @@ function syncVoicesFromResult(r){
   syncFilterChips();
 }
 
-/* ==================== ③ 钢琴卷帘 ====================
-   卷帘是 ③ 唯一的编辑器（旧版的 ABC 文本框与五线谱已按用户要求删除）。
-   数据流：/api/tasks/{id}/notes → 卷帘（单位秒）→ 用户编辑 → POST /roll
-   → 后端把音符序列化回 ABC，并重生成 SVP/MIDI/ABC。
-   歌词是**逐音字面字符串**，`-`（同音节延续）与 `+`（同词下一音节）前后端都原样透传。 */
-// `roll` 与 `rollEdited()` 在上面统一声明（避免 TDZ），这里只管接线。
-function initRoll(){
-  if(roll) return;
-  roll=PianoRoll.mount($("#prHost"),{
-    grid:PianoRoll.DEFAULT_GRID,
-    onChange:()=>{ setPrDirty(true); refreshButtons(); scheduleAutoSave(); },
-    onToast:(m,k)=>toast(m,k),
-    onAudition:auditionPitch,
-    // Ctrl+L：歌词填充（弹窗属于页面层，不在卷帘组件里）
-    onLyrics:()=>lyrImportOpen(),
-    // 点卷帘空白处 → 进度条跳过去
-    onSeek:(sec)=>seekToSeconds(sec)
-  });
+/* ---------- 播放高亮：播放到哪个音，卷帘上就点亮哪个音 ----------
+   旧版是把播放时间映射到 abcjs 谱面的 .abcjs-note 元素上（按序号，还得靠后端多返回
+   一份"不合并连音线"的音符表才能对齐）。ABC 文本框与五线谱已经删掉，现在直接交给卷帘。 */
+function clearHighlight(){
+  if(roll) roll.clearPlaying();
 }
-
-/* 改完音符就自动保存并刷新预览 —— **不等失焦**。
-   用户明确指出：应该是"修改完音符"就更新，而不是"点到卷帘外面"才更新。
-   （失焦本身是个很弱的信号：用户可能一直在卷帘里编辑、根本不失焦；而且
-   "改完还要再点一下别处才生效"很反直觉。）
-
-   为什么用防抖而不是每次改动都存：拖动/打字会连续产生很多次改动，而一次重新生成
-   要一两秒。防抖保证"停手之后才存"。
-   为什么还要串行化：并发调用 saveRoll 会让两次重生成互相覆盖产物（后写的赢），
-   期间读到的产物是半成品。 */
-const AUTO_SAVE_DEBOUNCE_MS = 300;
-let autoSaveTimer=null, autoSaving=false, autoSaveAgain=false;
-
-function scheduleAutoSave(){
-  if(autoSaveTimer) clearTimeout(autoSaveTimer);
-  autoSaveTimer=setTimeout(runAutoSave, AUTO_SAVE_DEBOUNCE_MS);
-}
-async function runAutoSave(){
-  autoSaveTimer=null;
-  if(!roll || !roll.dirty()) return;
-  if(!S.taskId || S.state!=="done" || running()) return;
-  if(autoSaving){ autoSaveAgain=true; return; }     // 串行化，别并发重生成
-  autoSaving=true;
-  try{
-    if(await saveRoll(true)) toast("已自动保存并更新预览","ok");
-  } finally {
-    autoSaving=false;
-    if(autoSaveAgain){ autoSaveAgain=false; scheduleAutoSave(); }
-  }
-}
-function setPrDirty(on){
-  const ready=!!S.taskId && S.state==="done" && !running();
-  $("#prDirty").classList.toggle("on",!!on);
-  $("#prSave").disabled=!ready || !on;
-  $("#prRevert").disabled=!ready || !on;
-}
-/** 按当前勾选重新拉取卷帘数据。会**丢弃未保存的改动**，调用方负责先确认。 */
-async function reloadRoll(){
-  initRoll();
-  if(!S.taskId){ roll.load({tracks:[]}); setPrDirty(false); return; }
-  try{
-    // 传**具体的勾选**（voices=vocal,ins…），不要用 only_melody 那个布尔：
-    // 布尔只有两个值，"只勾器乐旋律"会被当成"全都要"，于是和弦被一起放出来 ——
-    // 那就是"勾了器乐却带出和弦"的根因。导出侧一直是对的，只有预览走错了口径。
-    const r=await fetch(`/api/tasks/${S.taskId}/notes?voices=${selectedVoices().join(",")}`);
-    if(!r.ok){ log(`读取卷帘数据失败：HTTP ${r.status}`,"error"); return; }
-    const j=await r.json();
-    if(!j.available){ roll.load({tracks:[]}); setPrDirty(false); return; }
-    roll.load(j);
-    setPrDirty(false);
-    S.hasVocalLyrics=!!j.has_vocal_lyrics;
-    const n=(j.tracks||[]).reduce((a,t)=>a+t.notes.length,0);
-    $("#prStats").textContent=`♩=${j.bpm?(Math.round(j.bpm*10)/10):"—"} · ${j.meter||"—"} · ${n} 个音符`;
-    // 勾的声部在当前编辑稿里没有（典型：这次推理只导出了人声，现在又勾了器乐）
-    // → 后端回落到模型原始谱。**要说出来**，别让用户以为看到的是自己编辑过的版本。
-    if(j.fell_back_to_model){
-      log("当前谱面里没有你勾的声部，已改用模型原始谱（这些声部是你没编辑过的原始版本）","warn");
-      toast("部分声部取自模型原始谱（当前编辑稿里没有）","warn");
-    }
-    const ov=roll.overlaps();
-    ov.forEach(w=>log("卷帘："+w,"warn"));
-    log(`卷帘就绪：${(j.tracks||[]).length} 条轨 / ${n} 个音符` +
-        `（${j.has_vocal_lyrics?"人声已填歌词":"人声歌词为 la"}）`);
-  }catch(e){ log("读取卷帘数据失败："+e.message,"error"); }
-}
-/** 保存卷帘并按当前勾选重生成导出。silent=true 用于"导出前顺手保存"。 */
-async function saveRoll(silent){
-  if(!S.taskId || !roll) return true;
-  try{
-    const r=await fetch(`/api/tasks/${S.taskId}/roll`,{method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({tracks:roll.state().tracks, export_voices:selectedVoices(),
-                           bpm:S.result?.bpm, meter:S.result?.meter})});
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.error||j.detail||"保存失败");
-    const svp=(j.exports||[]).find(x=>x.kind==="svp");
-    if(svp) $("#exportNote").textContent=`SVP version ${svp.version} · ${(svp.tracks||[]).join("/")} · ${svp.notes} 音符`;
-    (j.warnings||[]).forEach(w=>log(w,"warn"));
-    roll.clearDirty(); setPrDirty(false); refreshButtons();
-    S.hasVocalLyrics=!!j.has_vocal_lyrics;
-    if(!silent) toast("已按卷帘重新生成导出","ok");
-    log(`卷帘已保存：${(j.exports||[]).length} 个产物；声部 [${(svp&&svp.tracks||[]).join("/")}]`);
-    loadPlayback();
-    return true;
-  }catch(e){
-    toast("保存失败："+e.message,"err"); log("保存卷帘失败："+e.message,"error");
-    return false;
-  }
-}
-$("#prSave").onclick=()=>saveRoll(false);
-$("#prRevert").onclick=async()=>{
-  if(rollEdited() && !confirm("放弃卷帘上还没保存的改动？")) return;
-  await reloadRoll();
-  toast("已还原到最近一次保存的谱面","ok");
-};
-/** 点琴键试听一个音——用来确认"这个音到底是不是这个高度"。 */
-function auditionPitch(pitch){
-  try{
-    if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)();
-    ensureBus();
-    pianoVoice(melodyBus, 440*Math.pow(2,(pitch-69)/12), actx.currentTime+0.01, 0.3, 0.9);
-  }catch(e){ /* 没有音频上下文时静默：试听不是关键路径 */ }
+function highlightAt(seconds){
+  if(roll) roll.setPlayhead(seconds);
 }
 
 /* 试听：Web Audio 加法合成钢琴音色（离线，不联网，不依赖音色库） */
@@ -1272,45 +1213,27 @@ function notesSignature(notes){
   return `${n.length}|${n[0].start.toFixed(3)}|${n[0].pitch}|${n[n.length-1].end.toFixed(3)}`;
 }
 
+/* 试听数据一律取自**卷帘**，不再去后端拉一遍 /notes。
+   为什么：卷帘上的改动此刻还没落盘（保存是 P4），如果试听去拉 /notes，就会变成
+   「看到的是改过的、听到的是旧的」；而且两份音符数据迟早会漂。 */
 async function loadPlayback(){
-  if(!S.taskId) return;
-  try{
-    // 用「当前乐谱」解析出的音符，而不是模型原始 playback.json，
-    // 这样用户在乐谱编辑里改过 ABC 之后，试听跟着改后的谱面走。
-    // only_melody 跟着这个过滤开关：取消它时后端会把
-    // 其余声部一并返回，试听才是完整多声部，而不是永远只有主旋律。
-    // 只有「仅仅勾了人声主旋律」时才按单声部试听，否则把器乐/和弦一并放出来。
-    // 同样按**具体勾选**传，别用布尔：布尔表达不了"只要器乐"。
-    // 三个都取消时传**空参数**（?voices=），后端据此返回空 ——
-    // 注意不能传 none，那会被 normalize_export_voices 当成无法识别而退回默认的人声。
-    const r=await fetch(`/api/tasks/${S.taskId}/notes?voices=${selectedVoices().join(",")}`);
-    if(!r.ok){ S.playback=null; return; }
-    const j=await r.json();
-    if(!j.available){ S.playback=null; S.highlightNotes=[]; resetPiano(); return; }
-    const newNotes=(j.notes||[]).slice();
-    const chords=j.chord_notes||[];
-    // 取消「仅主旋律乐谱」时把 SheetSage2 自己的和弦轨也叠上——
-    // 整合包默认放的就是 transcription.mid（人声 + 器乐 + 和弦）；
-    // 我们之前只喂 ABC 里的旋律，所以 intro 的和弦与器乐都没声音。
-    if(chords.length) newNotes.push(...chords);
-    newNotes.sort((a,b)=>a.start-b.start||a.pitch-b.pitch);
-    // 换了曲子 / 改了谱面 / 切换了声部范围 → 必须作废已渲染的钢琴音频。
-    // 不作废的话 buildPiano() 会直接返回上一首（或上一版声部）的 AudioBuffer，
-    // 表现为「换了歌/改了设置，试听还是老的」，而且进度条总长也是老的。
-    const sig=notesSignature(newNotes);
-    if(sig!==S.notesSig){ resetPiano(); S.notesSig=sig; }
-    S.playback={notes:newNotes, duration:j.duration||0};
-    log(`试听就绪：${newNotes.length} 个音符` +
-        (chords.length?`（含和弦 ${chords.length}）`:"") +
-        (j.voices?.length>1?`（声部 ${j.voices.join("/")}）`:"") +
-        `（${j.has_vocal_lyrics?"人声已填歌词":"歌词为 la"}）`);
-  }catch(e){ S.playback=null; }
+  if(!S.taskId || !roll){ S.playback=null; return; }
+  const notes=roll.getPlaybackNotes();
+  const duration=roll.totalSeconds();
+  // 改了谱面 → 已渲染的钢琴音频必须作废。不作废的话 buildPiano() 会把上一版
+  // 直接还回来（表现是"音符改了，试听还是老的，进度条总长也没变"）。
+  const sig=notesSignature(notes);
+  if(sig!==S.notesSig){ resetPiano(); S.notesSig=sig; }
+  S.playback = notes.length ? {notes, duration} : null;
+  if(!notes.length){ log("试听：当前卷帘没有音符"); return; }
+  log(`试听就绪：${notes.length} 个音符 / ${duration.toFixed(1)}s（来源：钢琴卷帘）`);
 }
 /* 换曲子 / 改谱面后，之前渲染好的钢琴音频必须作废 */
 function resetPiano(){
   stopMelody();
   pianoData=null; pianoPromise=null; melodyBus=null; tpLimiter=null;
   melodyOffset=0;
+  if(roll) roll.setPlayhead(0);
   $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00";
 }
 function stopMelody(){
@@ -1321,7 +1244,8 @@ function stopMelody(){
   if(tpLimiter){ try{ tpLimiter.disconnect(); }catch{} tpLimiter=null; }
   melodyNodes.forEach(n=>{ try{ n.stop(); }catch{} }); melodyNodes=[];
   if(melodyTimer) cancelAnimationFrame(melodyTimer); melodyTimer=null;
-  melodyPlaying=false; $("#tpPlay").textContent="▶";
+  melodyPlaying=false; $("#tpPlay").textContent="▶"; if(roll) roll.setPlaying(false);
+  clearHighlight();
 }
 
 /* 首选：用**内置大钢琴采样**离屏渲染出整段音频
@@ -1330,6 +1254,9 @@ function stopMelody(){
 async function buildPiano(){
   if(pianoData) return pianoData;
   if(pianoPromise) return pianoPromise;
+  // 离屏渲染要把整段跑一遍（长曲子几秒到十几秒）。不给提示的话，
+  // 按了空格像是卡死了 —— 这是"每次改完音符都要重渲染"这个设计的代价，得让用户看见。
+  $("#toneHint").textContent="正在渲染钢琴音色…";
   pianoPromise=(async()=>{
     if(!(window.ABCJS && ABCJS.synth)) throw new Error("abcjs synth 不可用");
     if(!S.playback?.notes?.length) throw new Error("没有可渲染的音符");
@@ -1362,7 +1289,7 @@ async function buildPiano(){
       log(`钢琴音色就绪：${buffer.duration.toFixed(1)}s / ${buffer.numberOfChannels} 声道`);
       return pianoData;
     } finally { try{ await ctx.close(); }catch{} }
-  })().catch(e=>{ pianoPromise=null; throw e; });
+  })().catch(e=>{ pianoPromise=null; $("#toneHint").textContent="钢琴音色渲染失败，已改用合成音色"; throw e; });
   return pianoPromise;
 }
 
@@ -1385,14 +1312,14 @@ async function playWithPiano(from){
   tpLimiter=limiter;
   src.start(0, Math.max(0, Math.min(from, data.buffer.duration-0.01)));
   tpSource=src; melodyStartT=actx.currentTime;
-  melodyPlaying=true; $("#tpPlay").textContent="❚❚";
+  melodyPlaying=true; $("#tpPlay").textContent="❚❚"; if(roll) roll.setPlaying(true);
   const total=data.buffer.duration;
   const tick=()=>{
     if(!melodyPlaying) return;
     const cur=melodyOffset+(actx.currentTime-melodyStartT)*tpRate;
     const p=Math.max(0,Math.min(1,cur/total));
     $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(cur);
-    if(roll) roll.setPlayhead(cur);
+    highlightAt(cur);
     if(cur>=total){ stopMelody(); melodyOffset=0; $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00"; return; }
     melodyTimer=requestAnimationFrame(tick);
   };
@@ -1416,14 +1343,14 @@ function playWithSynth(){
     scheduled++;
   });
   if(!scheduled){ toast("该位置之后没有音符","warn"); return; }
-  melodyPlaying=true; $("#tpPlay").textContent="❚❚";
+  melodyPlaying=true; $("#tpPlay").textContent="❚❚"; if(roll) roll.setPlaying(true);
   const total=S.playback.duration/rate;
   const tick=()=>{
     if(!melodyPlaying) return;
     const cur=base+(actx.currentTime-t0);
     const p=Math.max(0,Math.min(1,cur/total));
     $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(cur);
-    if(roll) roll.setPlayhead(cur);
+    highlightAt(cur);
     if(cur>=total){ stopMelody(); melodyOffset=0; $("#tpFill").style.width="0%"; $("#tpTime").textContent="0:00"; return; }
     melodyTimer=requestAnimationFrame(tick);
   };
@@ -1458,159 +1385,37 @@ $("#tpVol").oninput=e=>{
   if(tpGain && pianoData) tpGain.gain.value=pianoData.gain*Math.max(0.02,v);
   if(melodyBus) melodyBus.gain.setTargetAtTime(Math.max(1.2,v), actx.currentTime, 0.02);
 };
-/** 把播放位置设到总长的 p（0..1）。钢琴路径的总时长以渲染出的 AudioBuffer 为准。 */
-function seekToFraction(p){
-  if(!S.playback) return false;
-  p=Math.max(0,Math.min(1,p||0));
+$("#tpSeek").onclick=e=>{ if(!S.playback) return;
+  const r=e.currentTarget.getBoundingClientRect(); const p=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+  // 钢琴路径的总时长以渲染出的 AudioBuffer 为准
   const total = pianoData ? pianoData.buffer.duration : S.playback.duration;
-  if(!(total>0)) return false;
-  melodyOffset=p*total;
-  $("#tpFill").style.width=(p*100)+"%"; $("#tpTime").textContent=fmt(melodyOffset);
-  if(melodyPlaying){ stopMelody(); $("#tpPlay").click(); }
-  return true;
-}
-/** 卷帘上点空白处 → 跳到那一秒（卷帘那边已经做了 1 秒节流，避免连点卡死）。 */
+  seekToSeconds(p*total); };
+
+/** 把试听定位到某一秒。卷帘"点空白处立即跳转"也走这里。
+ *  抽成函数而不是留在 onclick 里：进度条点按与卷帘点按必须是**同一套**逻辑
+ *  （总时长算哪个、要不要重启播放），各写一份迟早会漂。 */
 function seekToSeconds(sec){
   if(!S.playback) return;
   const total = pianoData ? pianoData.buffer.duration : S.playback.duration;
   if(!(total>0)) return;
-  seekToFraction(sec/total);
+  const t=Math.max(0,Math.min(total,sec||0));
+  const wasPlaying=melodyPlaying;
+  melodyOffset=t;
+  $("#tpFill").style.width=((t/total)*100)+"%"; $("#tpTime").textContent=fmt(t);
+  if(roll) roll.setPlayhead(t);
+  if(wasPlaying){ stopMelody(); $("#tpPlay").click(); }
 }
-$("#tpSeek").onclick=e=>{
-  const r=e.currentTarget.getBoundingClientRect();
-  seekToFraction((e.clientX-r.left)/r.width); };
 
 /* 折叠 */
 $$(".fold").forEach(btn=>btn.onclick=()=>{
   const card=document.getElementById(btn.dataset.fold);
   const c=card.classList.toggle("collapsed");
   btn.textContent=c?"展开 ▸":"折叠 ▾";
-  // 卷帘的行高是按"可用高度"反推的，折叠时容器高度是 0 —— 展开后必须重算一次，
-  // 否则会一直用折叠状态下算出来的那个离谱行高。
-  if(!c && card.contains($("#prHost")) && roll) setTimeout(()=>roll.resize(), 0);
+  // 卷帘的行高与可视区是按容器尺寸算的：折叠时是 0，展开后必须重算一次
+  if(!c && card.id==="scoreCard" && typeof refitRoll==="function") refitRoll();
 });
 
-/* ============================ 通用居中弹窗 ============================
-   两处用它：① 导出前人声主旋律没填歌词的确认；② 批量导入歌词。
-   （④ 歌词填充卡片已按用户要求删除，功能并入 ③ 钢琴卷帘：
-     逐音歌词在卷帘上直接编辑，批量导入仍走这里的弹窗。） */
-
-function modalOpen(o){
-  $("#modalTitle").textContent=o.title||"";
-  $("#modalBody").innerHTML=o.bodyHTML||"";
-  const acts=$("#modalActs"); acts.innerHTML="";
-  (o.actions||[]).forEach(a=>{
-    const b=document.createElement("button");
-    b.className="btn"+(a.kind==="primary"?" primary":"");
-    b.textContent=a.label;
-    b.onclick=()=>{ if(a.onClick) a.onClick(); };
-    acts.appendChild(b);
-  });
-  $("#modalMask").hidden=false;
-  const first=acts.querySelector(".btn.primary")||acts.querySelector(".btn");
-  if(first) first.focus();
-}
-function modalClose(){ $("#modalMask").hidden=true; }
-$("#modalMask").addEventListener("click",e=>{ if(e.target===$("#modalMask")) modalClose(); });
-document.addEventListener("keydown",e=>{
-  if(e.key==="Escape" && !$("#modalMask").hidden) modalClose();
-});
-
-/** 导出前检查：**人声主旋律**一个歌词都没填 → 居中弹窗（继续 / 返回）。
- *  器乐旋律与和弦**豁免**（用户明确要求）。
- *  返回 Promise<boolean>：true = 继续导出。 */
-function confirmVocalLyrics(){
-  if(!roll || !roll.requireVocalLyrics()) return Promise.resolve(true);
-  return new Promise(resolve=>{
-    modalOpen({
-      title:"未填充歌词",
-      bodyHTML:
-        `<div>人声主旋律<b>还没有填歌词</b>，导出后所有音符的歌词都会是 <b>“la”</b>。</div>
-         <div style="margin-top:10px;color:var(--text-2)">
-           器乐旋律与和弦不受影响，可以留空。<br>
-           要在卷帘上填歌词：选中音符后在「歌词」框里输入（中文可直接用输入法）；<br>
-           <b>‿</b> 是延音符（-，同一音节延续到本音符），
-           <b>⁀</b> 是多音节拆分（+，本音符唱上一个词的下一个音节）。
-         </div>`,
-      actions:[
-        {label:"返回去填", onClick:()=>{ modalClose(); resolve(false); }},
-        {label:"继续导出", kind:"primary", onClick:()=>{ modalClose(); resolve(true); }}
-      ]
-    });
-  });
-}
-
-/* 批量导入歌词：LRC 带时间戳 → 按时间对齐；纯文本 → 按顺序一字一音。
-   几百个音符不可能手打，所以这条路必须留着（卷帘负责逐音微调）。
-   本工具**不做歌词识别**（Qwen3-ASR 已移除）。 */
-function lyrImportOpen(){
-  if(!S.taskId || S.state!=="done"){ toast("请先完成一次扒谱","err"); return; }
-  modalOpen({
-    title:"导入歌词",
-    bodyHTML:
-      `<div>粘贴歌词，或选择 <b>.lrc</b> / <b>.txt</b> 文件。会按时间（LRC）或按顺序（纯文本）分配到音符上。
-           多行文本可以一次全贴进来。</div>
-       <div class="opt-row"><span class="opt-label">格式</span>
-         <select id="mFmt">
-           <option value="auto">自动识别</option>
-           <option value="lrc">按 LRC</option>
-           <option value="plain">按纯文本</option>
-         </select>
-         <span class="opt-label" style="margin-left:12px">延音符</span>
-         <select id="mCont">
-           <option value="auto">自动（中文 -，英文多音节 +）</option>
-           <option value="-">- 同一音节延续</option>
-           <option value="+">+ 同词下一个音节</option>
-         </select>
-       </div>
-       <div class="opt-row">
-         <label class="pr-chk" title="不勾：中文逐字（我爱你 → 我/爱/你），英文按词。勾上：只按空格切分（wo ai ni → wo/ai/ni）。">
-           <input type="checkbox" id="mSpace"> 按空格切分（拼音 / 英文）
-         </label>
-       </div>
-       <textarea id="mText" spellcheck="false"
-         placeholder="[00:14.64]这里是第一行测试歌词&#10;或直接粘贴纯文本歌词"></textarea>
-       <div class="opt-row"><input type="file" id="mFile" accept=".lrc,.txt,.text,text/plain"></div>`,
-    actions:[
-      {label:"取消", onClick:modalClose},
-      {label:"填充到音符", kind:"primary", onClick:lyrImportSubmit}
-    ]
-  });
-  $("#mFile").onchange=async e=>{
-    const f=e.target.files?.[0]; if(!f) return;
-    try{
-      $("#mText").value=await f.text();
-      $("#mFmt").value=/\.lrc$/i.test(f.name)?"lrc":"plain";
-      log(`已载入歌词文件：${f.name}`);
-    }catch(err){ toast("读取文件失败："+err.message,"err"); }
-  };
-}
-async function lyrImportSubmit(){
-  // 先把值读出来再关弹窗——关掉之后这些元素就没了
-  const text=$("#mText")?.value||"";
-  const format=$("#mFmt")?.value||"auto";
-  const continuation=$("#mCont")?.value||"auto";
-  // 分词：不勾 = auto（中文逐字、英文按词）；勾上 = space（"wo ai ni" → wo/ai/ni）
-  const split=$("#mSpace")?.checked ? "space" : "auto";
-  if(!text.trim()){ toast("请先粘贴或选择歌词","err"); return; }
-  modalClose();
-  try{
-    const r=await fetch(`/api/tasks/${S.taskId}/lyrics`,{method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({text, format, continuation, split})});
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.detail||"填充失败");
-    const st=j.stats||{};
-    (j.warnings||[]).forEach(w=>log(w,"warn"));
-    if((j.warnings||[]).length) toast(j.warnings[0],"warn");
-    else toast(`歌词已填充（命中 ${st.matched||0}/${st.notes||0}）`,"ok");
-    log(`歌词导入：${j.format}，命中 ${st.matched}/${st.notes}，延音符 ${st.continuation}`);
-    await reloadRoll();     // 卷帘要立刻反映新歌词，用户接着逐音微调
-    loadPlayback();
-  }catch(e){ toast("导入歌词失败："+e.message,"err"); log("导入歌词失败："+e.message,"error"); }
-}
-$("#lyrImport").onclick=lyrImportOpen;
-$("#lrcDownload").onclick=()=>{ if(S.taskId) window.location=`/api/tasks/${S.taskId}/lrc`; };
+/* （④ 歌词填充整块已按需求删除：歌词的唯一来源是 ③ 钢琴卷帘上的逐音编辑与 Ctrl+L 填词。） */
 
 /* ============================ ⑤ 导出 ============================ */
 /** 点导出时**总是**按当前设置重新生成一次，再下载。
@@ -1625,27 +1430,27 @@ $("#lrcDownload").onclick=()=>{ if(S.taskId) window.location=`/api/tasks/${S.tas
  *  返回 true 表示可以继续下载。 */
 async function regenerateExports(){
   if(!S.taskId) return true;
-  if(running()) return true;      // 任务在跑，别去动产物
-  if(!roll) return true;
-
-  // 卷帘上有未保存的改动 → 先落盘（保存本身就顺带重生成了一次导出）
-  if(roll.dirty()) return await saveRoll(true);
-
-  const exportVoices = selectedVoices();
+  if(running()) return true;          // 任务在跑，别去动产物
+  if(!roll) return true;              // 还没建卷帘，直接下现有的
+  // 卷帘上有未保存的改动 → 先落盘（保存本身就顺带按当前勾选重生成了一次导出）
+  if(rollEdited()){
+    const ok=await saveRoll(true);
+    if(!ok) { toast("卷帘保存失败，已取消导出","err"); return false; }
+    return true;
+  }
+  // 没有改动也要按**当前勾选**重生成一次：勾选可能在保存之后被改过，
+  // 那时磁盘上的产物还是旧的（界面第一行说的和下载到的一致，靠这一步兜住）。
   try{
     const r=await fetch(`/api/tasks/${S.taskId}/roll`,{method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({tracks:roll.state().tracks, export_voices:exportVoices,
-                           bpm:S.result?.bpm, meter:S.result?.meter})});
+      body:JSON.stringify({tracks:roll.getTracks(), export_voices:selectedVoices()})});
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||j.detail||"重新生成失败");
     const svp=(j.exports||[]).find(x=>x.kind==="svp");
     const trackNames=(svp&&svp.tracks)||[];
     if(svp) $("#exportNote").textContent=`SVP version ${svp.version} · ${trackNames.join("/")} · ${svp.notes} 音符`;
-    (j.warnings||[]).forEach(w=>log(w,"warn"));
-    S.hasVocalLyrics=!!j.has_vocal_lyrics;
-    log(`导出前已按当前卷帘重新生成：${(j.exports||[]).length} 个产物，`
-        +`声部 [${trackNames.join("/")}]，export_voices=${exportVoices.join(",")}`);
+    log(`导出前已按当前设置重新生成：${(j.exports||[]).length} 个产物，`
+        +`SVP 轨 [${trackNames.join("/")}]，export_voices=${selectedVoices().join(",")}`);
     return true;
   }catch(e){
     toast("重新生成失败，已取消导出："+e.message,"err");
@@ -1654,10 +1459,8 @@ async function regenerateExports(){
   }
 }
 $("#dlSvp").onclick=async()=>{ if(!S.taskId) return;
-  if(!(await confirmVocalLyrics())) return;
   if(await regenerateExports()) window.location=`/api/tasks/${S.taskId}/export/svp`; };
 $("#dlMidi").onclick=async()=>{ if(!S.taskId) return;
-  if(!(await confirmVocalLyrics())) return;
   if(await regenerateExports()) window.location=`/api/tasks/${S.taskId}/export/midi`; };
 $("#openDir").onclick=async()=>{ if(!S.taskId) return;
   try{ const r=await fetch(`/api/tasks/${S.taskId}/open-folder`,{method:"POST"}); const j=await r.json();
@@ -1679,7 +1482,6 @@ setInterval(pollGpu,3000);
 
 (async function init(){
   pollGpu();
-  initRoll();
   try{
     const st=await (await fetch("/api/state")).json();
     if(st.task) applyTask(st.task,true);

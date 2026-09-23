@@ -24,7 +24,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from app.config import ensure_ffmpeg_on_path, ffmpeg_path
+from app.config import ffmpeg_path
 
 __all__ = [
     "shift_abc_octaves",
@@ -184,22 +184,17 @@ def shift_lab_pitches(path: str | Path, semitones: int) -> int:
 # --------------------------------------------------------------------------
 _SR = 16000
 _N = 4096
+_FFMPEG_FALLBACKS = (r"D:\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe")
 
 
 def _ffmpeg() -> str:
-    """复用 ``app.config`` 的解析链（``FFMPEG_BIN`` → 包内 → PATH → 常见安装位置）。
-
-    这里**不再自己维护一份 fallback 列表**——两份会漂移，而且会把作者机器的
-    绝对路径写死在业务模块里（见 ``app/config.py`` 的 ``ffmpeg_path()``）。
-    """
-    ensure_ffmpeg_on_path()
     p = ffmpeg_path()
-    if not p:
-        raise RuntimeError(
-            "找不到 ffmpeg，八度校正无法解码音频。"
-            "请把 ffmpeg 放进 PATH，或设环境变量 FFMPEG_BIN 指向 ffmpeg.exe。"
-        )
-    return p
+    if p:
+        return p
+    for cand in _FFMPEG_FALLBACKS:
+        if Path(cand).is_file():
+            return cand
+    raise RuntimeError("找不到 ffmpeg")
 
 
 def _decode(audio: str | Path) -> Any:
