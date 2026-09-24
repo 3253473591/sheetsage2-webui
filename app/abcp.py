@@ -228,6 +228,37 @@ def _key_accidentals(key: str) -> dict[str, int]:
     return acc
 
 
+#: 音名按字母循环的顺序（用于从一个主音出发走满一个八度）
+_DEGREE_LETTERS = ("C", "D", "E", "F", "G", "A", "B")
+
+
+def scale_pitch_classes(key: str) -> list[int]:
+    """调号 → 该调 7 个音级的半音值（**从主音起算**）。
+
+    例：``"C"`` → ``[0,2,4,5,7,9,11]``；``"Am"`` → ``[9,11,0,2,4,5,7]``；
+    ``"Eb"`` → ``[3,5,7,8,10,0,2]``。
+
+    做法：调号已经决定了每个音名的升降（:func:`_key_accidentals`），所以只要
+    **从主音那个字母开始**按字母顺序取七个音名、各自加上该升降号即可 ——
+    得到的正好是自然大小调的七声音阶，不必另外维护音阶表。
+
+    ⚠️ 返回值是**音级顺序**，数值上可能回绕（``Eb`` 的 ``10,0,2``），
+    所以只能按"第 i 级"使用，不能当升序数组做大小比较。
+
+    认不出调号时返回 ``[]``，调用方应当回落到「固定半音」平移。
+    """
+    root, _mode = split_key(key)
+    m = re.match(r"^([A-Ga-g])", (root or "").strip())
+    if not m:
+        return []
+    acc = _key_accidentals(key)
+    start = _DEGREE_LETTERS.index(m.group(1).upper())
+    return [
+        (_LETTER_SEMITONE[_DEGREE_LETTERS[(start + i) % 7]] + acc[_DEGREE_LETTERS[(start + i) % 7]]) % 12
+        for i in range(7)
+    ]
+
+
 # --------------------------------------------------------------------------
 # 解析
 # --------------------------------------------------------------------------

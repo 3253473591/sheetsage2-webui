@@ -262,6 +262,17 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .roll-state.err{color:var(--danger)}
 @media(max-width:1000px){.pr-hint{display:none}}
 
+/* ---- ③ 全屏：把卷帘从 460px 的固定高度里放出来 ----------------------------
+   琴键列与滚动区原本都是写死的 height:460px（就是这个值让卷帘显得小）。
+   全屏时把卡片固定在视口上、改成纵向 flex，两个面板靠 stretch 撑满，
+   高度不再需要 JS 计算 —— 换分辨率/缩放窗口都不会失配。 */
+.card.fullscreen{position:fixed;inset:0;z-index:60;margin:0;border:0;border-radius:0;
+  display:flex;flex-direction:column;overflow:hidden}
+.card.fullscreen .card-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.card.fullscreen .pr-body{flex:1 1 auto;min-height:0;align-items:stretch}
+.card.fullscreen .pr-keys-wrap,
+.card.fullscreen .pr-scroll{height:auto;min-height:0}
+
 .btn{border:1px solid var(--border);background:#fff;color:var(--text-1);font:inherit;
      padding:7px 14px;border-radius:var(--radius-ctl);cursor:pointer}
 .btn:hover:not(:disabled){border-color:#cfcbdd}
@@ -411,6 +422,7 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
       <span class="num">3</span><h2>钢琴卷帘</h2>
       <span class="spacer"></span>
       <span class="ghost">直接改音符与歌词；改完点「保存」，导出即刻重生成</span>
+      <button class="btn sm" id="rollFull" title="把卷帘铺满整个窗口（Esc 退出）">全屏 ⛶</button>
       <button class="fold" data-fold="scoreCard">展开 ▸</button>
     </div>
     <div class="card-body">
@@ -423,6 +435,22 @@ body[data-busy="1"] .lockable{opacity:.55;pointer-events:none}
         <span class="dirty" id="rollDirty">● 有未保存的改动，导出前需先保存</span>
         <button class="btn sm" id="rollReload" disabled>放弃改动，重新加载</button>
         <button class="btn sm primary" id="rollSave" disabled>保存并重新生成导出</button>
+      </div>
+      <!-- 平行和声：节奏、时值、音节全部照搬主人声，只把音高平移 N 个半音。
+           生成后就是一条普通卷帘轨，可以照常手改，跟主人声一起被「人声主旋律」导出。 -->
+      <div class="filters">
+        <span class="filters-label">平行和声</span>
+        <select id="harmonyInterval" title="和声音程：按调性平移的度数（三度、六度最像和声；四五度要慎用）">
+          <option value="3">+三度</option><option value="-3">-三度</option>
+          <option value="6">+六度</option><option value="-6">-六度</option>
+          <option value="5">+五度</option><option value="-5">-五度</option>
+          <option value="4">+四度</option><option value="-4">-四度</option>
+          <option value="2">+二度</option><option value="-2">-二度</option>
+          <option value="7">+七度</option><option value="-7">-七度</option>
+          <option value="1">+一度</option><option value="-1">-一度</option>
+        </select>
+        <button class="btn sm" id="harmonyAdd" disabled>生成和声轨</button>
+        <span class="ghost" id="harmonyHint">按识别到的调性平移；歌词逐音继承</span>
       </div>
       <!-- 钢琴卷帘：③ 的唯一编辑区。渲染与交互全在 web/pianoroll.js 里。 -->
       <div id="rollHost"></div>
@@ -619,6 +647,7 @@ function refreshButtons(){
   $("#fDel").disabled = busy;
   $("#rollSave").disabled = busy || !S.taskId || S.state!=="done" || !roll;
   $("#rollReload").disabled = busy || !S.taskId || S.state!=="done" || !roll;
+  $("#harmonyAdd").disabled = busy || !S.taskId || S.state!=="done" || !roll;
   const hasOut = S.state==="done" && S.result;
   $("#dlSvp").disabled = !hasOut; $("#dlMidi").disabled = !hasOut; $("#openDir").disabled = !hasOut;
   $("#tpPlay").disabled = !hasOut;
@@ -1138,6 +1167,70 @@ async function reloadRoll(){
 }
 $("#rollSave").onclick=()=>saveRoll(false);
 $("#rollReload").onclick=()=>reloadRoll();
+
+/* ---------------- ③ 全屏 / 退出全屏 ----------------
+   卷帘的琴键列与滚动区原本写死 height:460px（`.pr-keys-wrap` / `.pr-scroll`），
+   所以卡片再宽也还是那么矮 —— 这就是"界面偏小"的根因。
+   全屏整个走 CSS（`.card.fullscreen` + flex stretch），这里只负责切类、
+   展开折叠态、让卷帘按新尺寸重算宽度并重画。Esc 也能退出。
+   注意：这里**不能用 `.fold` 这个 class** —— 底部的 $$(".fold") 会按 data-fold
+   接管所有折叠按钮的 onclick，抢走本按钮。 */
+function setRollFullscreen(on){
+  const card=$("#scoreCard");
+  card.classList.toggle("fullscreen", on);
+  if(on && card.classList.contains("collapsed")){
+    card.classList.remove("collapsed");
+    const fold=card.querySelector(".fold[data-fold]");
+    if(fold) fold.textContent="折叠 ▾";
+  }
+  $("#rollFull").textContent = on ? "退出全屏 ⛶" : "全屏 ⛶";
+  // 全屏时锁住页面滚动，否则滚轮会滚到底下的卡片而不是卷帘
+  document.body.style.overflow = on ? "hidden" : "";
+  refitRoll();
+  if(roll) roll.render();
+}
+$("#rollFull").onclick=()=>setRollFullscreen(!$("#scoreCard").classList.contains("fullscreen"));
+window.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && $("#scoreCard").classList.contains("fullscreen")) setRollFullscreen(false);
+});
+
+/* ---------------- 平行和声轨（③） ----------------
+   在卷帘里就地加一条「和声 ±N 度」：节奏/时值/歌词全部照搬主人声，只平移音高。
+   音高换算**在后端**（POST /harmony）—— 音程只有放在调性里才有意义（C 上方的三度是 E、
+   D 上方是 F，半音数并不相同），而调性来自乐谱表头。前端只负责插轨。
+   生成即 markDirty → 触发既有的自动保存，走「卷帘 → 重新生成导出」那条老路。
+   同度数重复点 = 以主人声当前状态覆盖。 */
+$("#harmonyAdd").onclick=async()=>{
+  if(!roll){ toast("卷帘还没就绪","err"); return; }
+  const src=roll.vocalTrack();
+  if(!src || !src.notes || !src.notes.length){ toast("没有主人声轨，无法生成和声","err"); return; }
+  const btn=$("#harmonyAdd"); btn.disabled=true;
+  try{
+    const r=await fetch(`/api/tasks/${S.taskId}/harmony`,{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({degree:+$("#harmonyInterval").value,
+                           voice:src.voice, notes:src.notes})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||j.error||"生成失败");
+    const res=roll.addTrack(j);
+    if(!res.ok) throw new Error(res.error);
+    // 如实报出后端做了什么：调内还是退回半音、有几个调外音贴边
+    const modeTxt = j.mode==="diatonic"
+      ? `按调性 ${j.key_cn||j.key||"?"}`
+      : "⚠ 没识别到调性，已退回固定半音";
+    const extra=[];
+    if(j.out_of_scale) extra.push(`${j.out_of_scale} 个调外音已就近归类`);
+    if(j.clamped) extra.push(`${j.clamped} 个音超出音域已贴边`);
+    const msg=`${res.replaced?"已按主人声更新":"已生成"}「${res.display}」：${res.notes} 个音符（${modeTxt}）`
+      +(extra.length?`　${extra.join("；")}`:"");
+    toast(msg, j.mode==="diatonic"?"ok":"warn");
+    log(msg);
+    setRollState(msg+(roll.isDirty()?"　（有未保存的改动）":""),"ok");
+  }catch(e){
+    toast("生成和声失败："+e.message,"err");
+    log("生成和声失败："+e.message,"error");
+  }finally{ refreshButtons(); }
+};
 
 /** 按任务结果里的 export_voices 同步三个勾选（老结果只有 only_melody 时回退）。 */
 function syncVoicesFromResult(r){

@@ -839,6 +839,63 @@ def save_roll(task_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse
     return JSONResponse(result)
 
 
+@app.post("/api/tasks/{task_id}/harmony")
+def make_harmony(task_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    """由主人声轨算出一条**平行和声**轨（按调性）。
+
+    为什么换算放在后端而不是前端：**音程只有放在调性里才有意义** —— C 上方的三度是 E，
+    D 上方的三度是 F，半音数并不相同（固定移半音会立刻出调）。而调性来自乐谱表头。
+    所以音乐理论只留 `app/harmony.py` 一份实现，前端只负责把算好的音符插进卷帘。
+
+    音符由前端发上来（可能还没保存），这里**只算不落盘**：生成的轨要不要留下由用户在
+    卷帘上确认，之后走既有的「保存并重新生成导出」那条链路。
+    """
+    from app.abcp import scale_pitch_classes
+    from app.harmony import MAX_DEGREE, build_harmony_notes, chromatic_semitones
+    from app.overview import key_to_chinese
+    from app.rebuild import harmony_display, harmony_voice_name
+
+    task = manager.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    try:
+        degree = int(payload.get("degree"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="和声度数必须是整数")
+    if not 1 <= abs(degree) <= MAX_DEGREE:
+        raise HTTPException(status_code=400, detail=f"和声度数必须在 ±1..±{MAX_DEGREE} 度之间")
+
+    notes = payload.get("notes") or []
+    if not notes:
+        raise HTTPException(status_code=400, detail="没有可作和声来源的音符")
+
+    _tracks, _source, header = _roll_all_tracks(task)
+    key = str(header.get("key") or "")
+    scale = scale_pitch_classes(key)
+    try:
+        voice = harmony_voice_name(str(payload.get("voice") or "Vocal"), degree)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    out, info = build_harmony_notes(
+        notes, scale=scale, degree=degree, semitones=chromatic_semitones(degree)
+    )
+    if not out:
+        raise HTTPException(status_code=400, detail="换算后没有可用音符（时值非法）")
+    return JSONResponse({
+        "ok": True,
+        "voice": voice,
+        "display": harmony_display(degree),
+        "kind": "vocal",
+        "is_vocal": True,
+        "notes": out,
+        "key": key,
+        "key_cn": key_to_chinese(key) if key else "",
+        **info,
+    })
+
+
 @app.get("/api/tasks/{task_id}/export/{kind}")
 def download_export(task_id: str, kind: str) -> FileResponse:
     """下载导出产物（svp / midi / abc），文件名对用户友好。"""

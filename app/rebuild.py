@@ -22,11 +22,13 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from app.abcp import AbcNote, AbcScore, notes_to_seconds, parse_abc, to_simple_note_objs, to_simple_notes
+from app.harmony import DEGREE_CN
 from app.lyrics import LyricWord, assign_lyrics
 from app.svpw import SvNote, build_svp, write_svp
 from app.tempo import (
@@ -45,6 +47,10 @@ __all__ = [
     "DEFAULT_EXPORT_VOICES",
     "voice_kind",
     "voice_display",
+    "split_harmony_voice",
+    "harmony_voice_name",
+    "harmony_display",
+    "MAX_HARMONY_DEGREE",
     "normalize_export_voices",
     "load_measures",
     "load_lyrics_words",
@@ -83,6 +89,51 @@ _DISPLAY = {
 #: 与模型的 ``transcription.mid`` 保持一致，都叫 ``Chords``。
 CHORD_TRACK_DISPLAY = "和弦"
 CHORD_TRACK_MIDI = "Chords"
+
+# --------------------------------------------------------------------------
+# 平行和声轨（卷帘「生成和声轨」产出）
+# --------------------------------------------------------------------------
+# 声部名约定：**源声部名 + 带符号的半音数**，例如 ``Vocal+3`` / ``Vocal-5``。
+# 为什么用「后缀半音数」而不是另起一个 ``Harmony`` 声部名：
+#   * ``voice_kind`` 能顺着前缀认出它**仍属人声** —— 否则 ``pick_voices``
+#     会把它当未知声部丢掉，表现为「卷帘上看得见、导出的 SVP 里没有」；
+#   * MIDI 轨名直接用声部名（Latin-1 限制），``Vocal+3`` 是纯 ASCII，不会变 ``Track``；
+#   * SVP 轨名走 :func:`voice_display`，统一显示成「和声 +3」。
+# 前端 ``web/pianoroll.js`` 里有一份**同规则**的实现，改这里必须同步改那边。
+#: 和声声部名约定：``源声部名 + 方向 h 度数``，例如 ``Vocal+h3``（上行三度）、
+#: ``Vocal-h6``（下行六度）。度数记法见 :mod:`app.harmony`。
+#: 为什么是度数而不是半音：**音程本身只有放在调性里才有意义** —— C 上方的三度是 E，
+#: D 上方的三度是 F，半音数并不相同。
+_HARMONY_VOICE_RE = re.compile(r"^(?P<base>.+?)(?P<sign>[+-])h(?P<degree>[1-7])$")
+
+#: 允许的和声度数（一~七度）
+MAX_HARMONY_DEGREE = 7
+
+
+def split_harmony_voice(name: str) -> tuple[str, int] | None:
+    """``"Vocal+h3"`` → ``("Vocal", 3)``；``"Vocal-h6"`` → ``("Vocal", -6)``。
+
+    不是和声声部名（含普通声部名 ``Vocal`` / ``Ins`` / ``V1``）返回 ``None``。
+    """
+    m = _HARMONY_VOICE_RE.match((name or "").strip())
+    if not m:
+        return None
+    degree = int(m.group("degree"))
+    return m.group("base"), (degree if m.group("sign") == "+" else -degree)
+
+
+def harmony_voice_name(base: str, degree: int) -> str:
+    """由源声部名与度数造出和声声部名（须与前端 ``harmonyVoiceName`` 同规则）。"""
+    d = int(degree)
+    if not 1 <= abs(d) <= MAX_HARMONY_DEGREE:
+        raise ValueError(f"和声度数必须在 ±1..±{MAX_HARMONY_DEGREE} 度之间，收到 {degree!r}")
+    return f"{(base or 'Vocal').strip()}{'+' if d > 0 else '-'}h{abs(d)}"
+
+
+def harmony_display(degree: int) -> str:
+    """和声轨的显示名（``3`` → ``和声 +三度``）。"""
+    d = int(degree)
+    return f"和声 {'+' if d > 0 else '-'}{DEGREE_CN[abs(d)]}"
 
 
 def load_measures(out_dir: str | Path) -> list[dict[str, Any]]:
@@ -372,7 +423,15 @@ _VOICE_KIND = {
 
 def voice_kind(name: str) -> str | None:
     """把一个 ABC 声部名归到 ``vocal`` / ``ins``，认不出来返回 ``None``。"""
-    return _VOICE_KIND.get((name or "").strip().lower())
+    key = (name or "").strip().lower()
+    kind = _VOICE_KIND.get(key)
+    if kind:
+        return kind
+    # 和声声部（``Vocal+3``）按**前缀**归属：它仍然是人声，只是叠了一条平行线。
+    # 这里不认的话，rebuild_exports 里的 pick_voices 会把它丢掉 ——
+    # 表现为「卷帘上明明有和声轨，导出的 SVP 里却没有」。
+    split = split_harmony_voice(key)
+    return _VOICE_KIND.get(split[0]) if split else None
 
 
 def normalize_export_voices(
@@ -407,6 +466,9 @@ def pick_voices(score: AbcScore, export_voices: Sequence[str]) -> list[str]:
 
 
 def _display_name(voice: str) -> str:
+    split = split_harmony_voice(voice)
+    if split:
+        return harmony_display(split[1])
     return _DISPLAY.get(voice.strip().lower(), voice)
 
 

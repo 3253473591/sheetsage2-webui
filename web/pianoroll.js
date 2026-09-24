@@ -1553,6 +1553,63 @@
 
     function getTracks() { return S.tracks; }
 
+    /* ================================================================ */
+    /*  平行和声轨                                                       */
+    /* ================================================================ */
+
+    /** 主人声轨（和声的来源）。``isVocal`` 与 ``kind === 'vocal'`` 都算。 */
+    function vocalTrack() {
+      for (var i = 0; i < S.tracks.length; i++) {
+        var t = S.tracks[i];
+        if (t.isVocal || String(t.kind || "").toLowerCase() === "vocal") return t;
+      }
+      return null;
+    }
+
+    /**
+     * 把一条**外部算好的**轨放进卷帘（目前只有平行和声用）。
+     *
+     * 为什么音高换算不在这里做：**音程只有放在调性里才有意义** —— C 上方的三度是 E、
+     * D 上方的三度是 F，半音数并不相同。调性来自乐谱表头，所以音乐理论只在
+     * `app/harmony.py` 实现一份，前端拿到的是算好的音符（见 `POST /harmony`）。
+     *
+     * 同 voice 重复放进 = 覆盖：改完主人声再生成一次就重新对齐。
+     * 时值、起点、歌词一律照搬传入的音符 —— 平行和声唱同一套词同一个节奏。
+     */
+    function addTrack(track) {
+      if (!track || !track.voice || !track.notes || !track.notes.length) {
+        return { ok: false, error: "轨道数据不完整" };
+      }
+      var notes = track.notes.map(function (n) {
+        return {
+          start: +n.start, end: +n.end, pitch: Math.round(+n.pitch),
+          lyric: n.lyric == null ? "" : String(n.lyric)
+        };
+      });
+      var tr = {
+        voice: String(track.voice),
+        // 跟源声部同 kind：这样它跟着「人声主旋律」那个勾选一起导出，
+        // 不会要求用户再学一个新的导出类别。
+        kind: track.kind || "vocal",
+        display: track.display || String(track.voice),
+        isVocal: !!track.isVocal,
+        is_vocal: !!track.isVocal,
+        editable: true,
+        notes: notes
+      };
+      var at = -1;
+      S.tracks.forEach(function (t, i) { if (t.voice === tr.voice) at = i; });
+      if (at >= 0) S.tracks[at] = tr; else S.tracks.push(tr);
+      S.activeTrack = at >= 0 ? at : S.tracks.length - 1;
+
+      render();
+      markDirty();   // → onEdit()：页面据此刷新按钮并安排自动保存
+      return {
+        ok: true, voice: tr.voice, display: tr.display, notes: notes.length,
+        replaced: at >= 0
+      };
+    }
+
     function isDirty() { return dirty; }
     function markSaved() { dirty = false; }
 
@@ -1569,6 +1626,8 @@
       normalizeAll: normalizeAll,
       overlaps: overlaps,
       getTracks: getTracks,
+      addTrack: addTrack,
+      vocalTrack: vocalTrack,
       isDirty: isDirty,
       markSaved: markSaved,
       selectedCount: function () { return Object.keys(S.selection).length; },
