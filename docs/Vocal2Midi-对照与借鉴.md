@@ -3,6 +3,11 @@
 参考项目：`reference/Vocal2Midi`（Apache 2.0，Copyright 2026 Xiantaidu）。
 本文只记录**结论与出处**，用于决定下一次对话要抄什么。
 
+> **V2 的更新评估另见 [`Vocal2MidiV2-更新评估.md`](Vocal2MidiV2-更新评估.md)**：
+> 逐项判定"使用 TiFA 对齐器 / 优化性能 / 批量模式 / 粤语英语 / 量化对齐网格线 /
+> GUI i18n / 深色模式 / pinyinASR / 日语 G2P / 对齐更准"里哪些能集成。
+> 结论：只有 TiFA 是候选，且建议先做对照实验再决定。
+
 ---
 
 ## 1. 根本差别：时轴从哪来
