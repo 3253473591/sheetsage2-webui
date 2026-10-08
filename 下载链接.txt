@@ -1,0 +1,13 @@
+https://mirrors.nju.edu.cn/pytorch/whl/cu130/torch-2.10.0%2Bcu130-cp312-cp312-win_amd64.whl#sha256=224649fa0ab181ec483cc368e3303dda1760e4ba31bea806b88979f855436aaa
+
+https://mirrors.nju.edu.cn/pytorch/whl/cu130/torchaudio-2.10.0%2Bcu130-cp312-cp312-win_amd64.whl#sha256=267c6724da81b9f0773c4707079f8e92b31fc95bf543845fb06ef9b5fdce99b0
+
+https://www.modelscope.cn/models/m-a-p/MERT-v2-FullSong/files
+
+https://www.modelscope.cn/models/m-a-p/SheetSage2/files
+
+https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B/files
+
+https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B/files
+
+https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B/files

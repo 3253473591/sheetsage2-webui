@@ -1,0 +1,90 @@
+{
+  "version": "alpha1",
+  "note": "内测包清单：随包带 Python + ffmpeg，torch 与模型首次运行时按这里下载。",
+  "bundled": {
+    "python": {
+      "path": "runtime/python",
+      "version": "3.12.11"
+    },
+    "ffmpeg": {
+      "path": "runtime/ffmpeg/bin/ffmpeg.exe",
+      "version": "7.1.1",
+      "note": "裁剪版静态构建，2.2 MB，无 DLL"
+    }
+  },
+  "pypi": {
+    "index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "extra_index_url": "https://pypi.org/simple",
+    "packages": [
+      "transformers==4.57.6",
+      "qwen-asr"
+    ]
+  },
+  "torch": [
+    {
+      "name": "torch-2.10.0+cu130-cp312-cp312-win_amd64.whl",
+      "url": "https://mirrors.nju.edu.cn/pytorch/whl/cu130/torch-2.10.0%2Bcu130-cp312-cp312-win_amd64.whl",
+      "sha256": "224649fa0ab181ec483cc368e3303dda1760e4ba31bea806b88979f855436aaa"
+    },
+    {
+      "name": "torchaudio-2.10.0+cu130-cp312-cp312-win_amd64.whl",
+      "url": "https://mirrors.nju.edu.cn/pytorch/whl/cu130/torchaudio-2.10.0%2Bcu130-cp312-cp312-win_amd64.whl",
+      "sha256": "267c6724da81b9f0773c4707079f8e92b31fc95bf543845fb06ef9b5fdce99b0"
+    }
+  ],
+  "models": {
+    "minimal": [
+      "m-a-p/SheetSage2",
+      "m-a-p/MERT-v2-FullSong",
+      "Qwen/Qwen3-ASR-0.6B",
+      "Qwen/Qwen3-ForcedAligner-0.6B"
+    ],
+    "full": [
+      "m-a-p/SheetSage2",
+      "m-a-p/MERT-v2-FullSong",
+      "Qwen/Qwen3-ASR-1.7B",
+      "Qwen/Qwen3-ASR-0.6B",
+      "Qwen/Qwen3-ForcedAligner-0.6B"
+    ],
+    "minimal_bytes": 6484437060,
+    "full_bytes": 11187552165,
+    "repositories": {
+      "m-a-p/SheetSage2": {
+        "target": "models/SheetSage2",
+        "revision": "master",
+        "files": 143,
+        "bytes": 233376353,
+        "minimal": true
+      },
+      "m-a-p/MERT-v2-FullSong": {
+        "target": "models/MERT-v2-FullSong",
+        "revision": "master",
+        "files": 13,
+        "bytes": 2530367144,
+        "minimal": true
+      },
+      "Qwen/Qwen3-ASR-1.7B": {
+        "target": "models/Qwen3-ASR-1.7B",
+        "revision": "master",
+        "files": 13,
+        "bytes": 4703115105,
+        "minimal": false
+      },
+      "Qwen/Qwen3-ASR-0.6B": {
+        "target": "models/Qwen3-ASR-0.6B",
+        "revision": "master",
+        "files": 11,
+        "bytes": 1880620391,
+        "minimal": true
+      },
+      "Qwen/Qwen3-ForcedAligner-0.6B": {
+        "target": "models/Qwen3-ForcedAligner-0.6B",
+        "revision": "master",
+        "files": 11,
+        "bytes": 1840073172,
+        "minimal": true
+      }
+    },
+    "api": "https://www.modelscope.cn/api/v1/models/{repo}/repo/files?Revision={revision}&Recursive=true"
+  }
+}

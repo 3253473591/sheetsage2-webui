@@ -1,0 +1,41 @@
+SheetSage2 WebUI — 第三方归属声明 (NOTICE)
+==========================================
+
+本项目包含、改写或参考了以下第三方开源项目。原始许可与版权声明继续适用。
+
+1. Vocal2Midi
+------------------------------------------------------------------
+Copyright 2026 Xiantaidu
+License: Apache License, Version 2.0
+来源: https://github.com/Xiantaidu/Vocal2Midi
+
+被改写的部分:
+  - inference/quant/smart_quantize.py
+      → src/sheetsage2_webui/quantize.py（音符时值量化引擎，算法移植。
+        **移植基准是该仓库的 V2 版本**，与 V1 的差异见 docs/音符量化规格.md §3）
+  - 算法规格与对照结论
+      → docs/Vocal2Midi-对照与借鉴.md、docs/音符量化规格.md
+
+**上游源码不随本仓库分发**：研发期的本地对照副本放在 reference/Vocal2Midi/ 与
+reference/Vocal2Midi V2/（各自是完整 clone，带 .git），已被 .gitignore 排除。
+需要核对算法时请自行从上面的地址 clone。
+
+Apache License 2.0 全文见 https://www.apache.org/licenses/LICENSE-2.0 ，
+原项目自带 LICENSE / NOTICE。
+
+2. SheetSage2 / MERT 模型权重
+------------------------------------------------------------------
+模型权重位于 models/，各自带有原始许可；见
+models/SheetSage2/LICENSE 与 models/SheetSage2/THIRD_PARTY_NOTICES.md。
+
+3. Qwen3-ASR
+------------------------------------------------------------------
+歌词识别使用 Qwen3-ASR（qwen-asr 包），模型权重各自带有原始许可。
+
+4. FFmpeg
+------------------------------------------------------------------
+音频解码使用 FFmpeg 命令行程序（不随本仓库分发）。
+FFmpeg 构建按 LGPL-2.1-or-later 或（启用 GPL 组件时）GPL 分发；
+分发时需自行确认所使用构建的许可与署名义务。
+
+本文件仅用于署名与说明，不修改任何适用于本仓库或第三方材料的许可条款。

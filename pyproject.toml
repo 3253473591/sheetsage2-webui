@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheetsage2-webui"
+version = "0.1.0"
+description = "SheetSage2 推理集成（调研阶段：稳定调用 + 结果验证）"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchaudio",
+    "transformers",
+    "huggingface-hub",
+    "safetensors",
+    "numpy",
+    "scipy",
+    "pretty_midi",
+    "mido",
+    "soundfile",
+]
+
+[project.optional-dependencies]
+# WebUI（P1）：丢了音频就能用，不装也不影响命令行与脚本。
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+]
+# 导出 SVP（Synthesizer V Studio 工程，带变速与歌词）。选型见 docs/SVP导出调研.md：
+# 用 LibreSVIP 读写 .svp，不自己写序列化。不装只是「导出 SVP」不可用，其余照常。
+svp = [
+    "libresvip>=2.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

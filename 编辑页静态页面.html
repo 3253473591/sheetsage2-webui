@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>编辑页静态页面</title>
+    <style>
+        :root {
+            --bg-dark: #1b1b1c;
+            --bg-panel: #242426;
+            --bg-header: #2a2a2d;
+            --border-color: #38383a;
+            --text-main: #d4d4d8;
+            --text-dim: #7f7f86;
+
+            /* 轨道主题色 */
+            --track-green: #688b36;
+            --track-green-bright: #7ea83c;
+            --track-blue: #2c6e9e;
+            --track-blue-bright: #3886be;
+            --track-red: #a44349;
+            --track-red-bright: #c04e55;
+
+            /* 图二调式高亮绿色 */
+            --scale-highlight-accent: #78ab2d;
+            --scale-highlight-bg: #232720;
+            --scale-dim-bg: #141416;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-size: 11px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* 统一标题栏 */
+        .section-header {
+            height: 28px;
+            background-color: var(--bg-header);
+            border-bottom: 1px solid #1a1a1b;
+            display: flex;
+            align-items: center;
+            padding: 0 10px;
+            gap: 10px;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+        .section-header .title {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .section-header .tools {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-left: 10px;
+        }
+        .tool-btn {
+            background: #333336;
+            border: 1px solid #444;
+            color: #bbb;
+            padding: 2px 6px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            gap: 3px;
+        }
+        .tool-btn:hover { background: #404044; color: #fff; }
+
+        /* ==================== 编排区 ==================== */
+        #arrangement-section {
+            height: 240px;
+            display: flex;
+            flex-direction: column;
+            border-bottom: 2px solid #141415;
+            flex-shrink: 0;
+        }
+        .arr-body {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            background: #1e1e20;
+        }
+
+        /* 编排区左侧轨道信息 */
+        .track-headers {
+            width: 155px;
+            background: var(--bg-panel);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+        .meter-tempo-headers {
+            height: 68px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+        }
+        .headers-bar-blank {
+            height: 20px;
+            border-bottom: 1px solid #28282b;
+        }
+        .meter-row-head, .tempo-row-head {
+            height: 24px;
+            line-height: 24px;
+            padding-left: 12px;
+            color: var(--text-dim);
+            border-bottom: 1px solid #2d2d30;
+        }
+        .track-header-item {
+            height: 48px;
+            border-bottom: 1px solid #202022;
+            padding: 5px 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .track-header-item.active { background: #323236; }
+        .th-info { display: flex; flex-direction: column; gap: 2px; }
+        .th-name { font-weight: bold; font-size: 12px; }
+        .th-controls { display: flex; align-items: center; gap: 6px; }
+
+        /* 音量滑动条控件 */
+        .vol-slider-wrap {
+            display: flex;
+            align-items: center;
+            width: 50px;
+        }
+        .vol-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 4px;
+            background: #404044;
+            border-radius: 2px;
+            outline: none;
+            cursor: pointer;
+        }
+        .vol-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 8px;
+            height: 12px;
+            background: #9d9da4;
+            border-radius: 1px;
+            cursor: pointer;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+            transition: background 0.15s;
+        }
+        .vol-slider::-webkit-slider-thumb:hover {
+            background: #ffffff;
+        }
+
+        .ms-btn {
+            font-size: 8px;
+            padding: 2px 3px;
+            background: #333;
+            color: #888;
+            border-radius: 2px;
+            line-height: 1.1;
+            text-align: center;
+        }
+
+        /* 编排区时间轴 */
+        .timeline-container {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+        .ruler-container {
+            height: 68px;
+            position: relative;
+            background: #202023;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .ruler-bars {
+            height: 20px;
+            position: relative;
+            border-bottom: 1px solid #28282b;
+        }
+        .ruler-markers {
+            height: 24px;
+            position: relative;
+        }
+        .ruler-markers.meter-row { border-bottom: 1px solid #28282b; }
+        .bar-num {
+            position: absolute;
+            top: 4px;
+            font-size: 10px;
+            color: var(--text-dim);
+            transform: translateX(4px);
+        }
+        .tag-marker {
+            position: absolute;
+            background: #38383c;
+            border: 1px solid #4a4a50;
+            border-radius: 2px;
+            padding: 0 4px;
+            height: 18px;
+            line-height: 16px;
+            font-size: 10px;
+            top: 3px;
+            z-index: 2;
+        }
+
+        .arr-tracks-view {
+            height: calc(100% - 68px);
+            position: relative;
+        }
+        .arr-track-lane {
+            height: 48px;
+            position: relative;
+            border-bottom: 1px solid #232326;
+            cursor: pointer;
+        }
+        .clip-block {
+            position: absolute;
+            top: 3px;
+            bottom: 3px;
+            left: 20px;
+            right: 20px;
+            border-radius: 3px;
+            opacity: 0.9;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        .clip-block.active {
+            border: 1.5px solid #fff;
+            filter: brightness(1.15);
+        }
+        .clip-badge {
+            position: absolute;
+            top: 2px;
+            left: 4px;
+            background: rgba(0,0,0,0.35);
+            border-radius: 2px;
+            font-size: 9px;
+            padding: 0 3px;
+            z-index: 2;
+        }
+
+        /* 播放指针 */
+        .playhead {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: #ffffff;
+            z-index: 10;
+            pointer-events: none;
+            left: 360px;
+        }
+        .playhead-head {
+            position: absolute;
+            top: 0;
+            left: -5px;
+            width: 11px;
+            height: 10px;
+            background: #ffffff;
+            clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+        }
+
+        /* ==================== 钢琴卷帘区 ==================== */
+        #pianoroll-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: #18181a;
+        }
+
+        .pr-ruler-bar {
+            height: 24px;
+            background: #202023;
+            border-bottom: 1px solid var(--border-color);
+            position: relative;
+            margin-left: 48px;
+            flex-shrink: 0;
+        }
+
+        .pr-scroll-container {
+            flex: 1;
+            display: flex;
+            overflow-y: auto;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* 钢琴键盘侧边栏 (参考图二灰蓝/暗黑键体风格) */
+        .keyboard-gutter {
+            width: 48px;
+            background: #1a1a1c;
+            border-right: 1px solid var(--border-color);
+            flex-shrink: 0;
+            position: relative;
+        }
+        .piano-key {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 14px;
+            border-bottom: 1px solid #141415;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            padding-left: 3px;
+            font-size: 9px;
+            color: #8f929b;
+        }
+        .piano-key.white {
+            background: #737482;
+            color: #202024;
+            border-right: 1px solid #2d2d32;
+        }
+        .piano-key.black {
+            background: #252528;
+            width: 32px;
+            z-index: 2;
+            border-radius: 0 2px 2px 0;
+            box-shadow: 1px 1px 2px rgba(0,0,0,0.6);
+            color: #888;
+        }
+
+        /* 图二同款：调式内琴键右边缘的高亮绿色指示条 */
+        .scale-key-accent {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background-color: var(--scale-highlight-accent);
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            z-index: 3;
+            border-radius: 1px 0 0 1px;
+        }
+        .scale-key-accent.scale-active {
+            opacity: 1;
+        }
+
+        /* 卷帘网格视图 */
+        .pr-canvas-area {
+            flex: 1;
+            position: relative;
+            background: var(--scale-dim-bg);
+        }
+
+        /* 统一音阶背景行风格（图二款） */
+        .grid-row-bg {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            transition: background-color 0.2s ease;
+        }
+        /* 调式内：不管黑白键统一高亮呈现微橄榄绿色通道（图二款） */
+        .grid-row-bg.in-scale {
+            background-color: var(--scale-highlight-bg);
+        }
+        /* 非调式所属音符：统一置灰暗色 */
+        .grid-row-bg.out-scale {
+            background-color: var(--scale-dim-bg);
+        }
+
+        /* 边界包围框 */
+        .clip-boundary {
+            position: absolute;
+            left: 10px;
+            right: 15px;
+            border: 1px solid var(--track-blue-bright);
+            pointer-events: none;
+            z-index: 5;
+        }
+        .clip-corner-tag {
+            position: absolute;
+            top: 0;
+            left: 0;
+            background: var(--track-blue);
+            color: #fff;
+            padding: 1px 4px;
+            font-size: 10px;
+            border-bottom-right-radius: 3px;
+        }
+
+        /* 音符元素（图二款绿色圆角块） */
+        .note-element {
+            position: absolute;
+            height: 12px;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            padding-left: 5px;
+            font-size: 10px;
+            color: rgba(255,255,255,0.95);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 1px 3px rgba(0,0,0,0.5);
+            z-index: 4;
+            cursor: pointer;
+        }
+        .note-lyric {
+            font-style: italic;
+            pointer-events: none;
+        }
+
+        /* 幽灵音符 */
+        .note-element.ghost {
+            height: 3px;
+            border-radius: 1px;
+            padding: 0;
+            opacity: 0.35;
+            box-shadow: none;
+            z-index: 3;
+        }
+        .note-element.ghost .note-lyric {
+            display: none;
+        }
+
+        .custom-select {
+            background: #2b2b2e;
+            border: 1px solid #48484d;
+            color: #ddd;
+            height: 20px;
+            font-size: 11px;
+            border-radius: 2px;
+            padding: 0 4px;
+            outline: none;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body class="track-blue-mode">
+
+    <!-- ==================== 顶部编排区 ==================== -->
+    <div id="arrangement-section">
+        <div class="section-header">
+            <span class="title">⌄ 编排</span>
+            <div class="tools">
+                <span class="tool-btn">⏱</span>
+                <span class="tool-btn">+</span>
+            </div>
+        </div>
+        <div class="arr-body">
+            <!-- 轨道控制侧边栏 -->
+            <div class="track-headers">
+                <div class="meter-tempo-headers">
+                    <div class="headers-bar-blank"></div>
+                    <div class="meter-row-head">拍号</div>
+                    <div class="tempo-row-head">曲速</div>
+                </div>
+                <!-- 轨道 1: 人声 -->
+                <div class="track-header-item" id="arr-th-0" onclick="switchTrack(0)">
+                    <div class="th-info">
+                        <span class="th-name" style="color: #9cd349;">人声</span>
+                    </div>
+                    <div class="th-controls" onclick="event.stopPropagation()">
+                        <div class="vol-slider-wrap" title="音量">
+                            <input type="range" class="vol-slider" min="0" max="100" value="80">
+                        </div>
+                        <span class="ms-btn">M<br>S</span>
+                    </div>
+                </div>
+                <!-- 轨道 2: 器乐 -->
+                <div class="track-header-item active" id="arr-th-1" onclick="switchTrack(1)">
+                    <div class="th-info">
+                        <span class="th-name" style="color: #4ba6ec;">器乐</span>
+                    </div>
+                    <div class="th-controls" onclick="event.stopPropagation()">
+                        <div class="vol-slider-wrap" title="音量">
+                            <input type="range" class="vol-slider" min="0" max="100" value="85">
+                        </div>
+                        <span class="ms-btn">M<br>S</span>
+                    </div>
+                </div>
+                <!-- 轨道 3: 和弦 -->
+                <div class="track-header-item" id="arr-th-2" onclick="switchTrack(2)">
+                    <div class="th-info">
+                        <span class="th-name" style="color: #ea5e66;">和弦</span>
+                    </div>
+                    <div class="th-controls" onclick="event.stopPropagation()">
+                        <div class="vol-slider-wrap" title="音量">
+                            <input type="range" class="vol-slider" min="0" max="100" value="75">
+                        </div>
+                        <span class="ms-btn">M<br>S</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 时间轴内容 -->
+            <div class="timeline-container" id="arr-timeline">
+                <div class="playhead"><div class="playhead-head"></div></div>
+
+                <div class="ruler-container">
+                    <div class="ruler-bars" id="arr-ruler-bars"></div>
+                    <div class="ruler-markers meter-row">
+                        <div class="tag-marker" style="left: 10px;">4/4</div>
+                        <div class="tag-marker" style="left: 360px;">6/8</div>
+                    </div>
+                    <div class="ruler-markers tempo-row">
+                        <div class="tag-marker" style="left: 10px;">120.00</div>
+                        <div class="tag-marker" style="left: 660px;">190.00</div>
+                    </div>
+                </div>
+
+                <div class="arr-tracks-view">
+                    <div class="arr-track-lane" onclick="switchTrack(0)">
+                        <div class="clip-block" id="arr-clip-0" style="background-color: var(--track-green);">
+                            <span class="clip-badge">1</span>
+                            <canvas class="arr-canvas" id="canvas-track-0" width="1200" height="40"></canvas>
+                        </div>
+                    </div>
+                    <div class="arr-track-lane" onclick="switchTrack(1)">
+                        <div class="clip-block active" id="arr-clip-1" style="background-color: var(--track-blue);">
+                            <span class="clip-badge">2</span>
+                            <canvas class="arr-canvas" id="canvas-track-1" width="1200" height="40"></canvas>
+                        </div>
+                    </div>
+                    <div class="arr-track-lane" onclick="switchTrack(2)">
+                        <div class="clip-block" id="arr-clip-2" style="background-color: var(--track-red);">
+                            <span class="clip-badge">3</span>
+                            <canvas class="arr-canvas" id="canvas-track-2" width="1200" height="40"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== 钢琴卷帘区 ==================== -->
+    <div id="pianoroll-section">
+        <div class="section-header">
+            <span class="title">⌄ 钢琴卷帘</span>
+            <div class="tools">
+                <span class="tool-btn">◰</span>
+                <span class="tool-btn">✏</span>
+                <span class="tool-btn">⤢</span>
+                <span class="tool-btn">∿</span>
+                <span class="tool-btn">|||</span>
+                <span class="tool-btn">𝄬</span>
+                <span class="tool-btn">♭#</span>
+                <span style="color:var(--text-dim); margin-left:6px;">网格</span>
+                <span class="tool-btn">32 分音符 ⌄</span>
+                <span class="tool-btn">🧲</span>
+                <span style="color:var(--text-dim); margin-left:8px;">调式音阶</span>
+<!---->
+                <!-- 调式根音选择 -->
+                <select id="scale-root" class="custom-select" onchange="updateScaleHighlight()">
+                    <option value="0" selected>C</option>
+                    <option value="1">C#</option>
+                    <option value="2">D</option>
+                    <option value="3">D#</option>
+                    <option value="4">E</option>
+                    <option value="5">F</option>
+                    <option value="6">F#</option>
+                    <option value="7">G</option>
+                    <option value="8">G#</option>
+                    <option value="9">A</option>
+                    <option value="10">A#</option>
+                    <option value="11">B</option>
+                </select>
+<!---->
+                <select class="custom-select" style="pointer-events: none;">
+                    <option>大调音阶</option>
+                </select>
+            
+</div>
+
+
+        </div>
+
+        <!-- 卷帘时间标尺 -->
+        <div class="pr-ruler-bar" id="pr-ruler"></div>
+
+        <!-- 纵向滚动容器 -->
+        <div class="pr-scroll-container" id="pr-scroll-container">
+            <!-- 琴键列 -->
+            <div class="keyboard-gutter" id="pr-keyboard"></div>
+
+            <!-- 网格与音符区域 (支持继续放置音符) -->
+            <div class="pr-canvas-area" id="pr-canvas-area">
+                <div class="playhead"><div class="playhead-head"></div></div>
+
+                <!-- 背景音阶高亮/置灰行 -->
+                <div id="pr-grid-rows" style="position: absolute; width: 100%; height: 100%;"></div>
+
+                <!-- 垂直小节/节拍线 -->
+                <svg id="pr-beat-lines" style="position: absolute; width: 100%; height: 100%; pointer-events: none;"></svg>
+
+                <!-- 外围边界框 -->
+                <div class="clip-boundary" id="pr-clip-frame">
+                    <span class="clip-corner-tag" id="pr-clip-tag">2</span>
+                </div>
+
+                <!-- 音符层 -->
+                <div id="pr-notes-layer" style="position: absolute; width: 100%; height: 100%; pointer-events: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        const START_MIDI = 12; // C0
+        const END_MIDI = 108;  // C8
+        const KEY_COUNT = END_MIDI - START_MIDI + 1;
+        const ROW_HEIGHT = 14;
+        const TOTAL_HEIGHT = KEY_COUNT * ROW_HEIGHT;
+
+        const TRACKS = [
+            { id: 0, name: "人声", color: "var(--track-green)", activeColor: "var(--track-green-bright)", cls: "track-green-mode" },
+            { id: 1, name: "器乐", color: "var(--track-blue)",  activeColor: "var(--track-blue-bright)",  cls: "track-blue-mode" },
+            { id: 2, name: "和弦", color: "var(--track-red)",   activeColor: "var(--track-red-bright)",   cls: "track-red-mode" }
+        ];
+        let currentTrackIndex = 1;
+
+        const TRACK_NOTES_DATA = [
+            [
+                { x: 30, midi: 60, w: 45, lyric: "la" }, { x: 75, midi: 64, w: 40, lyric: "la" }, { x: 120, midi: 65, w: 45, lyric: "la" }, { x: 165, midi: 67, w: 50, lyric: "la" },
+                { x: 215, midi: 60, w: 45, lyric: "la" }, { x: 260, midi: 64, w: 40, lyric: "la" }, { x: 305, midi: 65, w: 45, lyric: "la" }, { x: 350, midi: 67, w: 50, lyric: "la" },
+                { x: 400, midi: 60, w: 45, lyric: "la" }, { x: 445, midi: 64, w: 40, lyric: "la" }, { x: 490, midi: 65, w: 45, lyric: "la" }, { x: 535, midi: 67, w: 50, lyric: "la" },
+                { x: 585, midi: 60, w: 45, lyric: "la" }, { x: 630, midi: 64, w: 40, lyric: "la" }, { x: 675, midi: 65, w: 45, lyric: "la" }, { x: 720, midi: 67, w: 50, lyric: "la" }
+            ],
+            [
+                { x: 30, midi: 53, w: 45, lyric: "la" }, { x: 75, midi: 57, w: 40, lyric: "la" }, { x: 120, midi: 60, w: 45, lyric: "la" }, { x: 165, midi: 62, w: 45, lyric: "la" },
+                { x: 215, midi: 53, w: 45, lyric: "la" }, { x: 260, midi: 57, w: 40, lyric: "la" }, { x: 305, midi: 60, w: 45, lyric: "la" }, { x: 350, midi: 62, w: 45, lyric: "la" },
+                { x: 400, midi: 53, w: 45, lyric: "la" }, { x: 445, midi: 57, w: 40, lyric: "la" }, { x: 490, midi: 60, w: 45, lyric: "la" }, { x: 535, midi: 62, w: 45, lyric: "la" },
+                { x: 585, midi: 53, w: 45, lyric: "la" }, { x: 630, midi: 57, w: 40, lyric: "la" }, { x: 675, midi: 60, w: 45, lyric: "la" }, { x: 720, midi: 62, w: 45, lyric: "la" }
+            ],
+            [
+                { x: 30, midi: 65, w: 45, lyric: "la" }, { x: 75, midi: 69, w: 40, lyric: "la" }, { x: 120, midi: 72, w: 45, lyric: "la" }, { x: 165, midi: 74, w: 45, lyric: "la" },
+                { x: 215, midi: 65, w: 45, lyric: "la" }, { x: 260, midi: 69, w: 40, lyric: "la" }, { x: 305, midi: 72, w: 45, lyric: "la" }, { x: 350, midi: 74, w: 45, lyric: "la" },
+                { x: 400, midi: 65, w: 45, lyric: "la" }, { x: 445, midi: 69, w: 40, lyric: "la" }, { x: 490, midi: 72, w: 45, lyric: "la" }, { x: 535, midi: 74, w: 45, lyric: "la" },
+                { x: 585, midi: 65, w: 45, lyric: "la" }, { x: 630, midi: 69, w: 40, lyric: "la" }, { x: 675, midi: 72, w: 45, lyric: "la" }, { x: 720, midi: 74, w: 45, lyric: "la" }
+            ]
+        ];
+
+        function renderRulers() {
+            const arrRuler = document.getElementById("arr-ruler-bars");
+            const prRuler = document.getElementById("pr-ruler");
+            const BAR_WIDTH = 150;
+
+            let htmlArr = "", htmlPr = "";
+            for (let i = 1; i <= 12; i++) {
+                const left = (i - 1) * BAR_WIDTH;
+                htmlArr += `<div class="bar-num" style="left:${left}px;">${i}</div>`;
+                htmlPr += `<div class="bar-num" style="left:${left}px;">${i}</div>`;
+            }
+            arrRuler.innerHTML = htmlArr;
+            prRuler.innerHTML = htmlPr;
+
+            const svgLines = document.getElementById("pr-beat-lines");
+            svgLines.setAttribute("height", TOTAL_HEIGHT);
+            let linesSvg = "";
+            for (let x = 0; x < 1800; x += BAR_WIDTH / 4) {
+                const isBar = (x % BAR_WIDTH === 0);
+                linesSvg += `<line x1="${x}" y1="0" x2="${x}" y2="${TOTAL_HEIGHT}" stroke="${isBar ? '#3c3c42' : '#232326'}" stroke-width="${isBar ? 1.5 : 1}"/>`;
+            }
+            svgLines.innerHTML = linesSvg;
+        }
+
+        // 渲染琴键与网格行
+        function renderKeyboardAndGrid() {
+            const kbContainer = document.getElementById("pr-keyboard");
+            const gridContainer = document.getElementById("pr-grid-rows");
+            const canvasArea = document.getElementById("pr-canvas-area");
+
+            kbContainer.style.height = `${TOTAL_HEIGHT}px`;
+            canvasArea.style.height = `${TOTAL_HEIGHT}px`;
+
+            let kbHtml = "", gridHtml = "";
+
+            for (let midi = END_MIDI; midi >= START_MIDI; midi--) {
+                const noteInOct = midi % 12;
+                const octave = Math.floor(midi / 12) - 1;
+                const noteName = NOTE_NAMES[noteInOct];
+                const isBlack = noteName.includes("#");
+                const top = (END_MIDI - midi) * ROW_HEIGHT;
+                const isC = (noteInOct === 0);
+
+                // 琴键元素内嵌入图二款右侧高亮绿条 (.scale-key-accent)
+                if (isBlack) {
+                    kbHtml += `
+                        <div class="piano-key black" id="kb-key-${midi}" style="top:${top}px;">
+                            ${noteName === 'C#' ? 'C#' + octave : ''}
+                            <div class="scale-key-accent" id="scale-accent-${midi}"></div>
+                        </div>`;
+                } else {
+                    kbHtml += `
+                        <div class="piano-key white" id="kb-key-${midi}" style="top:${top}px;">
+                            ${isC ? 'C' + octave : ''}
+                            <div class="scale-key-accent" id="scale-accent-${midi}"></div>
+                        </div>`;
+                }
+
+                // 背景网格跑道行
+                gridHtml += `<div class="grid-row-bg" id="grid-row-${midi}" style="top:${top}px;"></div>`;
+            }
+
+            kbContainer.innerHTML = kbHtml;
+            gridContainer.innerHTML = gridHtml;
+
+            const frame = document.getElementById("pr-clip-frame");
+            frame.style.top = "10px";
+            frame.style.height = `${TOTAL_HEIGHT - 20}px`;
+        }
+
+        // 大调音阶算法与图二同款高亮/置灰逻辑
+        const MAJOR_INTERVALS = [0, 2, 4, 5, 7, 9, 11];
+        function updateScaleHighlight() {
+            const root = parseInt(document.getElementById("scale-root").value, 10);
+            const scaleNotes = new Set(MAJOR_INTERVALS.map(step => (root + step) % 12));
+
+            for (let midi = START_MIDI; midi <= END_MIDI; midi++) {
+                const pitch = midi % 12;
+                const inScale = scaleNotes.has(pitch);
+                
+                const rowEl = document.getElementById(`grid-row-${midi}`);
+                const accentEl = document.getElementById(`scale-accent-${midi}`);
+
+                if (inScale) {
+                    // 调式内：网格统一为图二高亮款，琴键边缘亮起绿色标条
+                    if (rowEl) {
+                        rowEl.classList.add("in-scale");
+                        rowEl.classList.remove("out-scale");
+                    }
+                    if (accentEl) {
+                        accentEl.classList.add("scale-active");
+                    }
+                } else {
+                    // 非调式内：统一置灰暗化，隐藏琴键绿色标条
+                    if (rowEl) {
+                        rowEl.classList.remove("in-scale");
+                        rowEl.classList.add("out-scale");
+                    }
+                    if (accentEl) {
+                        accentEl.classList.remove("scale-active");
+                    }
+                }
+            }
+        }
+
+        function switchTrack(index) {
+            currentTrackIndex = index;
+            const track = TRACKS[index];
+
+            document.body.className = track.cls;
+
+            TRACKS.forEach((t, idx) => {
+                const th = document.getElementById(`arr-th-${idx}`);
+                const clip = document.getElementById(`arr-clip-${idx}`);
+                if (idx === index) {
+                    th.classList.add("active");
+                    clip.classList.add("active");
+                } else {
+                    th.classList.remove("active");
+                    clip.classList.remove("active");
+                }
+            });
+
+            const frame = document.getElementById("pr-clip-frame");
+            const tag = document.getElementById("pr-clip-tag");
+            frame.style.borderColor = track.activeColor;
+            tag.style.backgroundColor = track.color;
+            tag.innerText = (index + 1);
+
+            renderPianoRollNotes();
+        }
+
+        function renderPianoRollNotes() {
+            const notesLayer = document.getElementById("pr-notes-layer");
+            let notesHtml = "";
+
+            TRACKS.forEach((track, tIdx) => {
+                const isCurrent = (tIdx === currentTrackIndex);
+                const notes = TRACK_NOTES_DATA[tIdx];
+
+                notes.forEach(n => {
+                    const top = (END_MIDI - n.midi) * ROW_HEIGHT + 1;
+
+                    if (isCurrent) {
+                        notesHtml += `
+                            <div class="note-element" style="left:${n.x}px; top:${top}px; width:${n.w}px; background-color: var(--scale-highlight-accent);">
+                                <span class="note-lyric">${n.lyric}</span>
+                            </div>
+                        `;
+                    } else {
+                        notesHtml += `
+                            <div class="note-element ghost" style="left:${n.x}px; top:${top + 5}px; width:${n.w}px; background-color:${track.activeColor};"></div>
+                        `;
+                    }
+                });
+            });
+
+            notesLayer.innerHTML = notesHtml;
+        }
+
+        function drawTrackMiniCanvases() {
+            TRACKS.forEach((track, idx) => {
+                const canvas = document.getElementById(`canvas-track-${idx}`);
+                const ctx = canvas.getContext("2d");
+                const notes = TRACK_NOTES_DATA[idx];
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
+
+                notes.forEach(n => {
+                    const normY = 36 - ((n.midi - 50) / 26) * 28;
+                    ctx.fillRect(n.x, Math.max(4, Math.min(32, normY)), n.w, 2);
+                });
+            });
+        }
+
+        function scrollToCenterNotes() {
+            const container = document.getElementById("pr-scroll-container");
+            const c4Top = (END_MIDI - 64) * ROW_HEIGHT;
+            container.scrollTop = c4Top - container.clientHeight / 2;
+        }
+
+        window.addEventListener("DOMContentLoaded", () => {
+            renderRulers();
+            renderKeyboardAndGrid();
+            updateScaleHighlight();
+            drawTrackMiniCanvases();
+            switchTrack(1);
+            scrollToCenterNotes();
+        });
+    </script>
+</body>
+</html>

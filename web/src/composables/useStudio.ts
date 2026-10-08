@@ -1,0 +1,455 @@
+/**
+ * 工作台状态机：工程列表 → 当前工程 → SSE 事件 → 卷帘/波形数据。
+ *
+ * 只有这一个地方持有可变状态，组件全是纯展示 + 事件。
+ *
+ * 两条数据流要分清：
+ * - **进度**（阶段状态/小步骤/百分比）由 SSE 事件**原地打补丁**到快照上，
+ *   所以进度条是连续动的，不需要轮询；
+ * - **产物**（highlights / 文件清单 / 卷帘 / 歌词）在阶段结束时**重新拉一次快照**，
+ *   因为那才是落盘后的真相。
+ */
+
+import { computed, onUnmounted, ref } from 'vue'
+import * as api from '@/api'
+import type {
+  EnvInfo,
+  JobEvent,
+  JobOptions,
+  JobSnapshot,
+  Lanes,
+  LyricLine,
+  Peaks,
+  PhaseKey,
+} from '@/types'
+import { TERMINAL_STATES } from '@/types'
+import { splitDroppedFiles } from '@/drop'
+import { lyricsBlockedMessage } from '@/stageActions'
+
+export interface LogLine {
+  seq: number
+  phase: PhaseKey | null
+  time: number
+  text: string
+  tone: 'info' | 'ok' | 'warn' | 'error'
+}
+
+const MAX_LOGS = 400
+/** 进度流断开后的最大重连次数（带退避）。 */
+const MAX_RETRIES = 10
+
+export function useStudio() {
+  const env = ref<EnvInfo | null>(null)
+  const jobs = ref<JobSnapshot[]>([])
+  const activeId = ref<string | null>(null)
+  const lanes = ref<Lanes | null>(null)
+  const peaks = ref<Peaks | null>(null)
+  const stemPeaks = ref<Peaks | null>(null)
+  const streamedLyrics = ref<LyricLine[]>([])
+  const logs = ref<LogLine[]>([])
+  const error = ref<string | null>(null)
+  const uploadProgress = ref<number | null>(null)
+  const lanesLoading = ref(false)
+
+  const active = computed<JobSnapshot | null>(
+    () => jobs.value.find((job) => job.id === activeId.value) ?? null,
+  )
+  const pluginsReady = computed(() => Boolean(env.value))
+
+  let unsubscribe: (() => void) | null = null
+  let retryHandle: number | null = null
+  let lastSeq = 0
+  let attempts = 0
+  let disposed = false
+
+  // ---------------------------------------------------------------- 通用
+  function upsert(job: JobSnapshot): void {
+    const index = jobs.value.findIndex((item) => item.id === job.id)
+    if (index >= 0) jobs.value[index] = job
+    else jobs.value.unshift(job)
+  }
+
+  function pushLog(seq: number, phase: PhaseKey | null, text: string,
+                   tone: LogLine['tone'] = 'info', time = Date.now() / 1000): void {
+    logs.value.push({ seq: seq || logs.value.length + 1, phase, time, text, tone })
+    if (logs.value.length > MAX_LOGS) logs.value.splice(0, logs.value.length - MAX_LOGS)
+  }
+
+  function stage(job: JobSnapshot | null, phase: PhaseKey) {
+    return job?.stages?.[phase]
+  }
+
+  // ---------------------------------------------------------------- 事件
+  function applyEvent(event: JobEvent): void {
+    const job = active.value
+    if (!job) return
+    const phase = (event.data.phase ?? null) as PhaseKey | null
+    const run = phase ? stage(job, phase) : undefined
+    const time = event.time || Date.now() / 1000
+    switch (event.type) {
+      case 'phase':
+        if (run) {
+          run.state = (event.data.state as never) ?? 'running'
+          run.progress = 0
+          run.error = null
+        }
+        pushLog(event.seq, phase, `开始${event.data.label ?? ''}`, 'info', time)
+        break
+      case 'step':
+        if (run) {
+          run.step = event.data.step ?? ''
+          if (typeof event.data.progress === 'number') run.progress = event.data.progress
+        }
+        pushLog(event.seq, phase, event.data.step ?? '', 'info', time)
+        break
+      case 'progress':
+        if (run) {
+          if (typeof event.data.progress === 'number') run.progress = event.data.progress
+          run.message = event.data.message ?? run.message
+        }
+        break
+      case 'lyrics':
+        if (event.data.lines) streamedLyrics.value = event.data.lines
+        if (run && event.data.lines) {
+          run.detail = { ...run.detail, lines: event.data.lines.length,
+                         chars: event.data.chars?.length ?? run.detail.chars }
+        }
+        pushLog(event.seq, phase,
+                `已识别 ${event.data.chars?.length ?? 0} 字 / ${event.data.lines?.length ?? 0} 行`
+                + (event.data.slices_total ? `（${event.data.slices}/${event.data.slices_total} 段）` : ''),
+                'info', time)
+        break
+      case 'log':
+        pushLog(event.seq, phase, event.data.message ?? '', 'warn', time)
+        break
+      case 'phase_done':
+        if (run) {
+          run.state = 'done'
+          run.progress = 1
+          if (event.data.detail) run.detail = { ...run.detail, ...event.data.detail }
+        }
+        pushLog(event.seq, phase, `${event.data.phase === 'lyrics' ? '歌词识别' : '扒谱'}完成`,
+                'ok', time)
+        void refreshArtifacts()
+        break
+      case 'phase_error':
+        if (run) {
+          run.state = 'failed'
+          run.error = event.data.message ?? '失败'
+        }
+        pushLog(event.seq, phase, event.data.message ?? '失败', 'error', time)
+        break
+      case 'phase_cancelled':
+        if (run) run.state = 'cancelled'
+        pushLog(event.seq, phase, '已取消', 'warn', time)
+        break
+      case 'done':
+        pushLog(event.seq, null, '全部完成', 'ok', time)
+        break
+      case 'error':
+        pushLog(event.seq, phase, event.data.message ?? '任务失败', 'error', time)
+        break
+      case 'cancelled':
+        pushLog(event.seq, phase, '任务已取消', 'warn', time)
+        break
+      default:
+        break
+    }
+  }
+
+  // ---------------------------------------------------------------- 数据
+  async function refreshArtifacts(): Promise<void> {
+    const id = activeId.value
+    if (!id) return
+    try {
+      upsert(await api.getJob(id))
+    } catch {
+      /* 快照拉不到不影响事件流 */
+    }
+    await loadLanes(id)
+    void loadPeaks(id)
+  }
+
+  async function loadLanes(id: string): Promise<void> {
+    lanesLoading.value = true
+    try {
+      lanes.value = await api.fetchLanes(id)
+    } catch {
+      lanes.value = null            // 还没扒谱：卷帘就是空的
+    } finally {
+      lanesLoading.value = false
+    }
+  }
+
+  async function loadPeaks(id: string): Promise<void> {
+    try {
+      peaks.value = await api.fetchPeaks(id, 1200, 'mix')
+    } catch {
+      peaks.value = null
+    }
+    // 干声是可选音源：没有就别去请求（后端会 404）
+    if (!jobs.value.find((job) => job.id === id)?.stems?.vocal) {
+      stemPeaks.value = null
+      return
+    }
+    try {
+      stemPeaks.value = await api.fetchPeaks(id, 1200, 'stem')
+    } catch {
+      stemPeaks.value = null
+    }
+  }
+
+  // ---------------------------------------------------------------- 订阅
+  function detach(): void {
+    unsubscribe?.()
+    unsubscribe = null
+    if (retryHandle !== null) {
+      window.clearTimeout(retryHandle)
+      retryHandle = null
+    }
+  }
+
+  function openStream(id: string): void {
+    if (disposed) return
+    unsubscribe = api.subscribeJob(id, lastSeq, {
+      onEvent: (event) => {
+        attempts = 0
+        lastSeq = Math.max(lastSeq, event.seq)
+        applyEvent(event)
+      },
+      onClose: (reason) => {
+        unsubscribe = null
+        if (disposed) return
+        void refreshArtifacts()
+        if (reason === 'terminal') return
+        attempts += 1
+        if (attempts > MAX_RETRIES) {
+          pushLog(0, null, '进度流断开，刷新页面可继续查看结果', 'warn')
+          return
+        }
+        retryHandle = window.setTimeout(() => openStream(id), 500 * attempts)
+      },
+    })
+  }
+
+  async function select(id: string): Promise<void> {
+    detach()
+    activeId.value = id
+    lastSeq = 0
+    attempts = 0
+    logs.value = []
+    lanes.value = null
+    peaks.value = null
+    stemPeaks.value = null
+    streamedLyrics.value = []
+    const known = jobs.value.find((job) => job.id === id)
+    if (known) {
+      // 立刻用已有数据渲染，再拉一次最新快照（可能已经跑完了）
+      void refreshArtifacts()
+      if (!TERMINAL_STATES.has(known.state)) openStream(id)
+      return
+    }
+    await refreshArtifacts()
+  }
+
+  // ---------------------------------------------------------------- 动作
+  async function init(): Promise<void> {
+    try {
+      env.value = await api.fetchEnv()
+    } catch {
+      /* 顶栏信息拿不到不影响使用 */
+    }
+    try {
+      jobs.value = await api.listJobs()
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+    const running = jobs.value.find((job) => job.state === 'running' || job.state === 'queued')
+    const first = running ?? jobs.value[0]
+    if (first) await select(first.id)
+  }
+
+  /**
+   * 建工程。可以一次给多个文件（一次拖两个）：第一个当混音原曲，第二个当干声。
+   *
+   * **上传不触发任何阶段（门禁）**：后端把工程建出来就停住（状态 `draft`），
+   * 界面上参数面板这时才露出来；用户点「开始扒谱」/「⏵ 自动提取」才真的开跑。
+   */
+  async function create(files: File[] | File): Promise<void> {
+    const list = Array.isArray(files) ? files : [files]
+    const { mix, stem, note } = splitDroppedFiles(list)
+    if (!mix) return
+    error.value = null
+    uploadProgress.value = 0
+    try {
+      const job = await api.uploadJob(mix, undefined, (fraction) => {
+        uploadProgress.value = fraction
+      })
+      upsert(job)
+      await select(job.id)
+      if (note) pushLog(0, null, note)
+      // 一次拖两个：第二个当干声。先建工程再挂——没有工程就没地方挂。
+      // 这时还没开始扒谱（门禁），挂干声更不冲突。
+      if (stem) await attachStem(stem)
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    } finally {
+      uploadProgress.value = null
+    }
+  }
+
+  async function runStage(phase: PhaseKey): Promise<void> {
+    const job = active.value
+    if (!job) return
+    // 界面这道门只是别让人白点：后端也有同一道（409"请先完成扒谱"）
+    if (phase === 'lyrics') {
+      const blocked = lyricsBlockedMessage(job)
+      if (blocked) {
+        error.value = blocked
+        return
+      }
+    }
+    error.value = null
+    try {
+      upsert(await api.runStage(job.id, phase))
+      if (!unsubscribe) openStream(job.id)
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  /** 「自动提取」：扒谱 → 歌词 一条龙（走后端的 chain，不是两次 runStage）。 */
+  async function runChain(): Promise<void> {
+    const job = active.value
+    if (!job) return
+    error.value = null
+    try {
+      upsert(await api.runChain(job.id))
+      if (!unsubscribe) openStream(job.id)
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  async function cancel(): Promise<void> {
+    const job = active.value
+    if (!job) return
+    try {
+      upsert(await api.cancelJob(job.id))
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  /** 上传干声（歌词音源）。**不做内容校验**：传混音原曲也允许。 */
+  async function attachStem(file: File): Promise<void> {
+    const job = active.value
+    if (!job) return
+    error.value = null
+    uploadProgress.value = 0
+    try {
+      upsert(await api.uploadStem(job.id, file, 'vocal', (fraction) => {
+        uploadProgress.value = fraction
+      }))
+      await loadPeaks(job.id)
+      if (!unsubscribe && !TERMINAL_STATES.has(job.state)) openStream(job.id)
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    } finally {
+      uploadProgress.value = null
+    }
+  }
+
+  async function detachStem(): Promise<void> {
+    const job = active.value
+    if (!job) return
+    try {
+      upsert(await api.deleteStem(job.id, 'vocal'))
+      stemPeaks.value = null
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  /**
+   * 改一个参数（精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）。
+   *
+   * 后端会按参数所属的阶段**作废旧结果**（扒谱参数连歌词一起作废），所以这里只发补丁，
+   * 快照回来之后界面自然就变成"待开始"。值不合法是 400、阶段正在跑是 409、4G 特供是 409，
+   * 都当作错误显示出来——别假装改成功了。
+   */
+  async function setOptions(patch: JobOptions): Promise<void> {
+    const job = active.value
+    if (!job) return
+    error.value = null
+    try {
+      upsert(await api.setJobOptions(job.id, patch))
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  async function remove(id: string): Promise<void> {
+    try {
+      await api.deleteJob(id)
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+      return
+    }
+    jobs.value = jobs.value.filter((job) => job.id !== id)
+    if (activeId.value === id) {
+      detach()
+      activeId.value = null
+      lanes.value = null
+      peaks.value = null
+      logs.value = []
+    }
+  }
+
+  onUnmounted(() => {
+    disposed = true
+    detach()
+  })
+
+  /** 回到"没有选中工程"的状态：主区显示拖拽提示，后台任务照跑。 */
+  function reset(): void {
+    detach()
+    activeId.value = null
+    lanes.value = null
+    peaks.value = null
+    stemPeaks.value = null
+    streamedLyrics.value = []
+    logs.value = []
+    lastSeq = 0
+  }
+
+  return {
+    env,
+    jobs,
+    active,
+    activeId,
+    lanes,
+    peaks,
+    stemPeaks,
+    streamedLyrics,
+    logs,
+    error,
+    uploadProgress,
+    lanesLoading,
+    pluginsReady,
+    init,
+    select,
+    create,
+    runStage,
+    runChain,
+    cancel,
+    attachStem,
+    detachStem,
+    setOptions,
+    remove,
+    reset,
+    dismissError: () => {
+      error.value = null
+    },
+  }
+}

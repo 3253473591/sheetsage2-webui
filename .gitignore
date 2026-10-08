@@ -1,0 +1,53 @@
+# ───────────────────────────── 环境 / 依赖
+# 本项目自带一个独立 .venv；换环境时的备份 .venv-* 也一并忽略
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 前端依赖（构建产物 src/sheetsage2_webui/webui/static/ 要跟着走，别忽略）
+web/node_modules/
+web/dist/
+web/.smoke/
+web/.vite/
+
+# ───────────────────────────── 本地产物（都不该发布）
+# 转写产物与中间文件（可用 scripts/verify.py 重新生成）
+output/
+tmp/
+reports/
+# 内测包（scripts/build_alpha_package.py 生成）
+dist/
+wheels/
+# 本地下载的模型权重（十几 GB）
+models/
+# 测试音频：都是**商业歌曲**，不能随仓库发布；缺了测试会 skip
+samples/
+# 调研期间从 HF 拉下来做参照的模型仓库文件
+_ref_hf/
+_probe.txt
+
+# 打包 / 安装元数据
+build/
+*.egg-info/
+
+# 运行时状态（本地下载进度 / 启动状态）
+bootstrap-state.json
+
+# ───────────────────────────── 第三方参考代码
+# reference/ 下两个目录各自带 .git（是别人的仓库）。直接 `git add` 会变成
+# 无法解析的 gitlink（空目录），所以当作外部依赖忽略。
+# 算法出处与许可见 NOTICE 与 docs/Vocal2Midi-对照与借鉴.md。
+reference/Vocal2Midi/
+reference/Vocal2Midi V2/
+
+# ───────────────────────────── 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

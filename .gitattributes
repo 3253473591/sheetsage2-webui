@@ -1,0 +1,34 @@
+# 统一换行：仓库里一律 LF，检出时按平台转换。
+# 本项目主要跑在 Windows，但 .py / .ts / .md 都是 LF，统一了才不会每个文件都报
+# "LF will be replaced by CRLF"，也避免一次提交把整个仓库的换行都改掉。
+* text=auto eol=lf
+
+# Windows 脚本必须保留 CRLF，否则 cmd.exe 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：不要动
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mid binary
+*.midi binary
+*.flac binary
+*.wav binary
+*.mp3 binary
+*.whl binary
+*.zip binary
+
+# 各语言在 GitHub 上的统计归类
+*.py linguist-language=Python
+*.ts linguist-language=TypeScript
+*.vue linguist-language=Vue
+
+# 打包产物 / 生成物在 diff 里折叠
+src/sheetsage2_webui/webui/static/assets/* linguist-generated=true
+web/package-lock.json linguist-generated=true
