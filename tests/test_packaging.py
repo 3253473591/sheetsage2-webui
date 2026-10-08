@@ -1,4 +1,4 @@
-r"""内测包（alpha 1）的三件事：ffmpeg 解析、清单、下载器。
+r"""内测包（alpha 2）的三件事：ffmpeg 解析、清单、下载器。
 
 这套东西的特点是**跑在内测者机器上、跑在环境还没建起来的时候**，所以：
 
@@ -85,7 +85,7 @@ def test_the_bundled_ffmpeg_is_where_the_packager_puts_it():
 # --------------------------------------------------------------------- 清单
 def test_downloads_manifest_is_complete():
     manifest = json.loads((PROJECT_ROOT / "downloads.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "alpha1"
+    assert manifest["version"] == "alpha2"
 
     # 随包的两样必须在
     assert manifest["bundled"]["python"]["path"] == "runtime/python"
@@ -178,7 +178,7 @@ def server():
 
 
 def test_download_verifies_sha256_and_writes_the_target(server, tmp_path: Path):
-    server.payload = b"hello alpha1" * 1000
+    server.payload = b"hello alpha2" * 1000
     digest = hashlib.sha256(server.payload).hexdigest()
     target = tmp_path / "out.bin"
     downloader.download(server.url, target, sha256=digest, size=len(server.payload),

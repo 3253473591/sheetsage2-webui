@@ -459,7 +459,7 @@ payload = transcribe_to_directory("song.flac", "output/song", model=engine)
 静态 ffmpeg**，torch 与模型首次运行时按 `downloads.json` 直链下载（支持续传 + sha256）。
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_alpha_package.py     # -> dist\SheetSage2-Studio-alpha1.zip
+.\.venv\Scripts\python.exe scripts\build_alpha_package.py     # -> dist\SheetSage2-Studio-alpha2.zip
 ```
 
 打出来的包 **24.7 MB**（3605 个文件，解压 64.6 MB），内测者拿到后：
