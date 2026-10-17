@@ -141,9 +141,38 @@ export interface StageSnapshot {
   message: string
   started_at: number | null
   finished_at: number | null
+  /** 最后一次"有进展"的时刻：看门狗用它判卡死，界面用它显示"上次进展 xx 秒前" */
+  last_advance_at?: number | null
   elapsed_seconds: number
+  /** 人话（横条/阶段卡上显示的那一句），不是异常原文 */
   error: string | null
+  /** 稳定的错误码（`E_DISK_FULL` / `E_STALLED` …），前端按码换图标/文案 */
+  error_code?: string | null
+  /** 下一步该干什么（一句话） */
+  error_action?: string | null
+  /** 技术原文（折叠在「详情」里） */
+  error_detail?: string | null
   detail: Record<string, unknown>
+}
+
+/** 产物自检结果（阶段详情里的 `detail.artifacts`，G4 完成门禁）。 */
+export interface ArtifactCheck {
+  ok: boolean
+  checked: number
+  total: number
+  missing: string[]
+  problems: string[]
+}
+
+/** 回收站里的一项（`GET /api/trash`）。 */
+export interface TrashEntry {
+  /** 回收站里的目录名，恢复/彻底删除都用它 */
+  id: string
+  name: string
+  job_id: string | null
+  deleted_at: number
+  size: number
+  files: number
 }
 
 export interface Highlights {
@@ -188,6 +217,8 @@ export interface JobSnapshot {
   name: string
   audio: string
   rev: number
+  /** 产物版本戳：每完成一轮阶段 +1，所有派生产物（zip/SVP/波形）的缓存都跟着它失效 */
+  artifacts_rev?: number
   state: JobState
   stage: PhaseKey | null
   stages: Record<PhaseKey, StageSnapshot>
@@ -239,6 +270,9 @@ export interface JobEvent {
     progress?: number
     message?: string
     detail?: Record<string, unknown>
+    /** 失败事件带的三段（`error` 是人话，`detail` 是技术原文） */
+    code?: string
+    action?: string
     // lyrics 事件带的内容
     text?: string
     chars?: LyricChar[]

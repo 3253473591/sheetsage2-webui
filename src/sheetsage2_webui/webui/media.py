@@ -8,11 +8,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from ..bootstrap import find_ffmpeg
+from ..fsutil import write_text_atomic
+
+#: 解码超时（秒）。ffmpeg 卡住时以前会**永久**占着一个线程池线程（对比 `asr.py` 的 300s）。
+PEAK_TIMEOUT_SECONDS = 300.0
 
 #: 波形包络的采样率。只要形状，不需要音质。
 PEAK_SAMPLE_RATE = 4000
@@ -57,7 +62,17 @@ def compute_peaks(audio: Path, buckets: int, *, sample_rate: int = PEAK_SAMPLE_R
         raise RuntimeError("找不到 ffmpeg，无法计算波形")
     command = [ffmpeg, "-v", "error", "-i", str(audio), "-ac", "1", "-ar",
                str(sample_rate), "-f", "f32le", "-"]
-    result = subprocess.run(command, capture_output=True, check=False)
+    # 子进程独立进程组 + 超时：Python 侧被杀时不会留下一个还在吃 CPU 的孤儿 ffmpeg。
+    options: dict[str, Any] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        result = subprocess.run(command, capture_output=True, check=False,
+                                timeout=PEAK_TIMEOUT_SECONDS, **options)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"解码音频超过 {PEAK_TIMEOUT_SECONDS:.0f} 秒还没跑完，ffmpeg 可能卡住了"
+        ) from exc
     if result.returncode:
         raise RuntimeError("解码音频失败："
                            + result.stderr.decode(errors="replace")[-200:].strip())
@@ -83,18 +98,36 @@ def compute_peaks(audio: Path, buckets: int, *, sample_rate: int = PEAK_SAMPLE_R
     }
 
 
+def _fingerprint(audio: Path) -> str:
+    """源文件的指纹（大小 + mtime）：换了干声/换了原曲，波形缓存必须跟着作废。"""
+    try:
+        stat = audio.stat()
+    except OSError:
+        return ""
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
 def peaks_for(job_root: Path, audio: Path, buckets: int,
               cache_key: str = "mix") -> dict[str, Any]:
-    """带磁盘缓存：同一个任务、同一档桶数、同一条音源只算一次。"""
+    """带磁盘缓存：同一个任务、同一档桶数、**同一条音频**只算一次。
+
+    缓存里存着源文件指纹（G3）：`attach_stem` 换了干声、或者工程换了原曲之后，
+    同名缓存自然失效——以前这里只按文件名做键，换干声之后界面画的还是上一条的波形。
+    """
     cache = job_root / f"peaks-{cache_key}-{buckets}.json"
+    fingerprint = _fingerprint(audio)
     if cache.is_file():
         try:
-            return json.loads(cache.read_text(encoding="utf-8"))
+            cached = json.loads(cache.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            cache.unlink(missing_ok=True)
-    data = compute_peaks(audio, buckets)
+            cached = None
+        if isinstance(cached, dict) and cached.get("source") == fingerprint:
+            return cached
+        cache.unlink(missing_ok=True)
+    data = dict(compute_peaks(audio, buckets))
+    data["source"] = fingerprint
     try:
-        cache.write_text(json.dumps(data), encoding="utf-8")
+        write_text_atomic(cache, json.dumps(data))
     except OSError:
         pass                                    # 缓存写不进去不影响返回
     return data

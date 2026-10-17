@@ -244,6 +244,30 @@ console.log(`  工程头按钮：${headButtons.join(' / ')}`)
 console.log(`  语言下拉框：${languageSelect ? languageSelect.querySelectorAll('option').length : 0} 个选项`)
 console.log(`  页面文字片段：${text.replace(/\s+/g, ' ').slice(0, 160)}`)
 
+// ------------------------------------------------------------------ 回收站弹层
+// P0 新加的弹层只编译过、没渲染过，这里点开看一眼：按钮在、弹层能挂出来、能关掉。
+// 不点「删除」——那会动真工程；删除链路在 `pytest tests/test_webui.py` 里验过。
+const trashButton = [...(root?.querySelectorAll('.nav-right button') ?? [])]
+  .find((node) => (node.textContent ?? '').includes('回收站'))
+const dialogProblems = []
+if (!trashButton) {
+  dialogProblems.push('顶栏没有「回收站」入口')
+} else {
+  trashButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  const title = window.document.querySelector('.modal-card .modal-title')?.textContent?.trim()
+  if (title !== '回收站') dialogProblems.push(`回收站弹层没挂出来（标题是 ${title ?? '空'}）`)
+  const closeButton = [...(window.document.querySelectorAll('.modal-card .modal-actions button') ?? [])]
+    .find((node) => (node.textContent ?? '').includes('关闭'))
+  if (!closeButton) dialogProblems.push('回收站弹层没有「关闭」按钮')
+  else {
+    closeButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    if (window.document.querySelector('.modal-card')) dialogProblems.push('回收站弹层关不掉')
+  }
+}
+console.log(`  回收站弹层：${dialogProblems.length ? dialogProblems.join('；') : '能打开、能关闭'}`)
+
 const failures = []
 if (counts.projectItems < 1) failures.push('工程列表是空的')
 if (counts.tracks !== 3) failures.push(`音轨数应为 3（混音原曲 / 干声 / 人声主旋律），实际 ${counts.tracks}`)
@@ -293,6 +317,7 @@ if (headButtons.some((label) => label.includes('下载全部'))) {
   failures.push('整包 zip 不该还是主按钮（应降到小箭头菜单里）')
 }
 for (const problem of problems) failures.push(problem)
+for (const problem of dialogProblems) failures.push(problem)
 
 if (failures.length) {
   console.error('\n冒烟测试失败：')

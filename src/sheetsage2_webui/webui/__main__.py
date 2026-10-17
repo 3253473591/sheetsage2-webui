@@ -14,14 +14,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from ..asr import AsrConfig
 from ..bootstrap import PROJECT_ROOT
 from ..engine import EngineConfig
 from .app import create_app, data_root_from_env
 from .runner import RunnerSession
+from .singleton import AlreadyRunning, InstanceLock
 
 DEFAULT_ASR_MODEL = "models/Qwen3-ASR-1.7B"
 DEFAULT_ALIGNER = "models/Qwen3-ForcedAligner-0.6B"
@@ -69,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="并行的推理工作线程数（GPU 只有一块就保持 1）")
     parser.add_argument("--log-level", default="info",
                         choices=("critical", "error", "warning", "info", "debug"))
+    parser.add_argument("--no-singleton", action="store_true",
+                        help="允许同一个数据目录上跑多个服务实例（默认禁止：双击两次只会开一个）")
     return parser
 
 
@@ -83,40 +88,67 @@ def resolve(path: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    data_root = Path(args.data_root) if args.data_root else data_root_from_env()
 
-    asr_options: dict[str, Any] = {}
-    if args.asr_max_slice:
-        asr_options["max_slice_seconds"] = args.asr_max_slice
-    session = RunnerSession(
-        EngineConfig(model_id=args.model, device=args.device, dtype=args.dtype,
-                     preset=args.preset, local_files_only=args.local_files_only,
-                     weights_dtype=args.engine_weights),
-        AsrConfig(asr_model=resolve(args.asr_model), aligner_model=resolve(args.aligner),
-                  language=args.language, device=args.asr_device,
-                  max_vram=args.asr_max_vram, **asr_options),
-        free_between_stages=not args.keep_models,
-    )
-    app = create_app(data_root=args.data_root or data_root_from_env(),
-                     session=session, max_upload_mb=args.max_upload_mb,
-                     workers=args.workers, lock_params=args.lock_params)
+    # **单实例锁**（G1）：同一个数据目录只许一个服务。拿不到锁的那一方不是报错退出，
+    # 而是告诉用户"已经有一个在跑了，地址是这个"——双击两次的第二次就走到这里。
+    lock = InstanceLock(data_root)
+    if not args.no_singleton and os.environ.get("SHEETSAGE_ALLOW_MULTI") != "1":
+        display = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+        try:
+            lock.acquire(port=args.port, url=f"http://{display}:{args.port}")
+        except AlreadyRunning as exc:
+            info = exc.info
+            print("已经有一个 SheetSage2 Studio 在跑了，这次不再启动第二个。")
+            if info.get("url"):
+                print(f"  正在跑的那个：{info['url']}"
+                      + (f"（PID {info.get('pid')}）" if info.get("pid") else ""))
+            print(f"  锁文件：{lock.path}")
+            print("  想重启就先关掉那个窗口（或结束那个进程），再双击一次。")
+            return 0
+    else:
+        print("  注意：本次跳过了单实例检查（--no-singleton / SHEETSAGE_ALLOW_MULTI）")
 
     try:
-        import uvicorn
-    except ImportError:
-        print("缺少 uvicorn：pip install -e .[web]", file=sys.stderr)
-        return 2
+        asr_options: dict[str, Any] = {}
+        if args.asr_max_slice:
+            asr_options["max_slice_seconds"] = args.asr_max_slice
+        session = RunnerSession(
+            EngineConfig(model_id=args.model, device=args.device, dtype=args.dtype,
+                         preset=args.preset, local_files_only=args.local_files_only,
+                         weights_dtype=args.engine_weights),
+            AsrConfig(asr_model=resolve(args.asr_model), aligner_model=resolve(args.aligner),
+                      language=args.language, device=args.asr_device,
+                      max_vram=args.asr_max_vram, **asr_options),
+            free_between_stages=not args.keep_models,
+        )
+        app = create_app(data_root=data_root, session=session,
+                         max_upload_mb=args.max_upload_mb,
+                         workers=args.workers, lock_params=args.lock_params)
 
-    display = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
-    print(f"SheetSage2 Studio -> http://{display}:{args.port}")
-    print(f"  数据目录 {app.state.manager.root}")
-    print(f"  扒谱 {args.model}（{args.device}） · 歌词 {args.asr_model}（{args.asr_device}）"
-          + (f"，显存预算 {args.asr_max_vram}" if args.asr_max_vram else ""))
-    print(f"  上传上限 {args.max_upload_mb:g} MB"
-          + ("，阶段间保留模型" if args.keep_models else "，阶段间释放模型以省显存"))
-    print("  参数面板：" + ("已锁定（4G 特供）" if args.lock_params
-                            else "可调（精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）"))
-    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
-    return 0
+        try:
+            import uvicorn
+        except ImportError:
+            print("缺少 uvicorn：pip install -e .[web]", file=sys.stderr)
+            return 2
+
+        display = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+        print(f"SheetSage2 Studio -> http://{display}:{args.port}")
+        print(f"  数据目录 {app.state.manager.root}")
+        print(f"  扒谱 {args.model}（{args.device}） · 歌词 {args.asr_model}（{args.asr_device}）"
+              + (f"，显存预算 {args.asr_max_vram}" if args.asr_max_vram else ""))
+        print(f"  上传上限 {args.max_upload_mb:g} MB"
+              + ("，阶段间保留模型" if args.keep_models else "，阶段间释放模型以省显存"))
+        print("  参数面板：" + ("已锁定（4G 特供）" if args.lock_params
+                                else "可调（精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）"))
+        lock.update(port=args.port, url=f"http://{display}:{args.port}")
+        if args.host not in ("127.0.0.1", "localhost"):
+            print(f"  ⚠ 监听 {args.host}：同一网络的其他人也能访问这个服务（能上传/删除/导出），"
+                  "只在可信网络里这么用")
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+        return 0
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

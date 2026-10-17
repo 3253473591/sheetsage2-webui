@@ -146,6 +146,11 @@ def write_artifacts(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "project.json").write_text(json.dumps(PROJECT_STUB), encoding="utf-8")
     (out_dir / "report.json").write_text('{"decisions": {}}', encoding="utf-8")
+    # `summary.json` 是完成门禁（G4）要求的三个关键产物之一：真的 pipeline 会写它，
+    # 假 runner 也得写，否则"完成"就不再是一个可以随便宣布的状态。
+    (out_dir / "summary.json").write_text(
+        json.dumps({"duration_seconds": 8.0, "artifacts_ok": True, "notes": {}},
+                   ensure_ascii=False), encoding="utf-8")
     (out_dir / "structure.lab").write_text("0.00\t4.00\tintro\n", encoding="utf-8")
     (out_dir / "melody.mid").write_bytes(b"MThd\x00\x00\x00\x06")
     (out_dir / "notation").mkdir(exist_ok=True)
@@ -453,15 +458,21 @@ def test_lyrics_needs_transcribe_first(tmp_path):
 
 
 def test_chain_queues_lyrics_while_transcribe_is_still_running(tmp_path):
-    """「自动提取」故意在扒谱没跑完时就排歌词——它走 /chain，不受那道门限制。"""
-    client, _ = make_client(tmp_path, fake_runners())
+    """「自动提取」故意在扒谱没跑完时就排歌词——它走 /chain，不受那道门限制。
+
+    用 `GateRunner` 把扒谱**卡在中途**，否则假 runner 太快，"正在跑"这个前提会一闪而过。
+    """
+    runner = GateRunner()
+    client, _ = make_client(tmp_path, {"transcribe": runner, "lyrics": fake_lyrics})
     with client:
         job = upload(client, plan="transcribe").json()
+        assert runner.entered.wait(timeout=10)
         chained = client.post(f"/api/jobs/{job['id']}/chain")
         assert chained.status_code == 200
         snapshot = chained.json()
         assert snapshot["stages"]["transcribe"]["state"] in ("queued", "running")
         assert snapshot["stages"]["lyrics"]["state"] in ("queued", "idle")
+        runner.gate.set()
         done = wait_for_state(client, job["id"], {"done"})
         assert done["stages"]["transcribe"]["state"] == "done"
         assert done["stages"]["lyrics"]["state"] == "done"
@@ -709,7 +720,7 @@ def test_upload_runs_both_stages_when_explicitly_planned(tmp_path):
     assert done["highlights"]["notes"]["vocal"] == 5
     assert [item["path"] for item in done["files"]] == [
         "lyrics.json", "melody.mid", "notation/song_melody.mid", "project.json",
-        "report.json", "structure.lab"]
+        "report.json", "structure.lab", "summary.json"]
 
 
 def test_plan_can_run_transcribe_only_then_lyrics_separately(tmp_path):
@@ -1346,3 +1357,253 @@ def test_stem_audio_supports_range_and_its_own_peaks(tmp_path):
         if find_ffmpeg():
             peaks = client.get(f"/api/jobs/{job['id']}/peaks?source=stem&buckets=32").json()
             assert peaks["buckets"] == 32 and max(peaks["peaks"]) > 0.1
+
+
+# --------------------------------------------------------------------- 健壮性（P0）
+# 这一节对应 `docs/健壮性保障评估.md` 的 G1~G7（第一期）。每条缺口一条测试，
+# 全部走假 runner，不加载任何模型。
+def test_delete_goes_to_the_trash_and_can_be_restored(tmp_path):
+    """G2：删除是**软删除**——进回收站，能恢复，产物和参数都回来。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        job = upload(client, plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        root = job_dir(manager, job)
+        assert (root / "project.json").is_file()
+
+        assert client.delete(f"/api/jobs/{job['id']}").status_code == 200
+        assert client.get(f"/api/jobs/{job['id']}").status_code == 404
+        assert not root.exists()                            # 目录已经挪走
+
+        entries = client.get("/api/trash").json()["entries"]
+        assert len(entries) == 1
+        assert entries[0]["name"] == job["name"]
+        assert entries[0]["files"] > 0
+
+        restored = client.post(f"/api/trash/{entries[0]['id']}/restore")
+        assert restored.status_code == 200
+        assert restored.json()["id"] == job["id"]
+        assert job_dir(manager, job).is_dir()
+        assert client.get(f"/api/jobs/{job['id']}/files/project.json").status_code == 200
+        assert client.get("/api/trash").json()["entries"] == []
+
+
+def test_delete_with_permanent_flag_skips_the_trash(tmp_path):
+    """G2：用户确认"彻底删除"时才是真删（不进回收站）。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        job = upload(client, plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        response = client.delete(f"/api/jobs/{job['id']}", params={"permanent": "true"})
+        assert response.status_code == 200
+        assert client.get("/api/trash").json()["entries"] == []
+        assert not job_dir(manager, job).exists()
+
+
+def test_rerunning_rebuilds_the_bundle_and_bumps_the_artifact_rev(tmp_path):
+    """G3：重跑之后下载到的**一定是新结果**（缓存键带产物版本戳）。"""
+    marker = {"tag": "v1"}
+
+    def transcribe(job, progress):
+        write_artifacts(job.out_dir)
+        (job.out_dir / "report.json").write_text(
+            json.dumps({"decisions": {}, "tag": marker["tag"]}), encoding="utf-8")
+        progress.step("整理产物", 0.98)
+        return {"detail": {}}
+
+    client, _ = make_client(tmp_path, {"transcribe": transcribe, "lyrics": fake_lyrics})
+    with client:
+        job = upload(client, name="版本.wav", plan="transcribe").json()
+        first = wait_for_state(client, job["id"], {"done"})
+        assert first["artifacts_rev"] == 1
+        zip_one = client.get(f"/api/jobs/{job['id']}/download")
+        assert zip_one.headers["x-artifact-rev"] == "1"
+
+        marker["tag"] = "v2"
+        assert client.post(f"/api/jobs/{job['id']}/stages/transcribe").status_code == 200
+        again = wait_for_state(client, job["id"], {"done"})
+        assert again["artifacts_rev"] == 2
+        zip_two = client.get(f"/api/jobs/{job['id']}/download")
+        assert zip_two.headers["x-artifact-rev"] == "2"
+
+    with zipfile.ZipFile(io.BytesIO(zip_one.content)) as archive:
+        assert b'"v1"' in archive.read("版本/report.json")
+    with zipfile.ZipFile(io.BytesIO(zip_two.content)) as archive:
+        assert b'"v2"' in archive.read("版本/report.json")
+
+
+def test_svp_cache_key_follows_the_artifact_rev():
+    """G3：SVP 的缓存键里带产物版本戳，重跑后不会发旧文件。"""
+    from sheetsage2_webui.svp import cache_key
+
+    base = cache_key(["vocal"], "1.9", {"language": ""})
+    bumped = cache_key(["vocal"], "1.9", {"language": ""}, rev=3)
+    assert base != bumped
+    assert bumped == cache_key(["vocal"], "1.9", {"language": ""}, rev=3)
+
+
+@pytest.mark.skipif(not find_ffmpeg(), reason="需要 ffmpeg 解码")
+def test_peaks_cache_is_invalidated_when_the_audio_changes(tmp_path):
+    """G3：同一条音源换了内容（换干声）之后，波形缓存必须跟着失效。"""
+    from sheetsage2_webui.webui.media import peaks_for
+
+    audio = tmp_path / "tone.wav"
+    audio.write_bytes(real_wav(tmp_path))
+    first = peaks_for(tmp_path, audio, 32)
+    assert first["buckets"] == 32
+
+    time.sleep(0.02)                                   # 让 mtime 变得可分辨
+    audio.write_bytes(real_wav(tmp_path, seconds=0.9))
+    second = peaks_for(tmp_path, audio, 32)
+    assert second["source"] != first["source"]         # 指纹变了 = 真的重算了
+    assert second["duration"] == pytest.approx(0.9, abs=0.05)
+
+
+def test_incomplete_artifacts_are_not_reported_as_done(tmp_path):
+    """G4：半成品不许标成完成（缺产物 → 阶段 failed，并说缺什么）。"""
+    def thin(job, progress):
+        progress.step("整理产物", 0.98)
+        (job.out_dir / "project.json").write_text(json.dumps(PROJECT_STUB), encoding="utf-8")
+        return {"detail": {}}
+
+    client, _ = make_client(tmp_path, {"transcribe": thin, "lyrics": fake_lyrics})
+    with client:
+        job = upload(client, plan="transcribe").json()
+        failed = wait_for_state(client, job["id"], {"failed"})
+        stage = failed["stages"]["transcribe"]
+        assert stage["state"] == "failed"
+        assert stage["error_code"] == "E_ARTIFACTS_INCOMPLETE"
+        assert "产物不完整" in stage["error"]
+        assert "report.json" in stage["error"]
+
+
+def test_the_runners_own_artifact_report_blocks_completion(tmp_path):
+    """G4：runner 的体检（`detail.artifacts.ok=False`）同样能拦住"完成"。"""
+    def degraded(job, progress):
+        write_artifacts(job.out_dir)
+        return {"detail": {"artifacts": {"ok": False, "missing": ["chords.mid"],
+                                         "problems": ["缺少 1 个产物文件"]}}}
+
+    client, _ = make_client(tmp_path, {"transcribe": degraded, "lyrics": fake_lyrics})
+    with client:
+        job = upload(client, plan="transcribe").json()
+        failed = wait_for_state(client, job["id"], {"failed"})
+        stage = failed["stages"]["transcribe"]
+        assert stage["error_code"] == "E_ARTIFACTS_INCOMPLETE"
+        assert "chords.mid" in stage["error"]
+
+
+def test_atomic_write_never_leaves_a_part_file(tmp_path):
+    """G5：JSON 落盘是"先写 .part 再 rename"，不会留下半截文件。"""
+    from sheetsage2_webui.fsutil import write_text_atomic
+
+    target = tmp_path / "project.json"
+    write_text_atomic(target, '{"a": 1}')
+    assert target.read_text(encoding="utf-8") == '{"a": 1}'
+    assert list(tmp_path.glob("*.part")) == []
+    assert not list(tmp_path.glob(".*.part"))
+
+
+def test_half_written_project_json_is_404_not_500(tmp_path):
+    """G5：产物被写了一半时，接口给"还没准备好"，不是 500。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        job = upload(client, plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        (job_dir(manager, job) / "project.json").write_text('{"timeline":', encoding="utf-8")
+        assert client.get(f"/api/jobs/{job['id']}/project").status_code == 404
+
+
+def test_failed_rerun_does_not_leave_the_old_lyrics_in_output(tmp_path):
+    """G5：重跑扒谱失败在中途时，旧歌词不能和这一轮的新产物混在一起。"""
+    boom = {"on": False}
+
+    def transcribe(job, progress):
+        if boom["on"]:
+            raise RuntimeError("磁盘满了，写不进去")
+        return fake_transcribe(job, progress)
+
+    client, manager = make_client(tmp_path, {"transcribe": transcribe, "lyrics": fake_lyrics})
+    with client:
+        job = upload(client, plan="transcribe,lyrics").json()
+        wait_for_state(client, job["id"], {"done"})
+        assert (job_dir(manager, job) / "lyrics.json").is_file()
+
+        boom["on"] = True
+        assert client.post(f"/api/jobs/{job['id']}/stages/transcribe").status_code == 200
+        wait_for_state(client, job["id"], {"failed"})
+        # 旧歌词被挪进了 `.webui/prev/`：磁盘上还留着，但不属于"当前这一版"
+        assert not (job_dir(manager, job) / "lyrics.json").exists()
+        assert list((job_internal(manager, job) / "prev").rglob("lyrics.json"))
+
+
+def test_a_stalled_stage_is_failed_by_the_watchdog(tmp_path):
+    """G6：一个回调都不来 = 卡死；看门狗判失败并给人话，不是永远转圈。"""
+    def stuck(job, progress):
+        progress.step("识别音乐", 0.06)
+        time.sleep(2.0)                                # 故意不给任何进展
+        return {"detail": {}}
+
+    client, _ = make_client(tmp_path, {"transcribe": stuck, "lyrics": fake_lyrics},
+                            stall_timeout=0.3, watchdog_interval=0.05)
+    with client:
+        job = upload(client, plan="transcribe").json()
+        failed = wait_for_state(client, job["id"], {"failed"}, timeout=15)
+        stage = failed["stages"]["transcribe"]
+        assert stage["error_code"] == "E_STALLED"
+        assert "卡住" in stage["error"]
+        assert stage["error_action"]
+
+
+def test_a_stage_that_exceeds_the_hard_timeout_is_failed(tmp_path):
+    """G6：总时长超过上限也判失败（有进展但永远跑不完的僵尸任务）。"""
+    def slow(job, progress):
+        for _ in range(60):
+            progress.set(min(0.9, progress.run.progress + 0.01), "还在跑")
+            time.sleep(0.05)
+        return {"detail": {}}
+
+    client, _ = make_client(tmp_path, {"transcribe": slow, "lyrics": fake_lyrics},
+                            stall_timeout=30.0, hard_timeout=0.3,
+                            watchdog_interval=0.05)
+    with client:
+        job = upload(client, plan="transcribe").json()
+        failed = wait_for_state(client, job["id"], {"failed"}, timeout=15)
+        stage = failed["stages"]["transcribe"]
+        assert stage["error_code"] == "E_TIMEOUT"
+        assert "超过上限" in stage["error"]
+
+
+def test_errors_are_translated_into_human_text_with_a_code(tmp_path):
+    """G7：失败要带上"错误码 + 人话 + 下一步 + 技术原文"，人话里不出现异常类名。"""
+    def no_space(job, progress):
+        raise OSError(28, "No space left on device")
+
+    client, _ = make_client(tmp_path, {"transcribe": no_space, "lyrics": fake_lyrics})
+    with client:
+        job = upload(client, plan="transcribe").json()
+        failed = wait_for_state(client, job["id"], {"failed"})
+        stage = failed["stages"]["transcribe"]
+        assert stage["error_code"] == "E_DISK_FULL"
+        assert "磁盘满" in stage["error"]
+        assert "OSError" not in stage["error"]
+        assert stage["error_action"]
+        assert "No space left" in stage["error_detail"]
+        events = collect_events(client, f"/api/jobs/{job['id']}/events")
+        assert events[-1]["type"] == "error"
+
+
+def test_error_table_maps_common_failures():
+    """G7：错误码表的判定（不加载模型，纯函数）。"""
+    from sheetsage2_webui.webui.errors import describe
+
+    assert describe(OSError(28, "No space left on device")).code == "E_DISK_FULL"
+    assert describe(RuntimeError("CUDA out of memory")).code == "E_VRAM_OOM"
+    assert describe(RuntimeError("没有拿到任何逐字时间戳，填词无法进行")).code == "E_ASR_EMPTY"
+    assert describe(RuntimeError("解码音频失败：Invalid data found")).code == "E_AUDIO_UNREADABLE"
+
+    weird = describe(KeyError("boom"))
+    assert weird.code.startswith("E_INTERNAL-")
+    assert weird.code == describe(KeyError("boom")).code        # 同一个 bug 同一个码
+    assert weird.code != describe(KeyError("bang")).code
+    assert "错误码" in weird.message

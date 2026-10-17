@@ -1104,3 +1104,117 @@ a {
   background: #d1d5db;
   border-radius: 3px;
 }
+
+/* ────────────────────────────────────── 弹层（删除确认 / 回收站）
+   原型里没有弹层，这里是 P0 才加的：删除必须二次确认，回收站要能恢复。 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.modal-card {
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 20px 14px;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+}
+.modal-card.wide { width: 620px; }
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+.modal-body {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.modal-note {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.modal-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.modal-progress {
+  margin-top: 10px;
+  height: 3px;
+  background: var(--line-soft);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.modal-progress > div {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.1s linear;
+}
+.trash-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.trash-main { flex: 1; min-width: 0; }
+.trash-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trash-meta { font-size: 11px; color: var(--light); margin-top: 2px; }
+
+/* 阶段卡上的失败说明 / 自检 / 停滞提示 */
+.sg-error-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--danger);
+}
+.sg-error-detail {
+  margin-top: 6px;
+  padding: 8px;
+  max-height: 140px;
+  overflow: auto;
+  background: var(--line-soft);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.sg-check {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ok);
+}
+.sg-check.bad { color: var(--warn); }
+.sg-stagnant { color: var(--warn); }

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import shutil
@@ -35,6 +36,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from ..bootstrap import PROJECT_ROOT
+from ..fsutil import move_into, write_text_atomic
+from .errors import StageFailure, describe as describe_error
 
 #: 阶段顺序与显示名。界面上的两张卡就是这两个。
 PHASES = ("transcribe", "lyrics")
@@ -56,6 +59,21 @@ STAGE_TERMINAL = frozenset({"done", "failed", "cancelled", "skipped"})
 
 #: 保留的 SSE 事件条数上限。一个任务的解码事件可能上千条，全留着没意义。
 MAX_EVENTS = 4000
+
+#: 软删除的回收站（数据根下的 `.trash/`，点开头所以 `_load_existing` 不扫它）。
+#: 删除 = 把工程目录 `rename` 进去（同卷原子），用户感知和"删了"一样，但能恢复。
+TRASH_DIRNAME = ".trash"
+#: 回收站保留策略：超过这些就真删（`_purge_trash` 在启动与每次删除时跑）。
+TRASH_MAX_DAYS = 7.0
+TRASH_MAX_BYTES = 2 * 1024 ** 3
+
+#: 产物清单（`.webui/manifest.json`）：只有它列出的文件才是"当前这一版的结果"。
+MANIFEST_NAME = "manifest.json"
+
+#: 阶段级超时（秒）。`STALL` = 多久**没有任何进展**算卡死；`HARD` = 总时长上限。
+#: 实测：一首 4 分钟的歌 GPU 扒谱约 2~4 分钟、CPU 30~90 分钟——CPU 退路靠 HARD 兜。
+STALL_TIMEOUT = {"transcribe": 900.0, "lyrics": 600.0}
+HARD_TIMEOUT = {"transcribe": 7200.0, "lyrics": 3600.0}
 
 #: 允许上传的音频后缀。其余一律挡在上传阶段，别等 ffmpeg 报错。
 AUDIO_SUFFIXES = frozenset(
@@ -375,8 +393,24 @@ class StageRun:
     message: str = ""
     started_at: float | None = None
     finished_at: float | None = None
+    #: 最后一次"有进展"（step/progress/log 任一变化）的时刻，看门狗拿它判卡死。
+    last_advance_at: float | None = None
+    #: **人话**（横条上显示的那一句），不是异常原文——见 `errors.py`。
     error: str | None = None
+    #: 错误码 / 下一步 / 技术原文（`errors.describe()` 的四段，`error` 是第二段）。
+    error_code: str | None = None
+    error_action: str | None = None
+    error_detail: str | None = None
     detail: dict[str, Any] = field(default_factory=dict)   # 该阶段的产物统计
+
+    def fail(self, exc: BaseException) -> None:
+        """把一次异常落成"用户能看懂"的三段（调用方持有 `job.lock`）。"""
+        error = describe_error(exc, phase=self.key)
+        self.state = "failed"
+        self.error = error.message
+        self.error_code = error.code
+        self.error_action = error.action
+        self.error_detail = error.detail
 
     @property
     def elapsed_seconds(self) -> float:
@@ -395,8 +429,12 @@ class StageRun:
             "message": self.message,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "last_advance_at": self.last_advance_at,
             "elapsed_seconds": round(self.elapsed_seconds, 2),
             "error": self.error,
+            "error_code": self.error_code,
+            "error_action": self.error_action,
+            "error_detail": self.error_detail,
             "detail": self.detail,
         }
 
@@ -425,6 +463,10 @@ class Job:
     out_dir: Path
     created_at: float
     rev: int = 1
+    #: **产物版本戳**：每完成一轮阶段 +1（扒谱 +1、歌词 +1）。和 `rev` 分工不同——
+    #: `rev` 管"用户改了参数"（界面上显示 rev N），这里是"磁盘上这批产物是第几版"，
+    #: 所有派生产物的缓存键都带上它（zip / SVP / 波形），重跑之后缓存必然失效。
+    artifacts_rev: int = 0
     state: str = DRAFT_STATE
     stage: str | None = None                        # 当前正在跑的阶段 key
     plan: list[str] = field(default_factory=list)   # 待跑的阶段队列
@@ -461,6 +503,11 @@ class Job:
     @property
     def stems_dir(self) -> Path:
         return self.internal_dir / "stems"
+
+    @property
+    def manifest_path(self) -> Path:
+        """产物清单：`/files` 与 `/download` 只信它（见 `JobManager.write_manifest`）。"""
+        return self.internal_dir / MANIFEST_NAME
 
     # ---------------------------------------------------------------- 事件
     def emit(self, type_: str, **data: Any) -> Event:
@@ -500,6 +547,7 @@ class Job:
                 "name": self.name,
                 "audio": self.audio,
                 "rev": self.rev,
+                "artifacts_rev": self.artifacts_rev,
                 "state": self.state,
                 "stage": self.stage,
                 "stages": {key: run.as_dict() for key, run in self.stages.items()},
@@ -511,6 +559,12 @@ class Job:
                 "created_at": self.created_at,
                 "elapsed_seconds": round(self.elapsed_seconds, 2),
                 "error": next((s.error for s in self.stages.values() if s.error), None),
+                "error_code": next((s.error_code for s in self.stages.values()
+                                    if s.error_code), None),
+                "error_action": next((s.error_action for s in self.stages.values()
+                                      if s.error_action), None),
+                "error_detail": next((s.error_detail for s in self.stages.values()
+                                      if s.error_detail), None),
                 "warnings": list(self.warnings),
                 "files": list(self.files),
                 "stems": {kind: dict(info) for kind, info in self.stems.items()},
@@ -560,6 +614,7 @@ class Progress:
         with self.job.lock:
             changed = self.run.step != label
             self.run.step = label
+            self.run.last_advance_at = time.time()
             if fraction is not None:
                 self.run.progress = max(self.run.progress, fraction)
             progress = self.run.progress
@@ -571,6 +626,7 @@ class Progress:
         fraction = min(1.0, max(0.0, float(fraction)))
         with self.job.lock:
             self.run.progress = max(self.run.progress, fraction)
+            self.run.last_advance_at = time.time()
             if message is not None:
                 self.run.message = message
                 self.job.message = message
@@ -595,15 +651,55 @@ class Progress:
     def log(self, message: str, **extra: Any) -> None:
         with self.job.lock:
             self.job.message = message
+            self.run.last_advance_at = time.time()
         self.job.emit("log", phase=self.phase, message=message, **extra)
 
     def check(self) -> None:
+        """取消检查点。
+
+        用户点「停止」、或者看门狗判定这一阶段卡死/超时之后，`cancel_requested` 会被置上——
+        下一次回调进来就抛 :class:`JobCancelled`，把工作线程放出来（推理本身不能被打断，
+        但至少不会永远占着线程）。
+        """
         with self.job.lock:
             if self.job.cancel_requested:
-                raise JobCancelled("用户取消")
+                raise JobCancelled("用户取消" if self.run.error_code is None else self.run.error or "任务已中止")
 
 
 StageRunner = Callable[[Job, Progress], dict[str, Any]]
+
+
+@dataclass
+class _PhaseWatch:
+    """看门狗盯的一趟运行（G6）。
+
+    `fired` 一旦为真，说明这一阶段已经被判定失败（卡死/超时）——工作线程回来之后
+    **不许再把它改回 done**（那正是"进度条永远停在 62%"的另一面：看起来失败，实际成功了）。
+    """
+
+    job_id: str
+    phase: str
+    started_at: float
+    fired: bool = False
+
+
+def _per_phase(value: float | Mapping[str, float] | None,
+               defaults: Mapping[str, float]) -> dict[str, float]:
+    """超时参数：一个数 = 两个阶段都用它；一个映射 = 分别给。"""
+    if value is None:
+        return dict(defaults)
+    if isinstance(value, Mapping):
+        return {phase: float(value.get(phase, defaults[phase])) for phase in defaults}
+    return {phase: float(value) for phase in defaults}
+
+
+def _duration_text(seconds: float) -> str:
+    """秒 -> 人话（"35 秒" / "12 分钟" / "1.5 小时"），只用在超时提示里。"""
+    if seconds < 90:
+        return f"{seconds:.0f} 秒"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} 分钟"
+    return f"{seconds / 3600:.1f} 小时"
 
 
 # --------------------------------------------------------------------- 管理器
@@ -623,6 +719,12 @@ class JobManager:
         workers: int = 1,
         lock_params: bool = False,
         option_defaults: Mapping[str, Any] | None = None,
+        stall_timeout: float | Mapping[str, float] | None = None,
+        hard_timeout: float | Mapping[str, float] | None = None,
+        watchdog_interval: float = 1.0,
+        trash_max_days: float = TRASH_MAX_DAYS,
+        trash_max_bytes: float = TRASH_MAX_BYTES,
+        use_trash: bool = True,
     ) -> None:
         self.root = Path(root) if root is not None else PROJECT_ROOT / "tmp" / "webui"
         self.max_upload_mb = float(max_upload_mb)
@@ -640,10 +742,22 @@ class JobManager:
         self._lock = threading.RLock()
         self._bundle_lock = threading.Lock()
         self._stop = threading.Event()
+        #: 阶段守护（G6）：无进展超过 `stall_timeout` 或总时长超过 `hard_timeout`
+        #: 就把阶段判失败。测试里传一个很小的数就能验证（见 `test_watchdog_*`）。
+        self.stall_timeout = _per_phase(stall_timeout, STALL_TIMEOUT)
+        self.hard_timeout = _per_phase(hard_timeout, HARD_TIMEOUT)
+        self.watchdog_interval = max(0.05, float(watchdog_interval))
+        self._watch: dict[tuple[str, str], _PhaseWatch] = {}
+        self._watchdog: threading.Thread | None = None
+        #: 软删除（G2）：删除 = 挪进 `.trash/`，能恢复；`use_trash=False` 是硬删（测试用）
+        self.use_trash = bool(use_trash)
+        self.trash_max_days = float(trash_max_days)
+        self.trash_max_bytes = float(trash_max_bytes)
         self.root.mkdir(parents=True, exist_ok=True)
         # **重启不丢**：把 output/ 里已有的工程读回来（WebUI 建的读 job.json，
         # 命令行跑出来的当"只读产物"收进来）
         self._load_existing()
+        self._purge_trash()
 
     # ---------------------------------------------------------------- 启动恢复
     def _load_existing(self) -> None:
@@ -722,12 +836,16 @@ class JobManager:
             else:
                 run.state = state
                 run.error = saved.get("error")
+                run.error_code = saved.get("error_code")
+                run.error_action = saved.get("error_action")
+                run.error_detail = saved.get("error_detail")
         job.files = scan_files(root)
         job.highlights = meta.get("highlights")
         job.decisions = meta.get("decisions")
         job.summary = meta.get("summary")
         job.warnings = list(meta.get("warnings") or [])
         job.rev = int(meta.get("rev") or 1)
+        job.artifacts_rev = int(meta.get("artifacts_rev") or 0)
         interrupted = any(run.message.startswith("上次运行被中断")
                           for run in job.stages.values())
         job.state = DRAFT_STATE if interrupted else str(meta.get("state") or "done")
@@ -813,6 +931,10 @@ class JobManager:
                                           daemon=True)
                 thread.start()
                 self._threads.append(thread)
+            if self._watchdog is None:
+                self._watchdog = threading.Thread(target=self._watch_stages,
+                                                  name="sheetsage-watchdog", daemon=True)
+                self._watchdog.start()
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """请求停止；正在跑的阶段不会被粗暴中断。"""
@@ -822,6 +944,9 @@ class JobManager:
         for thread in self._threads:
             thread.join(timeout=timeout)
         self._threads.clear()
+        if self._watchdog is not None:
+            self._watchdog.join(timeout=timeout)
+            self._watchdog = None
 
     # ---------------------------------------------------------------- 查询
     def get(self, job_id: str) -> Job | None:
@@ -1134,16 +1259,20 @@ class JobManager:
     def bundle(self, job: Job) -> Path:
         """把 ``output/`` 打成一个 zip（懒生成，落盘缓存）。
 
+        缓存**跟着产物版本走**（G3）：`bundle.meta.json` 里记着打包时的 `artifacts_rev`，
+        重跑过（rev 变了）就一定重打，不会把上一版的结果发出去。
+
         打包含一把独立的锁：它跑在请求线程里，不能占用 ``job.lock``——那个锁还要给
         工作线程汇报进度，一个几百 MB 的产物目录会把进度卡住。
         """
         target = job.internal_dir / "bundle.zip"
-        if target.is_file():
-            return target
+        meta = job.internal_dir / "bundle.meta.json"
         with self._bundle_lock:
-            if target.is_file():                       # 等锁期间别人已经打好了
+            if target.is_file() and self._bundle_is_fresh(job, meta):
                 return target
-            files = scan_files(job.out_dir)
+            listed = self.manifest_files(job)
+            files = [item for item in scan_files(job.out_dir)
+                     if listed is None or item["path"] in listed]
             if not files:
                 raise FileNotFoundError("还没有产物可打包")
             job.internal_dir.mkdir(parents=True, exist_ok=True)
@@ -1152,9 +1281,244 @@ class JobManager:
                                  compresslevel=6) as zf:
                 for item in files:
                     path = job.out_dir / item["path"]
+                    if not path.is_file():          # 清单里列着但磁盘上没了：跳过
+                        continue
                     zf.write(path, arcname=f"{safe_name(job.name)}/{item['path']}")
             temp.replace(target)
+            try:
+                write_text_atomic(meta, json.dumps({
+                    "artifacts_rev": job.artifacts_rev,
+                    "files": len(files),
+                    "built_at": time.time(),
+                }, ensure_ascii=False))
+            except OSError:
+                pass
         return target
+
+    @staticmethod
+    def _bundle_is_fresh(job: Job, meta: Path) -> bool:
+        """缓存还认不认：版本戳一致 + 清单在 + 包里有东西。"""
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        try:
+            stamped = int(data.get("artifacts_rev", -1))
+        except (TypeError, ValueError):
+            return False
+        return stamped == job.artifacts_rev and int(data.get("files") or 0) > 0
+
+    # ---------------------------------------------------------------- 删除 / 回收站
+    @property
+    def trash_root(self) -> Path:
+        return self.root / TRASH_DIRNAME
+
+    def delete(self, job_id: str, *, permanent: bool = False) -> bool:
+        """删除工程。默认是**软删除**：目录 rename 进 `.trash/`，能恢复（G2）。
+
+        为什么不是直接 `rmtree`：删除按钮就在「下载 ▾」旁边，手指偏 20 像素就是几小时的
+        活全没（连原音频都一起没了）。`rename` 是原子的，用户感知和"删了"一样。
+
+        `output/` 里**本来就有的**产物不在这里删：那是命令行 / 别处跑出来的东西，
+        删它等于删用户的作品。
+        """
+        job = self.get(job_id)
+        if job is None:
+            return False
+        if job.imported:
+            raise ImportedProject(
+                f"{job.name} 是 output/ 里已有的产物，不能从这里删"
+                f"（要删请手动删目录 {job.root}）")
+        if job.state == "running":
+            raise RuntimeError("任务正在运行，请先取消")
+        with self._lock:
+            self._jobs.pop(job_id, None)
+            if job_id in self._order:
+                self._order.remove(job_id)
+        if permanent or not self.use_trash:
+            shutil.rmtree(job.root, ignore_errors=True)
+            return True
+        self.trash_root.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        entry = self.trash_root / f"{safe_name(job.name)}-{job.id}-{stamp}"
+        try:
+            move_into(job.root, entry)
+        except OSError:
+            # 挪不进回收站就别硬删：宁可报错让用户重试，也不能把东西弄丢
+            with self._lock:
+                self._jobs[job_id] = job
+                self._order.insert(0, job_id)
+            raise RuntimeError(f"删除失败：工程目录被占用（{job.root}），关掉相关程序再试")
+        self._purge_trash()
+        return True
+
+    def trash(self) -> list[dict[str, Any]]:
+        """回收站列表（新的在前）。每项就是一个被挪进来的工程目录。"""
+        if not self.trash_root.is_dir():
+            return []
+        entries: list[dict[str, Any]] = []
+        for entry in sorted(self.trash_root.iterdir(), reverse=True):
+            if not entry.is_dir():
+                continue
+            meta: dict[str, Any] = {}
+            try:
+                meta = json.loads((entry / "job.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                meta = {}
+            size = 0
+            for path in entry.rglob("*"):
+                try:
+                    if path.is_file():
+                        size += path.stat().st_size
+                except OSError:
+                    continue
+            stat = entry.stat()
+            entries.append({
+                "id": entry.name,
+                "name": str(meta.get("name") or entry.name),
+                "job_id": meta.get("id"),
+                "deleted_at": stat.st_mtime,
+                "size": size,
+                "files": len(meta.get("files") or []),
+            })
+        return entries
+
+    def restore(self, entry_id: str) -> Job | None:
+        """把回收站里的工程挪回 `output/`（重名就 `-2`），并重新登记。"""
+        source = self.trash_root / safe_name(entry_id)
+        if not source.is_dir() or TRASH_DIRNAME not in str(source):
+            return None
+        try:
+            meta = json.loads((source / "job.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        base = str(meta.get("name") or source.name)
+        target = unique_project_dir(self.root, project_folder_name(base))
+        move_into(source, target)
+        job = self._restore(target)
+        if job is None:
+            return None
+        with self._lock:
+            if job.id in self._jobs:                  # id 撞了（极少见）：挪个名字
+                job.id = f"{job.id}-{uuid.uuid4().hex[:4]}"
+            self._jobs[job.id] = job
+            self._order.insert(0, job.id)
+        job.emit("log", phase=None, message=f"已从回收站恢复：{job.name}")
+        self._write_metadata(job)
+        return job
+
+    def purge_from_trash(self, entry_id: str) -> bool:
+        """彻底删掉回收站里的一项（不可恢复）。"""
+        target = self.trash_root / safe_name(entry_id)
+        if not target.is_dir() or TRASH_DIRNAME not in str(target):
+            return False
+        shutil.rmtree(target, ignore_errors=True)
+        return True
+
+    def _purge_trash(self) -> None:
+        """回收站保留策略：超过 7 天、或总共超过 2GB，就真删最旧的。"""
+        if not self.trash_root.is_dir():
+            return
+        entries = []
+        for entry in self.trash_root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                entries.append((entry.stat().st_mtime, entry))
+            except OSError:
+                continue
+        entries.sort()
+        deadline = time.time() - self.trash_max_days * 86400.0
+        total = 0
+        sizes: list[tuple[float, int, Path]] = []
+        for mtime, entry in entries:
+            size = 0
+            for path in entry.rglob("*"):
+                try:
+                    if path.is_file():
+                        size += path.stat().st_size
+                except OSError:
+                    continue
+            sizes.append((mtime, size, entry))
+            total += size
+        for mtime, size, entry in sizes:
+            if mtime < deadline or total > self.trash_max_bytes:
+                shutil.rmtree(entry, ignore_errors=True)
+                total -= size
+
+    # ---------------------------------------------------------------- 看门狗
+    def _watch_begin(self, job: Job, phase: str) -> _PhaseWatch:
+        watch = _PhaseWatch(job.id, phase, time.time())
+        with self._lock:
+            self._watch[(job.id, phase)] = watch
+        return watch
+
+    def _watch_end(self, job: Job, phase: str) -> None:
+        with self._lock:
+            self._watch.pop((job.id, phase), None)
+
+    def _watch_stages(self) -> None:
+        """每秒扫一遍在跑的阶段：**无进展**太久或总时长超上限就判失败（G6）。
+
+        为什么要它：推理卡死（驱动/显存/cuBLAS）时一个进度回调都不会来，用户点「停止」
+        也没用（协作式取消要等下个检查点），界面就永远停在 62%。这里从**另一个线程**
+        判死并把 `cancel_requested` 置上，让工作线程在下个检查点退出、并把阶段标成
+        失败 + 人话（"卡住了 N 分钟没有进展"）。
+        """
+        while not self._stop.wait(self.watchdog_interval):
+            with self._lock:
+                watches = list(self._watch.values())
+            for watch in watches:
+                if watch.fired:
+                    continue
+                job = self.get(watch.job_id)
+                if job is None:
+                    continue
+                with job.lock:
+                    run = job.stages.get(watch.phase)
+                    if run is None or run.state != "running":
+                        continue
+                    now = time.time()
+                    started = run.started_at or watch.started_at
+                    last = run.last_advance_at or started
+                    idle = max(0.0, now - last)
+                    elapsed = max(0.0, now - started)
+                stall = self.stall_timeout.get(watch.phase, 0.0)
+                hard = self.hard_timeout.get(watch.phase, 0.0)
+                if stall and idle >= stall:
+                    self._abort_phase(
+                        watch, "E_STALLED",
+                        f"卡住了 {_duration_text(idle)}没有任何进展",
+                        f"最后一次进展 {_duration_text(idle)}前；"
+                        f"这一阶段已运行 {_duration_text(elapsed)}")
+                elif hard and elapsed >= hard:
+                    self._abort_phase(
+                        watch, "E_TIMEOUT",
+                        f"这一阶段跑了 {_duration_text(elapsed)}，超过上限",
+                        f"启动于 {_duration_text(elapsed)}前，最后一次进展 "
+                        f"{_duration_text(idle)}前")
+
+    def _abort_phase(self, watch: _PhaseWatch, code: str, message: str,
+                     detail: str = "") -> None:
+        """看门狗判死一个阶段：落失败态 → 发事件 → 让工作线程退出。"""
+        job = self.get(watch.job_id)
+        if job is None:
+            return
+        watch.fired = True
+        with job.lock:
+            run = job.stages.get(watch.phase)
+            if run is None or run.state != "running":
+                return
+            run.fail(StageFailure(code, message, detail=detail))
+            run.finished_at = time.time()
+            run.message = message
+            job.cancel_requested = True          # 让 runner 在下个检查点退出
+            job.stage = None
+            error = {"code": run.error_code, "message": run.error,
+                     "action": run.error_action, "detail": run.error_detail}
+        job.emit("phase_error", phase=watch.phase, **error)
+        job.emit("log", phase=watch.phase, message=f"已强制中止：{message}")
+        self._write_metadata(job)
 
     # ---------------------------------------------------------------- 工作线程
     def _work(self) -> None:
@@ -1171,7 +1535,7 @@ class JobManager:
             try:
                 self._run(job)
             except Exception as exc:  # 工作线程绝不能死掉
-                self._fail(job, f"内部错误：{type(exc).__name__}: {exc}")
+                self._fail(job, exc)
 
     def _next_phase(self, job: Job) -> str | None:
         with job.lock:
@@ -1203,8 +1567,17 @@ class JobManager:
         with job.lock:
             run.state = "running"
             run.started_at = time.time()
+            run.last_advance_at = run.started_at
             run.finished_at = None
+            run.error = None
+            run.error_code = None
+            run.error_action = None
+            run.error_detail = None
             job.stage = phase
+        # 这一阶段会重写产物：上一版的派生缓存（zip / SVP / 波形）一定过期了，
+        # 旧产物先挪进 `.webui/prev/`——`output/` 永远只表示"当前这一版"。
+        self._clean_derived(job)
+        self._quarantine_stage_outputs(job, phase)
         job.emit("phase", phase=phase, state="running", label=run.label)
         runner = self._runners.get(phase)
         if runner is None:
@@ -1213,38 +1586,200 @@ class JobManager:
             self.set_runners(default_runners())
             runner = self._runners[phase]
         progress = Progress(job, phase)
+        watch = self._watch_begin(job, phase)
         try:
             payload = runner(job, progress) or {}
         except JobCancelled:
-            with job.lock:
-                run.state = "cancelled"
-                run.finished_at = time.time()
-            job.emit("phase_cancelled", phase=phase, message="阶段已取消")
+            if not watch.fired:                 # 看门狗判过死就别覆盖它的失败态
+                with job.lock:
+                    run.state = "cancelled"
+                    run.finished_at = time.time()
+                job.emit("phase_cancelled", phase=phase, message="阶段已取消")
         except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"
-            with job.lock:
-                run.state = "failed"
-                run.error = message
-                run.finished_at = time.time()
-            job.emit("phase_error", phase=phase, message=message)
+            if not watch.fired:                 # 同上：卡死/超时的结论优先
+                with job.lock:
+                    run.fail(exc)
+                    run.finished_at = time.time()
+                    error = {"code": run.error_code, "message": run.error,
+                             "action": run.error_action, "detail": run.error_detail}
+                job.emit("phase_error", phase=phase, **error)
         else:
             detail = payload.get("detail") or {}
-            with job.lock:
-                run.state = "done"
-                run.progress = 1.0
-                run.finished_at = time.time()
-                run.detail.update(detail)
-            job.emit("phase_done", phase=phase, detail=run.detail)
+            if watch.fired:
+                # 判死之后 runner 才回来：保留失败态，但把这一轮的真实统计收下
+                with job.lock:
+                    run.detail.update(detail)
+            else:
+                self._settle_phase(job, phase, detail)
         finally:
+            self._watch_end(job, phase)
             with job.lock:
                 job.stage = None
             self._write_metadata(job)
 
+    # ---------------------------------------------------------------- 完成门禁
+    def _settle_phase(self, job: Job, phase: str, detail: Mapping[str, Any]) -> None:
+        """阶段收尾：**先体检产物，通过了才算 done**（G4）。"""
+        failure: StageFailure | None = None
+        with job.lock:
+            run = job.stages[phase]
+            run.detail.update(detail)
+            failure = self._completion_gate(job, phase, run.detail)
+            if failure is None:
+                run.state = "done"
+                run.progress = 1.0
+                run.finished_at = time.time()
+                # 产物换了一版：所有派生缓存（zip / SVP / peaks）都靠它失效
+                job.artifacts_rev += 1
+                error = None
+            else:
+                run.fail(failure)
+                run.finished_at = time.time()
+                error = {"code": run.error_code, "message": run.error,
+                         "action": run.error_action, "detail": run.error_detail}
+        if error is None:
+            job.emit("phase_done", phase=phase, detail=run.detail)
+            self._flush_prev(job)
+        else:
+            job.emit("phase_error", phase=phase, **error)
+        self.write_manifest(job)
+
+    def _completion_gate(self, job: Job, phase: str,
+                         detail: Mapping[str, Any]) -> StageFailure | None:
+        """"完成"的依据不是"runner 没抛异常"，而是**产物真的齐了**。
+
+        扒谱要 `project.json` / `report.json` / `summary.json` 都在、都可解析；
+        歌词要 `lyrics.json` 可解析且工程还在。runner 自己做的体检
+        （`detail["artifacts"]`）不通过也算失败——那是最细的一层（15 个文本 + 6 个 MIDI）。
+        """
+        report = detail.get("artifacts")
+        if isinstance(report, Mapping) and not report.get("ok", True):
+            missing = list(report.get("missing") or [])
+            problems = list(report.get("problems") or [])
+            text = "产物自检没通过"
+            if missing:
+                text += f"：缺 {len(missing)} 个文件（{', '.join(missing[:4])}"
+                text += " 等）" if len(missing) > 4 else "）"
+            elif problems:
+                text += f"：{problems[0]}"
+            return StageFailure(
+                "E_ARTIFACTS_INCOMPLETE", text,
+                "重跑这一阶段；如果反复出现，把诊断信息发给我",
+                "；".join(problems) or f"missing={missing}")
+
+        required = ("project.json", "report.json", "summary.json") \
+            if phase == "transcribe" else ("project.json", "lyrics.json")
+        missing = [name for name in required
+                   if not (job.out_dir / name).is_file()
+                   or (job.out_dir / name).stat().st_size == 0]
+        if missing:
+            return StageFailure(
+                "E_ARTIFACTS_INCOMPLETE", f"产物不完整：缺 {', '.join(missing)}",
+                "重跑这一阶段；如果反复出现，把诊断信息发给我",
+                f"{phase} 结束时缺 {missing}")
+        for name in required:
+            if not name.endswith(".json"):
+                continue
+            try:
+                json.loads((job.out_dir / name).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                return StageFailure(
+                    "E_ARTIFACTS_INCOMPLETE", f"{name} 读不出来（可能只写了一半）",
+                    "重跑这一阶段；如果反复出现，把诊断信息发给我",
+                    f"{name}: {type(exc).__name__}: {exc}")
+        return None
+
+    # ---------------------------------------------------------------- 产物版本
+    @staticmethod
+    def _derived_patterns() -> tuple[str, ...]:
+        return ("bundle.zip", "bundle.meta.json", "peaks-*.json")
+
+    def _clean_derived(self, job: Job) -> None:
+        """阶段开始前清掉上一版的派生缓存（它们都能重算，留着只会发旧货）。"""
+        internal = job.internal_dir
+        for pattern in self._derived_patterns():
+            for path in internal.glob(pattern):
+                path.unlink(missing_ok=True)
+        export = internal / "export"
+        if export.is_dir():
+            for path in export.glob("*.svp*"):
+                path.unlink(missing_ok=True)
+
+    def _quarantine_stage_outputs(self, job: Job, phase: str) -> None:
+        """把这阶段上一轮写的产物挪进 `.webui/prev/<rev>-<时间>/`。
+
+        重跑中途失败/取消时，`output/` 里不会出现"上一轮的歌词 + 这一轮的项目"这种
+        混搭；旧版本在 `prev/` 里还留了一份，跑成功之后再清掉（`_flush_prev`）。
+        """
+        from ..result import EXPECTED_MIDI, EXPECTED_TEXT
+
+        if phase == "transcribe":
+            # 重跑扒谱会连带作废歌词（音符位置变了），所以旧 `lyrics.json` 也一起挪走——
+            # 不然会留下"这一轮的新谱面 + 上一轮的旧歌词"这种混搭，下载包里也会带上旧歌词。
+            names: list[str] = (["project.json", "report.json", "summary.json", "lyrics.json"]
+                                + list(EXPECTED_TEXT) + list(EXPECTED_MIDI))
+        else:
+            names = ["lyrics.json"]
+        present = [name for name in names if (job.out_dir / name).is_file()]
+        if not present:
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = job.internal_dir / "prev" / f"{job.artifacts_rev:04d}-{stamp}"
+        for name in present:
+            try:
+                move_into(job.out_dir / name, target / name)
+            except OSError:
+                # 挪不动（被占用/权限）就算了：宁可留着旧文件，也不能把这一阶段搞挂
+                pass
+
+    @staticmethod
+    def _flush_prev(job: Job) -> None:
+        """阶段成功后清掉 `prev/`（旧版本已经没有用了）。"""
+        prev = job.internal_dir / "prev"
+        if prev.is_dir():
+            shutil.rmtree(prev, ignore_errors=True)
+
+    def manifest_files(self, job: Job) -> dict[str, Any] | None:
+        """读产物清单；没有就是 `None`（老工程 / 只读工程按目录扫描走）。"""
+        try:
+            data = json.loads(job.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        files = data.get("files")
+        return dict(files) if isinstance(files, dict) else None
+
+    def write_manifest(self, job: Job) -> None:
+        """落 `<工程>/.webui/manifest.json`：`/files` 与 `/download` 只信它。
+
+        这样"上一轮残留但这一轮没产出"的文件不会混进下载包——磁盘上留着是一回事，
+        当成这一版的结果发出去是另一回事。
+        """
+        if job.imported:
+            return
+        try:
+            with job.lock:
+                payload = {
+                    "artifacts_rev": job.artifacts_rev,
+                    "rev": job.rev,
+                    "updated_at": time.time(),
+                    "options": dict(job.options),
+                    "stages": {key: run.state for key, run in job.stages.items()},
+                    "files": {item["path"]: {"size": item["size"]}
+                              for item in scan_files(job.out_dir)},
+                }
+            write_text_atomic(job.manifest_path,
+                              json.dumps(payload, ensure_ascii=False, indent=2))
+        except OSError:
+            pass
+
+    # ---------------------------------------------------------------- 收尾
     def _finish(self, job: Job) -> None:
         """所有阶段都跑完（或停了）之后：汇总任务级状态 + 扫产物。"""
         with job.lock:
             states = [job.stages[phase].state for phase in PHASES]
-            if job.cancel_requested or "cancelled" in states:
+            if job.cancel_requested and "failed" not in states:
+                job.state = "cancelled"
+            elif "cancelled" in states:
                 job.state = "cancelled"
             elif "failed" in states:
                 job.state = "failed"
@@ -1256,12 +1791,20 @@ class JobManager:
             state = job.state
         payload = {"message": "全部完成" if state == "done" else "任务已结束", "state": state}
         job.emit(state if state != "failed" else "error", **payload)
+        self.write_manifest(job)
         self._write_metadata(job)
 
-    def _fail(self, job: Job, message: str) -> None:
+    def _fail(self, job: Job, exc: BaseException | str) -> None:
+        """工作线程兜底：连 `_run` 都炸了，至少给一句人话（不是异常类名）。"""
+        error = describe_error(exc) if isinstance(exc, BaseException) else None
         with job.lock:
             job.state = "failed"
-        job.emit("error", phase=job.stage, message=message)
+        payload: dict[str, Any] = {
+            "message": error.message if error else str(exc),
+        }
+        if error is not None:
+            payload.update(code=error.code, action=error.action, detail=error.detail)
+        job.emit("error", phase=job.stage, **payload)
         self._write_metadata(job)
 
     def _write_metadata(self, job: Job) -> None:
@@ -1270,9 +1813,10 @@ class JobManager:
         if job.imported:
             return
         try:
-            job.root.mkdir(parents=True, exist_ok=True)
-            (job.root / "job.json").write_text(
-                json.dumps(job.metadata(), ensure_ascii=False, indent=2), encoding="utf-8")
+            with job.lock:
+                payload = job.metadata()
+            write_text_atomic(job.root / "job.json",
+                              json.dumps(payload, ensure_ascii=False, indent=2))
         except OSError:
             # 元数据只是诊断用，写不进去不该影响任务本身
             pass

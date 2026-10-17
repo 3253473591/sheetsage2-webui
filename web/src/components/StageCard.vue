@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { ParamRow } from '@/params'
-import type { PhaseInfo, StageSnapshot } from '@/types'
+import type { ArtifactCheck, PhaseInfo, StageSnapshot } from '@/types'
 
-defineProps<{
+const props = defineProps<{
   order: number
   phase: PhaseInfo
   stage: StageSnapshot
@@ -25,10 +25,38 @@ const emit = defineEmits<{
 }>()
 
 const showParams = ref(true)
+const showErrorDetail = ref(false)
 
 function onSelect(key: string, event: Event): void {
   emit('option', key, (event.target as HTMLSelectElement).value)
 }
+
+/** 产物自检（G4）：`done` 旁边那个"自检 21/21"，有缺失时标黄。 */
+const check = computed<ArtifactCheck | null>(() => {
+  const raw = props.stage.detail?.artifacts
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Partial<ArtifactCheck>
+  if (typeof data.total !== 'number') return null
+  return {
+    ok: Boolean(data.ok),
+    checked: Number(data.checked ?? 0),
+    total: data.total,
+    missing: data.missing ?? [],
+    problems: data.problems ?? [],
+  }
+})
+
+/**
+ * "上次进展 xx 秒前"（G6）：心跳只证明 HTTP 连接活着，不证明任务在推进。
+ * 超过 60 秒没动静就标黄——那时候用户该怀疑是不是卡住了。
+ */
+const idleSeconds = computed(() => {
+  if (props.stage.state !== 'running') return 0
+  const last = props.stage.last_advance_at
+  if (!last) return 0
+  return Math.max(0, Date.now() / 1000 - last)
+})
+const stagnant = computed(() => idleSeconds.value >= 60)
 </script>
 
 <template>
@@ -51,7 +79,31 @@ function onSelect(key: string, event: Event): void {
       </span>
       <span v-if="stage.elapsed_seconds">
         {{ stage.state === 'running' ? '已用' : '用时' }} {{ stage.elapsed_seconds.toFixed(0) }}s
+        <template v-if="stage.state === 'running' && idleSeconds >= 5">
+          · <b :class="{ 'sg-stagnant': stagnant }">上次进展 {{ idleSeconds.toFixed(0) }}s 前</b>
+        </template>
       </span>
+    </div>
+
+    <!-- 失败时的"下一步"（人话，来自后端的错误码表；技术原文折叠起来） -->
+    <div v-if="stage.error_action" class="sg-error-action">
+      <span>下一步：{{ stage.error_action }}</span>
+      <button
+        v-if="stage.error_detail"
+        class="link"
+        @click="showErrorDetail = !showErrorDetail"
+      >
+        {{ showErrorDetail ? '收起详情' : '详情' }}
+      </button>
+    </div>
+    <pre v-if="showErrorDetail && stage.error_detail" class="sg-error-detail">{{ stage.error_detail }}</pre>
+
+    <div v-if="check" class="sg-check" :class="{ bad: !check.ok }" :title="check.problems.join('\n')">
+      自检 {{ check.checked }}/{{ check.total }}
+      <template v-if="!check.ok && check.missing.length">
+        · 缺 {{ check.missing.slice(0, 3).join('、') }}{{ check.missing.length > 3 ? ' 等' : '' }}
+      </template>
+      <template v-else-if="check.ok">通过</template>
     </div>
 
     <div class="params" :class="{ collapsed: !showParams }">

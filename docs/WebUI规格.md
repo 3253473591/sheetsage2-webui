@@ -300,7 +300,7 @@ structure.lab（模型原始产物，不动）
 | POST | `/api/jobs` | multipart `file`；`plan` 可选。**默认一个阶段都不排**（建完停在 `draft`） |
 | GET | `/api/jobs/{id}` | 工程快照（两个阶段 + **参数** + 产物清单 + highlights） |
 | POST | `/api/jobs/{id}/cancel` | 请求取消，下一检查点生效 |
-| DELETE | `/api/jobs/{id}` | 删除工程与产物；运行中 409 |
+| DELETE | `/api/jobs/{id}` | 删除工程。**默认软删除**（目录挪进 `.trash/`，7 天内可恢复）；`?permanent=true` 才是真删。运行中 409 |
 | POST | `/api/jobs/{id}/stages/{phase}` | 单独（重）跑一个阶段；歌词需先有扒谱（否则 409） |
 | POST | `/api/jobs/{id}/chain` | 「自动提取」扒谱 → 歌词一条龙（不受那道门限制） |
 | PATCH | `/api/jobs/{id}/options` | 改参数（精度/设备/范围/量化/模型/音源/语言）；见 §3 的取值表 |
@@ -317,16 +317,29 @@ structure.lab（模型原始产物，不动）
 | GET | `/api/jobs/{id}/files/{path}` | 单个产物 |
 | GET | `/api/jobs/{id}/download` | 下载：默认整包 zip；`?kind=svp&parts=vocal,instrumental,chords` 导 **SVP 工程** |
 | GET | `/api/jobs/{id}/exports` | 导出弹窗的数据源：哪几组能导 / 各多少音 / 占几轨 / 默认勾哪个 |
+| GET | `/api/trash` | 回收站列表（软删除的工程：`id` / `name` / `deleted_at` / `size` / `files`） |
+| POST | `/api/trash/{entry}/restore` | 从回收站恢复（目录挪回 `output/`，返回恢复后的快照） |
+| DELETE | `/api/trash/{entry}` | 彻底删除回收站里的一项（不可恢复） |
+
+下载类响应（`/download`、`/files/{path}`）带 `X-Artifact-Rev` 头 = 工程的**产物版本戳**：
+重跑过阶段之后它一定变大，据此能判断手里的文件是不是最新那一版。
 
 错误一律是 `{"detail": "人话"}`：后缀不支持 400、超限 400、空文件 400、参数越界 400、
 工程不存在 404、运行中删除 409、阶段正在跑时改参数 409、4G 特供锁定时改参数 409、
 Range 越界 416。
+
+**阶段失败**不再只给一句异常原文：快照与 SSE 里同时有
+`error`（人话）/ `error_code`（`E_DISK_FULL` 这类稳定码）/ `error_action`（下一步）/
+`error_detail`（技术原文）。码表与判定见 `src/sheetsage2_webui/webui/errors.py`。
+`done` 也不再等于"runner 没抛异常"：产物自检（`detail.artifacts`）不通过就落 `failed`
+（`E_ARTIFACTS_INCOMPLETE`），见 `docs/健壮性保障评估.md` 的 G4/G7。
 
 ### 快照里的阶段
 
 ```jsonc
 {
   "id": "99f533bcf535", "name": "凤凰传奇 - 光芒-45s", "rev": 1, "state": "done",
+  "artifacts_rev": 2,                  // 产物版本戳：每完成一轮阶段 +1（派生缓存都靠它失效）
   "stage": null,                       // 当前正在跑的阶段（没跑就是 null）
   "options": {                         // 页面上可调的参数（`/api/env.params` 是取值表）
     "dtype": "bf16", "device": "auto", "range": "full", "quantize": "grid",
@@ -335,8 +348,13 @@ Range 越界 416。
   "stages": {
     "transcribe": {"key": "transcribe", "label": "扒谱", "state": "done", "progress": 1.0,
                    "step": "整理产物", "elapsed_seconds": 23.07, "error": null,
+                   "error_code": null, "error_action": null, "error_detail": null,
+                   "last_advance_at": 1792223158.07,
                    "detail": {"dtype": "bf16", "device": "cuda", "range": "full",
-                              "quantize": "三十二分", "notes": {"...": 0}}},
+                              "quantize": "三十二分", "notes": {"...": 0},
+                              // 产物自检（完成门禁）：不通过就不会是 done
+                              "artifacts": {"ok": true, "checked": 21, "total": 21,
+                                            "missing": [], "problems": []}}},
     "lyrics":     {"key": "lyrics", "label": "歌词识别", "state": "done", "progress": 1.0,
                    "step": "写入卷帘", "elapsed_seconds": 14.84,
                    "detail": {"chars": 34, "lines": 3, "assigned": 34, "absorbed": 5,
@@ -347,6 +365,9 @@ Range 越界 416。
   "files": [ {"path": "project.json", "size": 100243, "kind": "data"} ]
 }
 ```
+
+`last_advance_at` 是"最后一次有进展"的时刻：看门狗拿它判卡死，界面拿它显示
+"上次进展 xx 秒前"（超过 60 秒标黄）。
 
 ### SSE
 

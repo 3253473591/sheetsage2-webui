@@ -41,12 +41,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 from .bootstrap import PROJECT_ROOT
+from .fsutil import write_text_atomic
 from .octave import OctavePlan, OctaveStats
 from .octave import plan_from_labs as _octave_plan_from_labs
 from .octave import track_of_name as _track_of_name
@@ -144,7 +146,7 @@ def shift_lab_text(text: str, semitones: int) -> tuple[str, int]:
 def _shift_lab_file(path: Path, semitones: int) -> int:
     text, moved = shift_lab_text(path.read_text(encoding="utf-8", errors="replace"),
                                  semitones)
-    path.write_text(text, encoding="utf-8")
+    write_text_atomic(path, text)
     return moved
 
 
@@ -176,7 +178,10 @@ def shift_midi_file(path: Path, semitones: int, *,
             local = plan.shift_for(float(note.start), track) if plan else 0
             note.pitch = max(0, min(127, int(note.pitch) + semitones + local))
             moved += 1
-    midi.write(str(path))
+    # 原子写：写到同目录临时文件再 os.replace（G5）
+    temp = path.with_name(f".{path.name}.part")
+    midi.write(str(temp))
+    os.replace(temp, path)
     return moved, kept
 
 
@@ -292,7 +297,7 @@ def apply(result: Mapping[str, Any], out_dir: str | Path, *,
         stats.labs[f"{name}.lab"] = moved + local
         path = out / f"{name}.lab"
         if path.is_file():                            # 模型没写过就别凭空造产物
-            path.write_text(shifted, encoding="utf-8")
+            write_text_atomic(path, shifted)
     updated["labs"] = labs
 
     # MIDI：只含旋律的直接平移；混合 MIDI 跳过和弦轨
@@ -324,13 +329,12 @@ def apply(result: Mapping[str, Any], out_dir: str | Path, *,
         updated["playback"] = shifted_playback
         stats.playback_notes = moved
         if playback_path.is_file():
-            playback_path.write_text(
-                json.dumps(shifted_playback, indent=2), encoding="utf-8")
+            write_text_atomic(playback_path, json.dumps(shifted_playback, indent=2))
 
     # score.abc：旋律 MIDI 已经平移过，这里重建
     abc_text, error = rebuild_abc(out)
     if abc_text is not None:
-        (out / "score.abc").write_text(abc_text, encoding="utf-8")
+        write_text_atomic(out / "score.abc", abc_text)
         updated["abc"] = abc_text
         stats.abc = "rebuilt"
     else:

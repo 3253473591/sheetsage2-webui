@@ -27,8 +27,10 @@ from typing import Any, Callable, Mapping, Sequence
 from ..asr import (AsrConfig, AsrEngine, normalize_language, parsed_sections,
                    sections_from_lab)
 from ..engine import EngineConfig, SheetSage2Engine
+from ..fsutil import write_text_atomic
 from ..lyrics import DEFAULT_TOLERANCE, fill_project
 from ..pipeline import run as pipeline_run
+from ..result import EXPECTED_MIDI, EXPECTED_TEXT, inspect_output_dir
 from ..sections import is_instrumental
 from ..timeline import PPQ
 from .jobs import (PHASE_LABELS, Job, Progress, StageRunner, asr_model_label)
@@ -376,6 +378,13 @@ class RunnerSession:
         payload["highlights"] = build_highlights(payload)
         _store_highlights(job, payload, progress)
         grid = (payload.get("highlights") or {}).get("quantize") or {}
+        # **完成门禁**（G4）：跑完不等于成功。`result.inspect_output_dir` 是 CLI 一直在用
+        # 的那套体检（15 个文本产物 + 6 个 MIDI 的完整性/自洽性），WebUI 以前从不调用，
+        # 于是半成品也被标成 ✅。这里跑一次，结果交给 `JobManager._settle_phase` 判定。
+        artifacts = inspect_artifacts(job.out_dir,
+                                      (payload.get("summary") or {}).get("duration_seconds"))
+        if not artifacts["ok"]:
+            progress.log("产物自检没通过：" + "；".join(artifacts["problems"][:3]))
         return {"detail": {
             "dtype": engine.effective_dtype,
             "device": engine.device,
@@ -385,6 +394,7 @@ class RunnerSession:
             "notes": (payload.get("highlights") or {}).get("notes") or {},
             "warnings": list(payload.get("warnings") or []),
             "files": len(payload.get("files") or []),
+            "artifacts": artifacts,
         }}
 
     # ---------------------------------------------------------------- 歌词
@@ -473,9 +483,8 @@ class RunnerSession:
 
         progress.step(*LYRIC_WRITE)
         lines = group_lyric_lines(run.chars)
-        project_path.write_text(json.dumps(project, ensure_ascii=False, indent=2),
-                                encoding="utf-8")
-        (job.out_dir / "lyrics.json").write_text(json.dumps({
+        write_text_atomic(project_path, json.dumps(project, ensure_ascii=False, indent=2))
+        write_text_atomic(job.out_dir / "lyrics.json", json.dumps({
             "text": run.text, "fill": result["fill"], "lines": lines,
             "chars": [c.as_dict() for c in run.chars],
             "source": source, "source_file": source_file,
@@ -488,11 +497,15 @@ class RunnerSession:
             "text_coverage": round(run.text_coverage, 4),
             "elapsed_seconds": round(run.elapsed_seconds, 2),
             "warnings": list(run.warnings),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        }, ensure_ascii=False, indent=2))
 
         fill = result["fill"]
         progress.set(0.99, f"挂字 {fill['assigned']} · 转音 {fill['melisma']} · "
                            f"没分到字 {fill['unmatched_notes']}")
+        artifacts = _lyrics_artifacts(job)
+        if not artifacts["ok"]:
+            progress.log("歌词产物自检没通过：" + "；".join(artifacts["problems"][:3])
+                         if artifacts["problems"] else "歌词产物不完整")
         detail = {
             "source": source, "source_file": source_file,
             "asr_model": Path(str(asr_config.asr_model)).name,
@@ -508,6 +521,7 @@ class RunnerSession:
             "unmatched_notes": fill["unmatched_notes"],
             "text_coverage": round(run.text_coverage, 4),
             "warnings": list(run.warnings),
+            "artifacts": artifacts,
         }
         progress.detail(**detail)
         return {"detail": detail}
@@ -530,6 +544,48 @@ def default_runners(**options: Any) -> dict[str, StageRunner]:
     """给 `JobManager` 用的默认实现（进程内只建一次会话）。"""
     session = options.pop("session", None) or RunnerSession(**options)
     return session.runners()
+
+
+def inspect_artifacts(directory: str | Path,
+                      duration_seconds: float | None = None) -> dict[str, Any]:
+    """扒谱产物自检 -> 阶段详情里的 `artifacts`（G4 的"完成门禁"数据源）。
+
+    `result.inspect_output_dir` 是 CLI 一直在用的那套体检（15 个文本 + 6 个 MIDI 的
+    完整性/自洽性）。WebUI 以前**从不调用**，`summary["artifacts_ok"]` 是硬编码的 True，
+    于是"模型吐了半套产物但没报错"也会被标成 ✅ 完成。
+    """
+    report = inspect_output_dir(directory, duration_seconds)
+    total = len(EXPECTED_TEXT) + len(EXPECTED_MIDI)
+    return {
+        "ok": bool(report.ok),
+        "checked": total - len(report.missing),
+        "total": total,
+        "missing": list(report.missing),
+        "problems": list(report.problems),
+    }
+
+
+def _lyrics_artifacts(job: Job) -> dict[str, Any]:
+    """歌词阶段的产物自检：`project.json` 与 `lyrics.json` 都得在、都能解析。"""
+    required = ("project.json", "lyrics.json")
+    missing: list[str] = []
+    problems: list[str] = []
+    for name in required:
+        path = job.out_dir / name
+        if not path.is_file() or path.stat().st_size == 0:
+            missing.append(name)
+            continue
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            problems.append(f"{name} 解析失败：{exc}")
+    return {
+        "ok": not missing and not problems,
+        "checked": len(required) - len(missing),
+        "total": len(required),
+        "missing": missing,
+        "problems": problems,
+    }
 
 
 def _sections_for(job: Job, project: Mapping[str, Any], *, max_seconds: float,

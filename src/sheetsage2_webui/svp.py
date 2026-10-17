@@ -550,13 +550,18 @@ def build_svp(
     return payload, stats
 
 
-def cache_key(parts: Sequence[str], version: str, options: Mapping[str, Any]) -> str:
+def cache_key(parts: Sequence[str], version: str, options: Mapping[str, Any],
+              rev: int = 0) -> str:
     """同一个选择复用同一份 `.svp`（文件落在工程根目录的 `export/` 下）。
 
     键里带 `EXPORT_REVISION`：改了编码逻辑（比如"拍号只写变化点"）就让老缓存作废，
     不然已经导出过的工程会一直发旧文件。
+
+    键里还带 `rev`（工程的**产物版本戳** `Job.artifacts_rev`）：重跑过扒谱/歌词之后，
+    即使导出选择一模一样，也必须重新生成——不然用户拖进 SynthV 的会是上一版结果。
     """
     raw = json.dumps({"parts": list(parts), "version": version, "rev": EXPORT_REVISION,
+                      "artifacts_rev": int(rev),
                       "language": options.get("language") or ""},
                      ensure_ascii=False, sort_keys=True)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]

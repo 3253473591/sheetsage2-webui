@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .engine import EngineConfig, SheetSage2Engine
+from .fsutil import write_text_atomic
 from .pitch import DEFAULT_SEMITONES as PITCH_SEMITONES
 from .pitch import apply as apply_pitch_shift, warnings_for as pitch_warnings
 from .quantize import (
@@ -30,7 +31,8 @@ from .quantize import (
     note_shift_seconds,
     quantize_tracks,
 )
-from .result import beat_times_from_labs, parse_lab_text, summarize_result
+from .result import (EXPECTED_MIDI, EXPECTED_TEXT, beat_times_from_labs, parse_lab_text,
+                     summarize_result)
 from .sections import canonical_label, merge_consecutive
 from .tempo import (
     abc_meter,
@@ -417,7 +419,6 @@ def run(
     }
 
     summary = summarize_result(result, engine.device, engine._effective_dtype()).as_dict()
-    summary["artifacts_ok"] = True
 
     report = {
         "decisions": decisions.as_dict(),
@@ -440,12 +441,24 @@ def run(
 
     files: list[str] = []
     if write:
-        (out / "project.json").write_text(
-            json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
-        (out / "report.json").write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        (out / "summary.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 原子写（G5）：先写同目录 `.part` 再 `os.replace`。进程在写 JSON 时被杀，
+        # 磁盘上要么是旧文件、要么是新文件，不会有"半截 project.json"让 /lanes 500。
+        write_text_atomic(out / "project.json", json.dumps(project, ensure_ascii=False,
+                                                           indent=2))
+        write_text_atomic(out / "report.json", json.dumps(report, ensure_ascii=False,
+                                                          indent=2))
+
+    # 产物自检（G4）：这里只做**便宜**的检查（必需文件在不在、是不是空文件）。
+    # 完整的自洽性体检在 `result.inspect_output_dir`，WebUI 的 runner 会再跑一次并把
+    # 结果放进阶段详情；以前这里硬编码 `artifacts_ok = True`，等于"完成"不设门禁。
+    missing = [name for name in (*EXPECTED_TEXT, *EXPECTED_MIDI)
+               if not (out / name).is_file() or (out / name).stat().st_size == 0]
+    summary["artifacts_ok"] = not missing
+    summary["artifacts_missing"] = missing
+
+    if write:
+        write_text_atomic(out / "summary.json", json.dumps(summary, ensure_ascii=False,
+                                                          indent=2))
         files = sorted(str(p.relative_to(out)).replace("\\", "/")
                        for p in out.rglob("*") if p.is_file())
 

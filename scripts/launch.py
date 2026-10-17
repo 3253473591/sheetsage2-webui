@@ -27,6 +27,24 @@ PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 STATIC = ROOT / "src" / "sheetsage2_webui" / "webui" / "static" / "index.html"
 DEFAULT_PORT = 8000
 
+#: 单实例锁的实现放在包里（`webui.bat` 只是壳，逻辑都在 Python 里）。
+#:
+#: 这里**按文件路径加载**，不走 `import sheetsage2_webui.webui.singleton`：包的
+#: `__init__` 会导入 torch 与模型层（那是给服务用的），启动器只需要一个文件锁，
+#: 没必要为它等十几秒、也不该因为缺 torch 就起不来。
+SINGLETON_PATH = ROOT / "src" / "sheetsage2_webui" / "webui" / "singleton.py"
+
+
+def load_singleton():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sheetsage2_singleton", SINGLETON_PATH)
+    if spec is None or spec.loader is None:          # pragma: no cover - 打包缺文件才会
+        raise ImportError(f"找不到 {SINGLETON_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 #: 模式 -> (说明, 透传给服务的参数)
 #:
 #: 只留两个：**默认**（页面上自己选参数）和 **4G 特供**（服务端把显存预算和参数一起定死）。
@@ -153,6 +171,43 @@ def open_browser_later(url: str) -> None:
     threading.Timer(4.0, open_it).start()
 
 
+def data_root_for_lock() -> Path:
+    """锁放在数据根里（和服务用的那个是同一个目录）。"""
+    override = os.environ.get("SHEETSAGE_WEBUI_DATA")
+    return Path(override) if override else ROOT / "output"
+
+
+def stop_if_already_running() -> int | None:
+    """已经有一个实例在跑就别起第二个（G1）。
+
+    返回退出码表示"这次不用起了"，`None` 表示可以继续。锁由**子进程**（服务）持有——
+    这里只探一下活，探到了就把浏览器指向它，正好对上"第一次双击没反应，再双击一次"
+    这个小白的常见操作。
+    """
+    singleton = load_singleton()
+    lock = singleton.InstanceLock(data_root_for_lock())
+    if lock.try_acquire():
+        lock.release()                       # 探活用，真正的锁在服务进程里
+        return None
+    info = lock.read_info()
+    url = str(info.get("url") or "")
+    print()
+    print("  已经有一个 SheetSage2 Studio 在跑了，这次不再启动第二个。")
+    if url:
+        print(f"  正在跑的那个：{url}"
+              + (f"（PID {info.get('pid')}）" if info.get("pid") else ""))
+        print("  想重启就先关掉那个窗口（或结束那个进程），再双击一次。")
+        if os.environ.get("SHEETSAGE_NO_BROWSER") != "1":
+            try:
+                webbrowser.open(url)
+            except Exception:                # noqa: BLE001 - 开不了浏览器不影响提示
+                pass
+    else:
+        print(f"  它的地址还没写进锁文件：{lock.path}")
+        print("  可以先在任务管理器里结束上一个 python 进程，再重试。")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     use_utf8_stdio()
     os.chdir(ROOT)
@@ -164,6 +219,11 @@ def main(argv: list[str]) -> int:
     print()
     print("  SheetSage2 Studio")
     print("  " + "-" * 56)
+
+    # 先挡双开：已经有一个在跑就别再起一个（也别白跑一次 npm build）
+    already = stop_if_already_running()
+    if already is not None:
+        return already
 
     print(f"  [1/3] 解释器 OK        {PYTHON.relative_to(ROOT)}")
     if not ensure_frontend():

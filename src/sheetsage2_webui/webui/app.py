@@ -32,7 +32,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Mapping
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
@@ -130,12 +130,17 @@ def create_app(
     workers: int = 1,
     manager: JobManager | None = None,
     lock_params: bool = False,
+    stall_timeout: float | Mapping[str, float] | None = None,
+    hard_timeout: float | Mapping[str, float] | None = None,
+    watchdog_interval: float = 1.0,
+    use_trash: bool = True,
 ) -> FastAPI:
     """构造应用。
 
     - 生产：不传 `runners`，内部建一个 `RunnerSession`（两个阶段 + 两个模型持有者）
     - 测试：`runners={"transcribe": 假函数, "lyrics": 假函数}`，不碰模型
     - `lock_params=True`（「4G 特供」）：参数由服务端锁死，`PATCH /options` 一律 409
+    - `stall_timeout` / `hard_timeout`：阶段守护的阈值（测试里传个很小的数就能验）
     """
     if session is None and runners is None:
         session = RunnerSession()
@@ -150,7 +155,9 @@ def create_app(
     if manager is None:
         manager = JobManager(data_root or DEFAULT_DATA_ROOT, runners=runners,
                              max_upload_mb=max_upload_mb, workers=workers,
-                             lock_params=lock_params, option_defaults=defaults)
+                             lock_params=lock_params, option_defaults=defaults,
+                             stall_timeout=stall_timeout, hard_timeout=hard_timeout,
+                             watchdog_interval=watchdog_interval, use_trash=use_trash)
     static_ready = (STATIC_DIR / "index.html").is_file()
 
     @asynccontextmanager
@@ -249,13 +256,35 @@ def create_app(
         return job.snapshot()
 
     @app.delete("/api/jobs/{job_id}")
-    async def delete_job(job_id: str) -> dict[str, Any]:
+    async def delete_job(job_id: str, permanent: bool = False) -> dict[str, Any]:
+        """删除工程。默认进**回收站**（能恢复）；`?permanent=true` 才是真删。"""
         _require(job_id)
         try:
-            manager.delete(job_id)
+            manager.delete(job_id, permanent=permanent)
+        except ImportedProject as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"deleted": job_id}
+        return {"deleted": job_id, "permanent": bool(permanent)}
+
+    # ------------------------------------------------------------------ 回收站
+    @app.get("/api/trash")
+    async def list_trash() -> dict[str, Any]:
+        """回收站：被删掉的工程（`.trash/` 下的目录）。"""
+        return {"entries": await run_in_threadpool(manager.trash)}
+
+    @app.post("/api/trash/{entry_id}/restore")
+    async def restore_from_trash(entry_id: str) -> dict[str, Any]:
+        job = await run_in_threadpool(manager.restore, entry_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="回收站里没有这一项")
+        return job.snapshot()
+
+    @app.delete("/api/trash/{entry_id}")
+    async def purge_from_trash(entry_id: str) -> dict[str, Any]:
+        if not manager.purge_from_trash(entry_id):
+            raise HTTPException(status_code=404, detail="回收站里没有这一项")
+        return {"purged": entry_id}
 
     @app.post("/api/jobs/{job_id}/stages/{phase}")
     async def run_stage(job_id: str, phase: str) -> dict[str, Any]:
@@ -462,7 +491,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="没有这个产物")
         if is_internal(path):                      # job.json / .webui/ 是内部文件，不对外
             raise HTTPException(status_code=404, detail="没有这个产物")
-        return FileResponse(target, filename=target.name)
+        listed = manager.manifest_files(job)
+        if listed is not None and path.replace("\\", "/") not in listed and not job.imported:
+            # 清单之外的文件是别的版本留下的：能留在磁盘上，但不能当这一版发出去
+            raise HTTPException(status_code=404, detail="这个产物不属于当前这一版结果")
+        return FileResponse(target, filename=target.name,
+                            headers={"X-Artifact-Rev": str(job.artifacts_rev)})
 
     @app.get("/api/jobs/{job_id}/download")
     async def download_bundle(job_id: str, kind: str = "zip",
@@ -480,7 +514,8 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         name = f"{job.name or 'sheetsage2'}-{job.id}.zip"
-        return FileResponse(bundle, filename=name, media_type="application/zip")
+        return FileResponse(bundle, filename=name, media_type="application/zip",
+                            headers={"X-Artifact-Rev": str(job.artifacts_rev)})
 
     @app.get("/api/jobs/{job_id}/exports")
     async def export_options(job_id: str) -> dict[str, Any]:
@@ -510,7 +545,10 @@ def create_app(
             raise HTTPException(status_code=400,
                                 detail=f"未知的导出内容 {unknown}；可选 {list(SVP_PARTS)}")
         options = dict(job.options)
-        target = export_path(job.internal_dir, cache_key(wanted, SVP_VERSION, options))
+        # 缓存键带上**产物版本戳**：重跑过就一定重新生成，不会把上一版发出去（G3）
+        target = export_path(job.internal_dir,
+                             cache_key(wanted, SVP_VERSION, options,
+                                       rev=job.artifacts_rev))
         if not target.is_file():
             try:
                 payload, svp_stats = await run_in_threadpool(
@@ -531,7 +569,8 @@ def create_app(
                 job.emit("log", phase=None, message=f"导出 SVP：{warning}")
         name = f"{safe_name(job.name or 'sheetsage2')}.svp"
         return FileResponse(target, filename=name,
-                            media_type="application/octet-stream")
+                            media_type="application/octet-stream",
+                            headers={"X-Artifact-Rev": str(job.artifacts_rev)})
 
     # ------------------------------------------------------------------ 前端
     @app.get("/favicon.ico", include_in_schema=False)

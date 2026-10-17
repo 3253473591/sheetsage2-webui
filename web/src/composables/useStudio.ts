@@ -21,6 +21,7 @@ import type {
   LyricLine,
   Peaks,
   PhaseKey,
+  TrashEntry,
 } from '@/types'
 import { TERMINAL_STATES } from '@/types'
 import { splitDroppedFiles } from '@/drop'
@@ -48,6 +49,8 @@ export function useStudio() {
   const streamedLyrics = ref<LyricLine[]>([])
   const logs = ref<LogLine[]>([])
   const error = ref<string | null>(null)
+  /** 回收站（G2）：软删除的工程，能恢复。 */
+  const trash = ref<TrashEntry[]>([])
   const uploadProgress = ref<number | null>(null)
   const lanesLoading = ref(false)
 
@@ -389,9 +392,10 @@ export function useStudio() {
     }
   }
 
-  async function remove(id: string): Promise<void> {
+  /** 删除工程。默认软删除（进回收站，7 天内可恢复）；`permanent=true` 才是真删。 */
+  async function remove(id: string, permanent = false): Promise<void> {
     try {
-      await api.deleteJob(id)
+      await api.deleteJob(id, permanent)
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
       return
@@ -403,6 +407,39 @@ export function useStudio() {
       lanes.value = null
       peaks.value = null
       logs.value = []
+    }
+  }
+
+  // ---------------------------------------------------------------- 回收站（G2）
+  async function loadTrash(): Promise<void> {
+    try {
+      trash.value = await api.fetchTrash()
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  /** 从回收站恢复一个工程：恢复完直接选中它（用户下一步通常就是看结果）。 */
+  async function restoreTrash(entryId: string): Promise<void> {
+    error.value = null
+    try {
+      const job = await api.restoreTrash(entryId)
+      upsert(job)
+      await select(job.id)
+      await loadTrash()
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  /** 彻底删除回收站里的一项（不可恢复）。 */
+  async function purgeTrash(entryId: string): Promise<void> {
+    error.value = null
+    try {
+      await api.purgeTrash(entryId)
+      await loadTrash()
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
     }
   }
 
@@ -447,6 +484,10 @@ export function useStudio() {
     detachStem,
     setOptions,
     remove,
+    trash,
+    loadTrash,
+    restoreTrash,
+    purgeTrash,
     reset,
     dismissError: () => {
       error.value = null

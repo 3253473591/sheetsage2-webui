@@ -1,4 +1,4 @@
-# WebUI 问题清单
+﻿# WebUI 问题清单
 
 > **这份文档专门装 WebUI 的问题与改进**：发现一个记一个，修完标 ✅ 并写清根因、证据、
 > 改了哪些文件。**不要再往 [`交接-下一次对话.md`](交接-下一次对话.md) 里加条目**——
@@ -19,6 +19,13 @@
 | 5 | [SVP 下载 500：`NotesOverlappedError`](#5-svp-下载-500notesoverlappederror-) | ✅ 已修（端点换算 + 同轨去叠音） | 导出 SVP |
 | 6 | [个别段落低一个八度](#6-个别段落低一个八度-) | ✅ 已修（重复段八度一致性校正） | 扒谱 / 音高 |
 | 7 | [没分到字的音被填成『啦』](#7-没分到字的音被填成啦-) | ✅ 已修（无缝就写延音） | 歌词 / 导出 SVP |
+| 8 | [双击两次 `webui.bat` 会起两个服务](#8-双击两次-webuibat-会起两个服务-) | ✅ 已修（单实例锁） | 启动 / 并发 |
+| 9 | [删除按钮单击即删，误删不可恢复](#9-删除按钮单击即删误删不可恢复-) | ✅ 已修（确认弹层 + 回收站） | 数据安全 |
+| 10 | [重跑之后下载到的还是上一版](#10-重跑之后下载到的还是上一版-) | ✅ 已修（产物版本戳） | WebUI / 缓存 |
+| 11 | [半成品也会被标成完成](#11-半成品也会被标成完成-) | ✅ 已修（完成门禁） | WebUI / 状态 |
+| 12 | [写盘不是原子的，中断后留半截文件](#12-写盘不是原子的中断后留半截文件-) | ✅ 已修（原子写 + `prev/`） | WebUI / 一致性 |
+| 13 | [卡住就是永远转圈](#13-卡住就是永远转圈-) | ✅ 已修（超时 + 看门狗） | WebUI / 守护 |
+| 14 | [报错直接吐异常名与英文原文](#14-报错直接吐异常名与英文原文-) | ✅ 已修（错误码表） | WebUI / 可理解 |
 
 **新增一条的写法**：现象（谁在什么操作下看到什么）→ 证据（数字 / 文件 / 可复现命令）→
 根因（指到具体函数）→ 修法与影响面 → 状态。
@@ -506,3 +513,304 @@ libresvip.core.exceptions.NotesOverlappedError: Notes overlapped near bar 76
 
 `src/sheetsage2_webui/svp.py`（`_note_objects` / `CONTINUATION_MAX_GAP` / `EXPORT_REVISION`）、
 `tests/test_svp_lyrics.py`（新）。
+
+---
+
+## 8. 双击两次 `webui.bat` 会起两个服务 ✅
+
+**状态**：✅ 已修（单实例锁）
+
+### 现象
+
+第一次双击没反应（窗口被挡住 / 浏览器没弹），再双击一次 —— 看起来"一切正常"，
+实际是**两个 uvicorn + 两个 `JobManager` 盯同一个 `output/`**：
+
+1. 两个进程恢复出同一批工程（id 来自目录名 / `job.json`），两边各有一份内存状态；
+2. A 窗口跑扒谱、B 窗口跑歌词 → 两套 writer 写同一个 `project.json`；
+3. 两个进程各自加载模型 → 显存翻倍直接 OOM；
+4. A 窗口删工程，删的可能是 B 窗口正在写的目录。
+
+### 根因
+
+`scripts/launch.py` 里没有任何互斥：`pick_port` 发现 8000 被占就**换个随机端口再起一个**
+（这个行为本身是为了"端口被别的软件占了也能用"，但没区分"占端口的是另一个自己"）。
+
+### 修法
+
+- 新增 `webui/singleton.py`：数据根下两个文件 —— `.webui.lock`（`msvcrt.locking` /
+  `flock` 独占一个字节的**互斥体**，跟着进程走，进程没了自动释放）与 `.webui.port.json`
+  （**名片**：`{pid, port, url, started_at}`）。
+  > 为什么分两个文件：Windows 上被字节锁住的文件，别的进程连打开读都可能被拒，
+  所以"该打开哪个地址"必须写在另一个能读的文件里。
+- `scripts/launch.py`：起服务前先探活；拿到锁说明没人跑（立刻释放，真正的锁由服务进程持有），
+  拿不到就按名片**直接把浏览器打开**（"已经有一个在跑了 → http://127.0.0.1:8129"），退出码 0。
+- `webui/__main__.py`：服务进程自己加锁并刷新端口；`--no-singleton`（或
+  `SHEETSAGE_ALLOW_MULTI=1`）是逃生口。
+
+### 验证
+
+- `tests/test_singleton.py`（6 项）：第二个实例拿锁抛 `AlreadyRunning` 并带着地址、
+  释放后能再拿到、残留锁文件不挡路、名片可被另一个实例读到、`pid_alive` 判定。
+- **真机**：起服务后把 `webui.bat` 再跑一次 →
+
+  ```
+  已经有一个 SheetSage2 Studio 在跑了，这次不再启动第二个。
+  正在跑的那个：http://127.0.0.1:8129（PID 315020）
+  ```
+
+  退出码 0，没有第二个服务。
+
+### 涉及文件
+
+`src/sheetsage2_webui/webui/singleton.py`（新）、`scripts/launch.py`、
+`src/sheetsage2_webui/webui/__main__.py`、`tests/test_singleton.py`（新）。
+
+---
+
+## 9. 删除按钮单击即删，误删不可恢复 ✅
+
+**状态**：✅ 已修（确认弹层 + 软删除回收站）
+
+### 现象
+
+「删除」就在「下载 ▾」旁边，单击即 `shutil.rmtree` 整个工程目录：几小时的扒谱 + 歌词 +
+手改的参数一次清空，连 `.webui/input` 里的原音频一起没了。
+
+### 修法
+
+**两层，都做了**：
+
+1. **前端**：`web/src/components/ConfirmDialog.vue` —— 文案带上"删几个产物 / 有没有原音频 /
+   7 天内能恢复"，且**弹层出现后 1 秒内确认按钮是灰的**（防连点，规则在 `web/src/confirm.ts`，
+   纯函数有单测）。侧栏 `×` 和工程头「删除」都走同一个确认。
+2. **后端**：`JobManager.delete()` 改成**软删除** —— 目录 `rename` 进 `<数据根>/.trash/`
+   （同卷原子），立刻从列表消失；新增 `GET /api/trash`、`POST /api/trash/{id}/restore`、
+   `DELETE /api/trash/{id}`；回收站超过 7 天或超过 2GB 自动清理最旧的。
+   `DELETE /api/jobs/{id}?permanent=true` 才是真删。
+3. 前端导航栏新增「回收站」入口（`TrashDialog.vue`）：恢复 / 彻底删除（彻底删除同样要等 1 秒）。
+
+### 验证
+
+- `tests/test_webui.py::test_delete_goes_to_the_trash_and_can_be_restored`：
+  删除 → 404 → 回收站有 1 项 → 恢复 → **同一个 job id 回来**、产物可下载、回收站清空。
+- `test_delete_with_permanent_flag_skips_the_trash`：`?permanent=true` 不进回收站。
+- `web/test/confirm.test.ts`（4 项）：计时进度、1 秒阈值、进度夹在 0~1、文案要素。
+- **真机**（`curl` 打本地服务）：上传 → `DELETE /api/jobs/{id}` → `/api/trash` 有
+  `probe-<id>-<时间戳>` → `POST /api/trash/.../restore` → 列表里回到 `probe`，状态 `draft`。
+
+### 涉及文件
+
+`src/sheetsage2_webui/webui/jobs.py`（`delete` / `trash` / `restore` /
+`purge_from_trash` / `_purge_trash`）、`src/sheetsage2_webui/webui/app.py`（三个 `/api/trash` 路由）、
+`web/src/components/ConfirmDialog.vue`（新）、`web/src/components/TrashDialog.vue`（新）、
+`web/src/confirm.ts`（新）、`web/test/confirm.test.ts`（新）、`web/src/App.vue`、
+`web/src/api.ts`、`web/src/composables/useStudio.ts`、`web/src/styles.css`。
+
+---
+
+## 10. 重跑之后下载到的还是上一版 ✅
+
+**状态**：✅ 已修（产物版本戳 `artifacts_rev` + 缓存失效）
+
+### 现象
+
+参数选错 → 重跑 → 点「下载 SVP」→ 拿到的还是旧参数那一版。三处缓存都是"文件在就直接返回"，
+**键里没有产物版本**：整包 zip（只有路径）、SVP（`parts + version + EXPORT_REVISION + language`）、
+波形（`peaks-<kind>-<buckets>.json`，换干声不失效）。
+
+### 根因
+
+作废只发生在内存（`_invalidate_*` 换一个 `StageRun` 对象），**磁盘上的旧产物和缓存一个字节都没动**。
+
+### 修法
+
+1. `Job.artifacts_rev`：每完成一轮阶段 +1（扒谱完成 +1、歌词完成 +1），写进 `job.json`；
+2. 整包 zip：`bundle.meta.json` 记下打包时的 `artifacts_rev`，版本不符就重打；
+3. SVP：`svp.cache_key(..., rev=job.artifacts_rev)`；
+4. 波形缓存里存**源文件指纹**（大小 + mtime），换了干声/原曲自然失效；
+5. 下载响应带 `X-Artifact-Rev` 头（页面/脚本能看出这是第几版）；
+6. 阶段开始时还会**清掉派生缓存**（`bundle*` / `export/*` / `peaks-*`）——它们一定是旧的。
+
+### 验证
+
+- `test_rerunning_rebuilds_the_bundle_and_bumps_the_artifact_rev`：第一版 zip 里
+  `report.json` 是 `v1`、`X-Artifact-Rev: 1`；重跑后 zip 里变成 `v2`、`X-Artifact-Rev: 2`。
+- `test_svp_cache_key_follows_the_artifact_rev`：`rev` 不同 → 键不同（同 rev 稳定）。
+- `test_peaks_cache_is_invalidated_when_the_audio_changes`：同一路径换一段音频 → 指纹变、确实重算。
+
+### 涉及文件
+
+`src/sheetsage2_webui/webui/jobs.py`、`src/sheetsage2_webui/svp.py`、
+`src/sheetsage2_webui/webui/media.py`、`src/sheetsage2_webui/webui/app.py`。
+
+---
+
+## 11. 半成品也会被标成完成 ✅
+
+**状态**：✅ 已修（完成门禁）
+
+### 现象
+
+`pipeline.run` 里 `summary["artifacts_ok"] = True` 是**硬编码**的；真正的体检
+`result.inspect_output_dir`（15 个文本 + 6 个 MIDI 的完整性与自洽性）**只有 CLI 调**。
+WebUI 的 `done` 唯一依据是"runner 没抛异常"。模型中途吐半套产物（磁盘满、编码器异常、
+杀毒软件锁文件）→ 界面显示 ✅ 完成，下载的 SVP 少一半音符。
+
+### 修法
+
+1. `runner.transcribe` 结尾跑 `inspect_output_dir`，结果进 `detail.artifacts`
+   （`{ok, checked, total, missing, problems}`）；歌词阶段查 `project.json` + `lyrics.json` 可解析。
+2. `JobManager._settle_phase` 的**完成门禁**：产物自检不通过、或缺
+   `project.json` / `report.json` / `summary.json`、或 JSON 解析失败 → 阶段 `failed`
+   （错误码 `E_ARTIFACTS_INCOMPLETE`），并把缺哪个文件用人话列出来。
+3. `pipeline` 不再硬编码：写完产物后按 `result.EXPECTED_TEXT/EXPECTED_MIDI` 做便宜的自检，
+   结果写进 `summary["artifacts_ok"]` 与 `artifacts_missing`。
+4. 前端阶段卡显示「自检 21/21 通过」；不通过时标黄并列出缺哪几个。
+
+### 验证
+
+- `test_incomplete_artifacts_are_not_reported_as_done`：假 runner 只写 `project.json`
+  → 任务 `failed`、`error_code == "E_ARTIFACTS_INCOMPLETE"`、文案里点名 `report.json`。
+- `test_the_runners_own_artifact_report_blocks_completion`：`detail.artifacts.ok = False`
+  同样拦住（并点名 `chords.mid`）。
+- 既有的 60 项 WebUI 测试全部照旧（假 runner 的 `write_artifacts` 补上了 `summary.json`）。
+
+### 涉及文件
+
+`src/sheetsage2_webui/webui/runner.py`（`inspect_artifacts` / `_lyrics_artifacts`）、
+`src/sheetsage2_webui/webui/jobs.py`（`_completion_gate`）、
+`src/sheetsage2_webui/pipeline.py`、`web/src/components/StageCard.vue`。
+
+---
+
+## 12. 写盘不是原子的，中断后留半截文件 ✅
+
+**状态**：✅ 已修（原子写 + 阶段前隔离旧产物）
+
+### 现象
+
+`project.json` / `report.json` / `summary.json` / `job.json` 都是 `write_text` 直接盖。
+进程在写 JSON 时被杀（Ctrl+C / 任务管理器 / 断电）→ 文件是半截；
+`/lanes`、`/exports`、`/download?kind=svp` 全靠 `project.json` → 用户看到 500 或"还没扒谱"。
+更隐蔽的是**重跑失败在中途**：磁盘上混着"这一轮的新 project.json + 上一轮的旧 lyrics.json"，
+下载包里会带上旧歌词。
+
+### 修法
+
+1. 新增 `src/sheetsage2_webui/fsutil.py`：`write_text_atomic` / `write_bytes_atomic`
+   （同目录 `.part` → `os.fsync` → `os.replace`）。`pipeline`、`pitch`、`runner`、`jobs`
+   的 JSON / lab / MIDI / ABC 全部改走它。
+2. **阶段开始前**把这阶段上一轮的产物挪进 `<工程>/.webui/prev/<rev>-<时间>/`：
+   `output/` 永远只表示"当前这一版"；跑成功之后清掉 `prev/`（`_flush_prev`）。
+   重跑扒谱时旧 `lyrics.json` 也一起挪走（音符位置变了，旧歌词本来就要作废）。
+3. 完成时写 `<工程>/.webui/manifest.json`（`artifacts_rev` + 文件清单 + 参数 + 阶段状态）；
+   `/files` 与 `/download` 只认清单里的文件 —— 残留文件留在磁盘上是一回事，当成这一版发出去是另一回事。
+
+### 验证
+
+- `test_atomic_write_never_leaves_a_part_file`：写完没有残留 `.part`。
+- `test_half_written_project_json_is_404_not_500`：把 `project.json` 弄成半截 →
+  `/api/jobs/{id}/project` 回 **404**（"还在写"），不是 500。
+- `test_failed_rerun_does_not_leave_the_old_lyrics_in_output`：重跑扒谱失败 →
+  `output/` 里没有旧 `lyrics.json`，旧的那份在 `.webui/prev/` 里。
+
+### 涉及文件
+
+`src/sheetsage2_webui/fsutil.py`（新）、`src/sheetsage2_webui/pipeline.py`、
+`src/sheetsage2_webui/pitch.py`、`src/sheetsage2_webui/webui/runner.py`、
+`src/sheetsage2_webui/webui/jobs.py`、`src/sheetsage2_webui/webui/media.py`、
+`src/sheetsage2_webui/webui/app.py`。
+
+---
+
+## 13. 卡住就是永远转圈 ✅
+
+**状态**：✅ 已修（阶段超时 + 无进展看门狗）
+
+### 现象
+
+进度条停在"识别音乐 62%"半小时，刷新页面还是 62%。没有超时、没有心跳之外的存活证据；
+取消是协作式的，而**模型加载 / CUDA 卡死时一个回调都不会来**，点「停止」没用。
+
+### 修法
+
+1. `Progress` 记录 `last_advance_at`（`step` / `set` / `log` 任一变化都刷新）；
+2. `JobManager` 起一个 daemon 看门狗线程（每 `watchdog_interval` 扫一遍，默认 1s）：
+   - **无进展** > `STALL_TIMEOUT`（扒谱 15min / 歌词 10min）→ 阶段 `failed`，
+     错误码 `E_STALLED`，文案"卡住了 N 分钟没有任何进展"；
+   - **总时长** > `HARD_TIMEOUT`（扒谱 2h / 歌词 1h）→ `E_TIMEOUT`；
+   - 判死的同时置 `cancel_requested`，工作线程在下个检查点退出（不会两个线程抢同一个阶段），
+     且 `watch.fired` 之后 runner 哪怕回来了也不会把状态改回 `done`。
+3. `media.compute_peaks` 的 ffmpeg 加 `timeout=300s` + `CREATE_NEW_PROCESS_GROUP`：
+   解码卡住不会再永久占一个线程池线程，Python 侧被杀也不会留下一个孤儿 ffmpeg。
+4. 界面：阶段卡显示"上次进展 xx 秒前"，超过 60 秒标黄。
+
+### 验证
+
+- `test_a_stalled_stage_is_failed_by_the_watchdog`：假 runner `sleep(2)`、
+  `stall_timeout=0.3` → 任务 `failed`、`error_code == "E_STALLED"`、文案含"卡住"、有下一步建议。
+- `test_a_stage_that_exceeds_the_hard_timeout_is_failed`：一直报进度但跑不完 →
+  `E_TIMEOUT`。
+- 既有的取消测试照旧通过（协作式取消没被破坏）。
+
+### 涉及文件
+
+`src/sheetsage2_webui/webui/jobs.py`（`_PhaseWatch` / `_watch_stages` / `_abort_phase`）、
+`src/sheetsage2_webui/webui/media.py`、`web/src/components/StageCard.vue`。
+
+---
+
+## 14. 报错直接吐异常名与英文原文 ✅
+
+**状态**：✅ 已修（错误码表 + 人话 + 下一步）
+
+### 现象
+
+`message = f"{type(exc).__name__}: {exc}"` 原样进快照、SSE、`job.json`，页面上是
+`TranscriptionError: 转写失败：RuntimeError: CUDA error: an illegal memory access was encountered`、
+`OSError: [Errno 28] No space left on device`。用户看不懂，也没法据此行动。
+
+### 修法
+
+新增 `webui/errors.py`：`code` + `message`（人话）+ `action`（下一步）+ `detail`（技术原文）。
+
+| code | 人话 | 下一步 |
+|---|---|---|
+| `E_DISK_FULL` | 磁盘满了，结果写不进去 | 清理 `output/` 或换个大点的盘，再重跑 |
+| `E_VRAM_OOM` | 显卡内存不够，模型跑不动 | 精度改 BF16 / 范围改前 30 秒再试 |
+| `E_AUDIO_UNREADABLE` | 这个音频读不出来 | 确认能正常播放，必要时转 mp3 |
+| `E_ASR_EMPTY` | 没听到人声 | 换含人声的混音 / 上传干声 |
+| `E_ARTIFACTS_INCOMPLETE` | 产物不完整，这一轮不能算完成 | 重跑；反复出现就发诊断信息 |
+| `E_STALLED` / `E_TIMEOUT` | 卡住了 / 跑太久超过上限 | 强制中止后重跑，或先跑前 30 秒 |
+| `E_INTERNAL-<8 位 hash>` | 程序内部出错了（带错误码） | 重试一次；带上错误码反馈 |
+
+约定：**人话里不出现异常类名**；模型自己抛的中文错误（"没有拿到任何逐字时间戳"）
+原样当人话用（那本来就是给用户看的）。未知异常统一兜底成稳定的
+`E_INTERNAL-<hash>`（同一个 bug 同一个码，便于对日志）。
+
+快照与 SSE 里现在同时有 `error`（人话）、`error_code`、`error_action`、`error_detail`；
+前端阶段卡显示人话 + 「下一步：…」，技术原文折叠在「详情」里。
+
+### 验证
+
+- `test_errors_are_translated_into_human_text_with_a_code`：`OSError(28)` →
+  `E_DISK_FULL`、人话含"磁盘满"、不含 `OSError`、有 `action`、`detail` 里有原文。
+- `test_error_table_maps_common_failures`：磁盘满 / 显存 / 无人声 / 坏音频的码，
+  以及未知异常的稳定 `E_INTERNAL-*`。
+
+### 涉及文件
+
+`src/sheetsage2_webui/webui/errors.py`（新）、`src/sheetsage2_webui/webui/jobs.py`、
+`web/src/components/StageCard.vue`、`web/src/types.ts`。
+
+---
+
+## 附：第一期（P0）整体验证
+
+- `pytest tests -q`：**354 项通过 / 6 跳过**（原来是 334 / 6；新增 20 项 = 14 项健壮性 + 6 项单实例锁）。
+- `cd web && npm run typecheck && npm test`：**34 项通过**（新增 `confirm.test.ts` 4 项）。
+- `cd web && npm run build`：通过，前端产物已更新。
+- 真机：`webui.bat` 双击两次只起一个服务；上传 → 删除 → 回收站 → 恢复 全链路走通。
+
+> 剩下的 P1（乐观锁、目录竞态、上传体检、磁盘预检、日志/诊断包、CSRF、启动预检、
+> OOM 告知、页面存活提示）与 P2 见 `docs/健壮性保障评估.md` §5、§6，按那里的顺序继续。

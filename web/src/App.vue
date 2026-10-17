@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import AppSidebar from '@/components/AppSidebar.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import LogDrawer from '@/components/LogDrawer.vue'
 import PipelineStages from '@/components/PipelineStages.vue'
 import ProjectHead from '@/components/ProjectHead.vue'
 import ResultsPanel from '@/components/ResultsPanel.vue'
 import TrackList from '@/components/TrackList.vue'
+import TrashDialog from '@/components/TrashDialog.vue'
 import { useAudioPlayer } from '@/composables/useAudio'
 import { useStudio } from '@/composables/useStudio'
+import { deleteWarning } from '@/confirm'
 import type { PhaseKey } from '@/types'
 
 const {
@@ -23,6 +26,7 @@ const {
   error,
   uploadProgress,
   lanesLoading,
+  trash,
   init,
   select,
   create,
@@ -33,6 +37,9 @@ const {
   detachStem,
   setOptions,
   remove,
+  loadTrash,
+  restoreTrash,
+  purgeTrash,
   reset,
   dismissError,
 } = useStudio()
@@ -41,6 +48,10 @@ const player = useAudioPlayer()
 const theme = ref<'light' | 'dark'>('light')
 const dragOver = ref(false)
 const PHASES: PhaseKey[] = ['transcribe', 'lyrics']
+
+/** 等待确认的删除（G2：删除按钮不再单击即删）。 */
+const pendingDelete = ref<{ id: string; name: string; message: string } | null>(null)
+const showTrash = ref(false)
 
 const phases = computed(() => env.value?.phases ?? [
   { key: 'transcribe' as const, label: '扒谱', engine: 'SheetSage2' },
@@ -59,6 +70,35 @@ function stopAll(): void {
 function auto(): void {
   // 「自动提取」= 扒谱 → 歌词 一条龙（原型的排队链路）；走后端 /chain，不是两次 runStage
   void runChain()
+}
+
+/** 删除入口统一走这里：先弹确认（弹层里还要等 1 秒才能点确认）。 */
+function askRemove(id: string): void {
+  const job = jobs.value.find((item) => item.id === id)
+  if (!job) return
+  pendingDelete.value = {
+    id,
+    name: job.name,
+    message: deleteWarning(job.name, job.files?.length ?? 0, Boolean(job.audio)),
+  }
+}
+
+async function confirmRemove(): Promise<void> {
+  const target = pendingDelete.value
+  pendingDelete.value = null
+  if (!target) return
+  await remove(target.id)
+  if (showTrash.value) await loadTrash()
+}
+
+async function openTrash(): Promise<void> {
+  showTrash.value = true
+  await loadTrash()
+}
+
+async function doRestore(entryId: string): Promise<void> {
+  await restoreTrash(entryId)
+  if (!trash.value.length) showTrash.value = false
 }
 
 let dragDepth = 0
@@ -84,6 +124,7 @@ onMounted(async () => {
   theme.value = saved === 'dark' ? 'dark' : 'light'
   document.documentElement.dataset.theme = theme.value
   await init()
+  void loadTrash()
 })
 
 onUnmounted(() => {
@@ -118,6 +159,13 @@ function toggleTheme(): void {
           <span v-if="env">歌词 {{ env.asr?.model ?? '—' }}</span>
           <span v-if="env && env.queue.pending">排队 {{ env.queue.pending }}</span>
         </div>
+        <button
+          class="nav-tab"
+          :title="'回收站：删掉的工程 7 天内可以恢复'"
+          @click="openTrash"
+        >
+          回收站<span v-if="trash.length"> {{ trash.length }}</span>
+        </button>
         <button class="theme-toggle" title="切换主题" @click="toggleTheme">◐</button>
       </div>
     </header>
@@ -129,7 +177,7 @@ function toggleTheme(): void {
         :busy="busy"
         :phases="PHASES"
         @select="select"
-        @remove="remove"
+        @remove="askRemove"
         @create="create"
       />
 
@@ -150,7 +198,7 @@ function toggleTheme(): void {
             <template v-else>
               <ProjectHead
                 :job="active"
-                @remove="remove(active.id)"
+                @remove="askRemove(active.id)"
                 @reset="reset"
               />
               <TrackList
@@ -204,5 +252,23 @@ function toggleTheme(): void {
     >
       有任务在后台运行
     </div>
+
+    <ConfirmDialog
+      v-if="pendingDelete"
+      title="删除这个工程？"
+      :message="pendingDelete.message"
+      note="删掉之后会先进回收站（顶栏「回收站」里能恢复）；确认按钮要等 1 秒才生效，防手滑。"
+      confirm-label="删除"
+      @confirm="confirmRemove"
+      @cancel="pendingDelete = null"
+    />
+
+    <TrashDialog
+      v-if="showTrash"
+      :entries="trash"
+      @close="showTrash = false"
+      @restore="doRestore"
+      @purge="purgeTrash"
+    />
   </div>
 </template>

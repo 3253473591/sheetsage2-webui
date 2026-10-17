@@ -17,6 +17,7 @@ import type {
   Lanes,
   Peaks,
   PhaseKey,
+  TrashEntry,
 } from './types'
 
 const BASE = '/api'
@@ -119,9 +120,35 @@ export function runChain(id: string): Promise<JobSnapshot> {
   return post(`/jobs/${encodeURIComponent(id)}/chain`)
 }
 
-export async function deleteJob(id: string): Promise<void> {
-  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' })
+/**
+ * 删除工程。**默认是软删除**（进回收站，7 天内可恢复）；`permanent=true` 才是真删。
+ */
+export async function deleteJob(id: string, permanent = false): Promise<void> {
+  const query = permanent ? '?permanent=true' : ''
+  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}${query}`,
+                               { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '删除失败'))
+}
+
+/** 回收站列表（被软删除的工程）。 */
+export async function fetchTrash(): Promise<TrashEntry[]> {
+  const body = await getJson<{ entries: TrashEntry[] }>('/trash')
+  return body.entries
+}
+
+/** 从回收站恢复一个工程（目录挪回 output/），返回恢复后的快照。 */
+export async function restoreTrash(entryId: string): Promise<JobSnapshot> {
+  const response = await fetch(
+    `${BASE}/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST' })
+  if (!response.ok) throw new Error(await readError(response, '恢复失败'))
+  return (await response.json()) as JobSnapshot
+}
+
+/** 彻底删掉回收站里的一项（不可恢复）。 */
+export async function purgeTrash(entryId: string): Promise<void> {
+  const response = await fetch(`${BASE}/trash/${encodeURIComponent(entryId)}`,
+                               { method: 'DELETE' })
+  if (!response.ok) throw new Error(await readError(response, '彻底删除失败'))
 }
 
 export function fileUrl(id: string, path: string): string {
