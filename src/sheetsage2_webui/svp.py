@@ -49,7 +49,7 @@ SVP_VERSION = "1.9"
 #: 2 = 拍号只写变化点（之前是逐小节抄，SynthV 会在每个小节上面都标一次拍号）。
 #: 3 = 速度：恒速曲只写一条，变速曲折叠相同的相邻点（之前同样逐小节抄）。
 #: 4 = 音符换算改成"起点/终点各自换算 + 同轨不叠音"（之前分开 round 会叠 1 tick）。
-EXPORT_REVISION = 4
+EXPORT_REVISION = 5
 #: 折叠速度点时，"两个 BPM 算同一个速度"的相对容差（0.5%，比网格抖动略大）。
 TEMPO_MERGE_TOLERANCE = 0.005
 PART_LABELS: dict[str, str] = {
@@ -62,12 +62,27 @@ PART_LABELS: dict[str, str] = {
 PPQ_SCALE = 4
 
 #: 没歌词的音符用什么音节占位（SVP 的每个音都要求一个音节/字）。
+#: **只在没得延音时才用**——见 `_note_objects` 与 `CONTINUATION_MAX_GAP`。
 #: 取值和 libresvip 的 `DEFAULT_*_LYRIC` 对齐。
 FILLER_LYRIC: dict[str, str] = {
     "Chinese": "啦", "Cantonese": "啦",
     "Japanese": "ラ",
 }
 FILLER_DEFAULT = "la"
+
+#: 没分到字的音，与前面那个音之间还允许算**同一个字的延音**的最大间隙（SV 域 tick）。
+#:
+#: 依据是 `samples/对齐/` 那对 SVP：人工修过的工程里 55 个延音标记
+#: **全部与前一个音无缝相接**，而且**全文一个占位音节都没有**——
+#: 人工的做法是"没字就当上一个字的延音，从不发明一个『啦』"。
+#: 我们没分到字的音 57 个里有 54 个是无缝的，说明它们本来就是同一个字的延续，
+#: 只是逐字时间戳没给到那里（SheetSage2 多扒 / 少扒音符时尤其明显）。
+#:
+#: 取**半个四分音符**（SV 域一拍 480 tick）：剩下那几个卡在 16 分 / 8 分休止后面
+#: （实测 240 tick），比这更长的休止（半拍以上）多是一句的开头，那里没有字可续，
+#: 只能退回占位音节。注意这只改**唱什么字**，音符起点 / 时值一个都不动，
+#: 所以那个休止不会被吃掉。
+CONTINUATION_MAX_GAP = 240
 
 #: 我们的语言名 -> libresvip 的 `LanguageOption`（声库语言的默认值）。
 LANGUAGE_TO_SV: dict[str, str] = {
@@ -363,22 +378,59 @@ def _note_rows(notes: Iterable[Mapping[str, Any]]) -> tuple[list[tuple[int, int,
 def _note_objects(notes: Iterable[Mapping[str, Any]], *, language: str,
                   api: Mapping[str, Any],
                   stats: dict | None = None) -> list[Any]:
-    """音符 → libresvip 的 `Note`（**顺手保证同轨不叠音**，见 `_note_rows`）。"""
+    """音符 → libresvip 的 `Note`（**顺手保证同轨不叠音**，见 `_note_rows`）。
+
+    没分到字的音**不再一律填占位音节**，按"能不能续上一个字"分两种：
+
+    - 与前面那个音之间没有像样的休止（间隙 ≤ `CONTINUATION_MAX_GAP`）→ 写延音 `-`。
+      人工修过的工程里从来不发明音节，而占位『啦』会让声库唱出一串"啦啦啦"——
+      那是导出制造的错误，不是识别出来的。**SheetSage2 多扒 / 少扒音符时主要靠这条兜。**
+    - 中间隔着一个够长的休止（多半是下一句的开头，前面没有字可续）→ 只能退回占位音节。
+
+    **占位音节自己也算锚点**：所以一句里连着几个没字的音，只有"前面真的没有字"
+    的那一个会拿到占位音节，后面连续没字的都续成 `-`（而不是"啦啦啦"一串）。
+
+    器乐轨一个字都没有：那种轨上每个音都"前面没有字"，所以照旧每个音一个占位音节，
+    不会变成"整句只唱一个字"。
+    """
     Note = api["Note"]
     filler = filler_lyric(language)
     rows, adjustments = _note_rows(notes)
     if stats is not None:
         for key, value in adjustments.items():
             stats[key] = stats.get(key, 0) + value
+    # 这条轨本来有没有歌词：没有（器乐轨 / 纯和弦）就别拿占位音节当锚点
+    track_has_chars = any(
+        str(raw.get("lyric") or "").strip() not in ("", "-", "+")
+        for _start, _end, raw in rows)
     out: list[Any] = []
+    head_alive = False      # 前面有字可续，而且从它到现在没断过
+    prev_end: int | None = None
+    continued = filled = 0
     for start, end, raw in rows:
         lyric = str(raw.get("lyric") or "").strip()
         # 转音/延续标记：SVP 里延续就是 "-"，英文的 "+" 也统一成 "-"
         if lyric == "+":
             lyric = "-"
+        if head_alive and (prev_end is None or start - prev_end > CONTINUATION_MAX_GAP):
+            head_alive = False          # 链条断了：休止之后是新的开始
+        if not lyric:
+            if head_alive:
+                lyric = "-"             # 没字可挂：当上一个字的延音
+                continued += 1
+            else:
+                lyric = filler          # 前面没有字：只能占位
+                filled += 1
+                head_alive = track_has_chars    # 占位音节自己也能当锚点
+        elif lyric != "-":
+            head_alive = True
         out.append(Note(start_pos=start, length=end - start,
                         key_number=int(raw.get("pitch") or 60),
-                        lyric=lyric or filler))
+                        lyric=lyric))
+        prev_end = end
+    if stats is not None:
+        stats["continued"] = continued
+        stats["filler"] = filled
     return out
 
 

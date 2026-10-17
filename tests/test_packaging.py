@@ -1,4 +1,4 @@
-r"""内测包（alpha 2）的三件事：ffmpeg 解析、清单、下载器。
+r"""内测包（alpha 3）的三件事：ffmpeg 解析、清单、下载器。
 
 这套东西的特点是**跑在内测者机器上、跑在环境还没建起来的时候**，所以：
 
@@ -33,6 +33,48 @@ from sheetsage2_webui import bootstrap  # noqa: E402
 
 import downloader  # noqa: E402
 import modelscope  # noqa: E402
+
+
+def _load_bootstrap_tool():
+    """把 `tools/bootstrap.py` 当模块读进来。
+
+    它不能按名字 import：`sheetsage2_webui.bootstrap` 已经占用了 `bootstrap`
+    这个名字（上面那行），而且它是给内测包用的**脚本**、不是包的一部分。
+    """
+    import importlib.util
+
+    path = PROJECT_ROOT / "tools" / "bootstrap.py"
+    spec = importlib.util.spec_from_file_location("sheetsage2_bootstrap_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["sheetsage2_bootstrap_tool"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# ----------------------------------------------------------- bootstrap 预演
+def test_bootstrap_dry_run_never_downloads(tmp_path, monkeypatch, capsys):
+    """`--dry-run` 是"只打印要做的事"，**不能真下 1.8 GB 的 torch 轮子**。
+
+    这条曾经是坏的：`step_torch` 里那句 `download()` 没看 `dry_run`
+    （只有外面的 `run()` 看了），实测把包目录的 `wheels/` 塞进了 1.87 GB。
+    """
+    tool = _load_bootstrap_tool()
+    monkeypatch.setattr(tool, "WHEELS", tmp_path / "wheels")
+    monkeypatch.setattr(tool, "venv_imports", lambda _name: False)
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("--dry-run 不该调用 download()")
+
+    monkeypatch.setattr(tool, "download", explode)
+    manifest = json.loads((PROJECT_ROOT / "downloads.json").read_text(encoding="utf-8"))
+
+    tool.step_torch(manifest, dry_run=True)
+
+    assert not (tmp_path / "wheels").exists(), "dry-run 竟然建了 wheels/ 目录"
+    printed = capsys.readouterr().out
+    assert "[dry-run]" in printed
+    for item in manifest["torch"]:
+        assert item["name"] in printed
 
 
 # --------------------------------------------------------------------- ffmpeg
@@ -85,7 +127,7 @@ def test_the_bundled_ffmpeg_is_where_the_packager_puts_it():
 # --------------------------------------------------------------------- 清单
 def test_downloads_manifest_is_complete():
     manifest = json.loads((PROJECT_ROOT / "downloads.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "alpha2"
+    assert manifest["version"] == "alpha3"
 
     # 随包的两样必须在
     assert manifest["bundled"]["python"]["path"] == "runtime/python"
@@ -178,7 +220,7 @@ def server():
 
 
 def test_download_verifies_sha256_and_writes_the_target(server, tmp_path: Path):
-    server.payload = b"hello alpha2" * 1000
+    server.payload = b"hello alpha3" * 1000
     digest = hashlib.sha256(server.payload).hexdigest()
     target = tmp_path / "out.bin"
     downloader.download(server.url, target, sha256=digest, size=len(server.payload),

@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>编辑页交互原型 · 钢琴卷帘</title>
+<!--
+  这是**手感原型**，不是产品代码。目的只有一个：把「拖 / 拉 / 建 / 删 / 吸附 / 撤销 / 缩放」
+  真的做出来，用眼睛和手判断这套交互值不值得落地。
+
+  三条设计约束，都是为了将来能直接搬进 `web/src/components/`：
+
+  1. 音符数据用 **tick 域**（`{tick, dur, pitch, lyric, vel}`），和 `project.json` 一致；
+     渲染时才经**小节表**换到秒域。这跟 `LaneView.vue` 开头那条注释是同一个决定：
+     秒 ↔ tick 的换算只有一个真源，前端不抄第二份。
+  2. 交互是**纯状态机**：所有几何换算都是 (tick|sec|px) 之间的纯函数，DOM 只负责把
+     鼠标坐标喂进来。于是 jsdom 里也能把整套拖拽跑一遍（见 web/smoke-pianoroll.mjs）。
+  3. 不碰后端。假数据在 `makeDemoNotes()` 里，改一个数就能换歌。
+-->
+<style>
+  :root {
+    --bg-dark: #1b1b1c;
+    --bg-panel: #242426;
+    --bg-header: #2a2a2d;
+    --border-color: #38383a;
+    --text-main: #d4d4d8;
+    --text-dim: #7f7f86;
+
+    --track-green: #688b36;
+    --track-green-bright: #7ea83c;
+    --track-blue: #2c6e9e;
+    --track-blue-bright: #3886be;
+    --track-red: #a44349;
+    --track-red-bright: #c04e55;
+
+    --scale-highlight-accent: #78ab2d;
+    --scale-highlight-bg: #232720;
+    --scale-dim-bg: #141416;
+
+    --playhead: #e04f4f;
+  }
+
+  * { box-sizing: border-box; user-select: none; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+  body {
+    background: var(--bg-dark);
+    color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+    font-size: 11px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ---------------- 工具条 ---------------- */
+  .toolbar {
+    height: 34px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    flex-shrink: 0;
+  }
+  .toolbar .sep { width: 1px; height: 18px; background: var(--border-color); margin: 0 3px; }
+  .toolbar .grow { flex: 1; }
+
+  button, select {
+    background: #2b2b2e;
+    border: 1px solid #48484d;
+    color: #ddd;
+    height: 22px;
+    font-size: 11px;
+    border-radius: 3px;
+    padding: 0 7px;
+    outline: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover, select:hover { background: #34343a; border-color: #5a5a61; }
+  button:active { background: #262629; }
+  button.on { background: #3d5a1e; border-color: #6f9a34; color: #eaf5d8; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button.icon { width: 26px; padding: 0; text-align: center; }
+
+  .brand { font-weight: 600; letter-spacing: 0.3px; color: #9fb36a; margin-right: 4px; }
+  .brand span { color: var(--text-dim); font-weight: 400; }
+
+  /* ---------------- 卷帘 ---------------- */
+  .pr-scroll {
+    flex: 1;
+    overflow: auto;
+    position: relative;
+    background: #131315;
+  }
+  .pr-grid {
+    display: grid;
+    /* 两行：标尺 / 网格；两列：琴键 / 网格 */
+    grid-template-rows: 26px var(--canvas-h, 1358px);
+    grid-template-columns: 48px var(--canvas-w, 1200px);
+    width: max-content;
+  }
+
+  .ruler-corner {
+    position: sticky; top: 0; left: 0; z-index: 7;
+    background: #202023;
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 10px;
+  }
+  .ruler {
+    position: sticky; top: 0; z-index: 6;
+    background: #202023;
+    border-bottom: 1px solid var(--border-color);
+    position: sticky;
+  }
+  .ruler-inner { position: relative; height: 100%; }
+  .ruler-label {
+    position: absolute; top: 3px; font-size: 9px; color: #8f929b;
+    padding-left: 4px; border-left: 1px solid #4a4a50; height: 20px; white-space: nowrap;
+  }
+  .ruler-label.bar { color: #c2c2c8; border-left-color: #6a6a72; }
+  .ruler-mark {
+    position: absolute; top: 0; bottom: 0; width: 1px; background: var(--playhead);
+    z-index: 2; pointer-events: none;
+  }
+  .ruler-mark::before {
+    content: ''; position: absolute; top: 0; left: -4px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid var(--playhead);
+  }
+
+  .keyboard {
+    position: sticky; left: 0; z-index: 5;
+    background: #1a1a1c;
+    border-right: 1px solid var(--border-color);
+    display: flex; flex-direction: column;
+  }
+  .piano-key {
+    flex-shrink: 0;
+    position: relative;
+    border-bottom: 1px solid #141415;
+    display: flex; align-items: center;
+    padding-left: 4px;
+    font-size: 9px; color: #8f929b;
+    cursor: pointer;
+  }
+  .piano-key.white { background: #737482; color: #202024; }
+  .piano-key.black { background: #252528; color: #888; }
+  .piano-key.black .key-title { width: 30px; background: #252528; height: 100%;
+    display: flex; align-items: center; padding-left: 3px; border-radius: 0 2px 2px 0; }
+  .piano-key .scale-accent {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 4px;
+    background: var(--scale-highlight-accent); border-radius: 1px 0 0 1px;
+  }
+  .piano-key:hover { filter: brightness(1.25); }
+
+  .canvas { position: relative; background: var(--scale-dim-bg); }
+
+  .grid-rows { position: absolute; inset: 0; pointer-events: none; }
+  .grid-row { position: absolute; left: 0; right: 0; }
+  .grid-row.in-scale { background: var(--scale-highlight-bg); }
+  .grid-row.octave-line { border-bottom: 1px solid rgba(255,255,255,0.10); }
+  .grid-row:not(.octave-line) { border-bottom: 1px solid rgba(255,255,255,0.03); }
+
+  .beat-lines { position: absolute; inset: 0; pointer-events: none; }
+  .beat-line { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.055); }
+  .beat-line.bar { background: rgba(255,255,255,0.17); }
+
+  .notes-layer { position: absolute; inset: 0; pointer-events: none; }
+
+  .note {
+    position: absolute;
+    border-radius: 3px;
+    display: flex; align-items: center;
+    padding-left: 5px;
+    font-size: 10px; color: rgba(255,255,255,0.95);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.32), 0 1px 2px rgba(0,0,0,0.5);
+    z-index: 4;
+    pointer-events: auto;
+    cursor: default;
+    overflow: hidden;
+  }
+  .note.sel { outline: 1px solid #ffd45e; outline-offset: 0; z-index: 5; }
+  .note .note-lyric { pointer-events: none; font-style: italic; white-space: nowrap; }
+  /* 右侧拉伸手柄：只做视觉提示，命中判定用坐标（见 hitNote） */
+  .note .handle {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 6px;
+    cursor: ew-resize; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.28));
+  }
+  .note.ghost {
+    height: 3px !important; border-radius: 1px; padding: 0;
+    opacity: 0.3 !important; box-shadow: none; z-index: 3; pointer-events: none;
+  }
+  .note.ghost .note-lyric { display: none; }
+
+  .marquee {
+    position: absolute; z-index: 6; pointer-events: none; display: none;
+    border: 1px solid #6fa8dc; background: rgba(79,140,201,0.16);
+  }
+
+  .playhead {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: var(--playhead); z-index: 8; pointer-events: none;
+  }
+
+  .drop-hint {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(37,99,235,0.16); border: 2px dashed #4f8cc9;
+    font-size: 13px; z-index: 20; pointer-events: none;
+  }
+  .pr-scroll.dragging-file .drop-hint { display: flex; }
+
+  /* ---------------- 状态栏 ---------------- */
+  .statusbar {
+    height: 24px; flex-shrink: 0;
+    background: var(--bg-header);
+    border-top: 1px solid var(--border-color);
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 10px; font-size: 10px; color: var(--text-dim);
+  }
+  .statusbar b { color: #c9c9d0; font-weight: 500; }
+  .statusbar .grow { flex: 1; }
+
+  /* ---------------- 检查器（tick 域数据，验证写回契约） ---------------- */
+  .inspector {
+    position: fixed; right: 0; top: 34px; bottom: 24px; width: 320px;
+    background: #1e1e20; border-left: 1px solid var(--border-color);
+    display: none; flex-direction: column; z-index: 30;
+  }
+  .inspector.open { display: flex; }
+  .inspector header {
+    height: 26px; display: flex; align-items: center; gap: 8px;
+    padding: 0 8px; border-bottom: 1px solid var(--border-color);
+    background: var(--bg-panel); color: #c9c9d0;
+  }
+  .inspector pre {
+    flex: 1; overflow: auto; padding: 8px; font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #a8c98a; white-space: pre; line-height: 1.45;
+  }
+
+  .help {
+    position: fixed; left: 12px; bottom: 34px; z-index: 30;
+    background: rgba(30,30,32,0.96); border: 1px solid var(--border-color);
+    border-radius: 4px; padding: 8px 10px; font-size: 10px; line-height: 1.7;
+    color: var(--text-dim); display: none; max-width: 380px;
+  }
+  .help.open { display: block; }
+  .help b { color: #c9c9d0; }
+  kbd {
+    background: #33333a; border: 1px solid #4d4d55; border-bottom-width: 2px;
+    border-radius: 3px; padding: 0 4px; font-size: 9px; color: #ddd;
+    font-family: inherit;
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <span class="brand">SheetSage2 <span>Studio</span></span>
+  <span class="sep"></span>
+
+  <button id="t-select" class="on" title="选择 / 框选 (V)">▶ 选择</button>
+  <button id="t-pencil" title="画笔：拖出音符 (B)">✏ 画笔</button>
+  <button id="t-erase" title="橡皮：点音符删除 (E)">⌫ 橡皮</button>
+
+  <span class="sep"></span>
+  <span style="color:var(--text-dim)">网格</span>
+  <select id="snap" title="吸附网格">
+    <option value="1">1/1</option>
+    <option value="2">1/2</option>
+    <option value="4">1/4</option>
+    <option value="8" selected>1/8</option>
+    <option value="16">1/16</option>
+    <option value="32">1/32</option>
+    <option value="0">关</option>
+  </select>
+  <button id="quantize" title="把选中音符对齐到网格（没选就整轨）">量化</button>
+
+  <span class="sep"></span>
+  <button id="undo" class="icon" title="撤销 (Ctrl+Z)">↶</button>
+  <button id="redo" class="icon" title="重做 (Ctrl+Shift+Z)">↷</button>
+
+  <span class="sep"></span>
+  <button id="play" class="icon" title="播放 / 暂停 (空格)">▶</button>
+  <button id="stop" class="icon" title="回到开头">■</button>
+  <span id="clock" style="color:#c9c9d0; font-variant-numeric:tabular-nums;">0:00.0 / 0:00.0</span>
+
+  <span class="sep"></span>
+  <span style="color:var(--text-dim)">音轨</span>
+  <select id="track"></select>
+
+  <span class="grow"></span>
+  <span id="hint" style="color:var(--text-dim)"></span>
+  <span class="sep"></span>
+  <button id="zin" class="icon" title="横向放大 (Ctrl+滚轮)">＋</button>
+  <button id="zout" class="icon" title="横向缩小 (Ctrl+滚轮)">－</button>
+  <button id="vzin" class="icon" title="纵向放大 (Shift+滚轮)">⇕＋</button>
+  <button id="vzout" class="icon" title="纵向缩小 (Shift+滚轮)">⇕－</button>
+  <button id="follow" class="on" title="播放时自动跟随播放头">跟随</button>
+  <button id="inspect" title="看 tick 域数据（写回契约）">{ } 数据</button>
+  <button id="helpbtn" class="icon" title="快捷键">?</button>
+</div>
+
+<div class="pr-scroll" id="scroll">
+  <div class="pr-grid" id="grid">
+    <div class="ruler-corner">音高</div>
+    <div class="ruler" id="ruler"><div class="ruler-inner" id="rulerInner"></div></div>
+    <div class="keyboard" id="keyboard"></div>
+    <div class="canvas" id="canvas">
+      <div class="grid-rows" id="gridRows"></div>
+      <div class="beat-lines" id="beatLines"></div>
+      <div class="notes-layer" id="notesLayer"></div>
+      <div class="marquee" id="marquee"></div>
+      <div class="playhead" id="playhead"></div>
+    </div>
+  </div>
+  <div class="drop-hint">松开鼠标载入音频（可选，只为对齐听感）</div>
+</div>
+
+<div class="statusbar">
+  <span>音高 <b id="s-pitch">—</b></span>
+  <span>位置 <b id="s-pos">—</b></span>
+  <span>选区 <b id="s-sel">0</b></span>
+  <span>音符 <b id="s-count">0</b></span>
+  <span>力度 <b id="s-vel">—</b></span>
+  <span class="grow"></span>
+  <span id="s-msg"></span>
+</div>
+
+<aside class="inspector" id="inspector">
+  <header>
+    <span>当前轨 · tick 域数据</span>
+    <span id="insp-n" style="color:var(--text-dim)"></span>
+    <span class="grow" style="flex:1"></span>
+    <button id="inspectClose" class="icon">×</button>
+  </header>
+  <pre id="inspectJson"></pre>
+</aside>
+
+<div class="help" id="help">
+  <div><b>工具</b> <kbd>V</kbd> 选择 <kbd>B</kbd> 画笔 <kbd>E</kbd> 橡皮</div>
+  <div><b>编辑</b> 拖音符=移动（时间+音高） · 右边缘=改时值 · 双击空白=新建</div>
+  <div><b>多选</b> 空白拖=框选 · <kbd>Shift</kbd>+点=加减选 · 拖任一选中音符=整组移动</div>
+  <div><b>删除</b> <kbd>Delete</kbd> 或右键点音符</div>
+  <div><b>撤销</b> <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></div>
+  <div><b>缩放</b> <kbd>Ctrl</kbd>+滚轮=横向 · <kbd>Shift</kbd>+滚轮=纵向 · <kbd>Alt</kbd>+滚轮过音符=力度</div>
+  <div><b>吸附</b> 按住 <kbd>Alt</kbd> 拖动 = 临时关掉吸附</div>
+  <div><b>播放</b> <kbd>空格</kbd> 播放/暂停 · 标尺上点击拖动=定位 · 拖入音频=跟着真音频对时</div>
+</div>
+
+<audio id="audio" style="display:none"></audio>
+
+<script>
+/* =====================================================================
+   0. 常量与工具
+   ===================================================================== */
+const PPQ = 480;                 // 每四分音符 tick 数（对齐 USTX/SVP 习惯）
+const PITCH_MIN = 12;            // C0
+const PITCH_MAX = 108;           // C8
+const KEY_COUNT = PITCH_MAX - PITCH_MIN + 1;
+const SEMITONE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const BLACK_KEYS = new Set([1,3,6,8,10]);
+const UNDO_LIMIT = 200;
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function pitchName(p) { return SEMITONE_NAMES[((p % 12) + 12) % 12] + (Math.floor(p / 12) - 1); }
+function isBlackKey(p) { return BLACK_KEYS.has(((p % 12) + 12) % 12); }
+
+/* =====================================================================
+   1. 状态
+   ---------------------------------------------------------------------
+   音符是 **tick 域**的。秒域只在渲染时经小节表算出来，绝不存第二份。
+   ===================================================================== */
+const state = {
+  ppq: PPQ,
+  timeSig: { num: 4, den: 4 },
+  /** 速度表。原型是常量，但结构支持变速——换算走分段线性，不留线性假设。 */
+  tempoMap: [{ tick: 0, bpm: 120 }],
+
+  tracks: [
+    { id: 0, name: '人声', color: 'var(--track-green-bright)', dim: 'var(--track-green)' },
+    { id: 1, name: '器乐', color: 'var(--track-blue-bright)',  dim: 'var(--track-blue)' },
+    { id: 2, name: '和弦', color: 'var(--track-red-bright)',   dim: 'var(--track-red)' },
+  ],
+  currentTrack: 0,
+
+  /** @type {{id:number,track:number,tick:number,dur:number,pitch:number,lyric:string,vel:number}[]} */
+  notes: [],
+  selection: new Set(),
+
+  view: { pxPerSec: 60, rowHeight: 14 },
+
+  snapDen: 8,        // 1/8 音符；0 = 关
+  tool: 'select',    // select | pencil | erase
+  follow: true,
+  playheadSec: 0,
+  scaleRoot: 0,      // 调式根音（半音，0=C），高亮用
+};
+
+let nextId = 1;
+const marks = { undo: [], redo: [] };
+
+/* =====================================================================
+   2. 时间换算：tick ↔ 秒（小节表的唯一真源）
+   ---------------------------------------------------------------------
+   变速时 tick→秒 是分段线性。UI 一律用**秒**算像素（和 LaneView.vue 一致），
+   于是缩放、滚动、播放头在变速工程里也不会歪。
+   ===================================================================== */
+function secPerTickAt(bpm) { return 60 / (bpm * state.ppq); }
+
+function tickToSec(tick) {
+  const map = state.tempoMap;
+  let sec = 0;
+  for (let i = 0; i < map.length; i++) {
+    const seg = map[i];
+    const next = map[i + 1];
+    const segEnd = next ? next.tick : Infinity;
+    if (tick <= segEnd || !next) return sec + (tick - seg.tick) * secPerTickAt(seg.bpm);
+    sec += (segEnd - seg.tick) * secPerTickAt(seg.bpm);
+  }
+  return sec;
+}
+
+function secToTick(sec) {
+  const map = state.tempoMap;
+  let acc = 0;
+  for (let i = 0; i < map.length; i++) {
+    const seg = map[i];
+    const next = map[i + 1];
+    const segSec = next ? (next.tick - seg.tick) * secPerTickAt(seg.bpm) : Infinity;
+    if (sec <= acc + segSec || !next) return seg.tick + (sec - acc) / secPerTickAt(seg.bpm);
+    acc += segSec;
+  }
+  return 0;
+}
+
+/** 一小节多少 tick。拍号变了这里跟着变。 */
+function barTicks() {
+  return state.ppq * 4 * state.timeSig.num / state.timeSig.den;
+}
+function beatTicks() { return state.ppq * 4 / state.timeSig.den; }
+
+/** 总时长（秒）：最后一个音符之后留 2 小节余量，至少 8 小节。 */
+function totalSec() {
+  const lastTick = state.notes.reduce((m, n) => Math.max(m, n.tick + n.dur), 0);
+  const tick = Math.max(barTicks() * 8, lastTick + barTicks() * 2);
+  return tickToSec(Math.ceil(tick / barTicks()) * barTicks());
+}
+
+/* --- 像素换算 --- */
+const rowH = () => state.view.rowHeight;
+function secToX(sec) { return sec * state.view.pxPerSec; }
+function tickToX(tick) { return secToX(tickToSec(tick)); }
+function xToTick(x) { return secToTick(x / state.view.pxPerSec); }
+function pitchToY(p) { return (PITCH_MAX - p) * rowH(); }
+function yToPitch(y) { return clamp(PITCH_MAX - Math.floor(y / rowH()), PITCH_MIN, PITCH_MAX); }
+function canvasWidth() { return Math.max(600, secToX(totalSec())); }
+function canvasHeight() { return KEY_COUNT * rowH(); }
+
+/* --- 网格与吸附 --- */
+function gridTicks() { return state.snapDen > 0 ? state.ppq * 4 / state.snapDen : 1; }
+function snapTick(tick, forceOff) {
+  if (forceOff || state.snapDen <= 0) return Math.round(tick);
+  const g = gridTicks();
+  return Math.round(tick / g) * g;
+}
+
+/* =====================================================================
+   3. 假数据 —— 改这里就能换歌
+   ===================================================================== */
+function makeDemoNotes() {
+  const out = [];
+  const lyrics = '春眠不觉晓处处闻啼鸟夜来风雨声花落知多少';
+  const major = [0, 2, 4, 5, 7, 9, 11];
+  const bar = barTicks();
+
+  // 轨 0：人声。16 小节，每句 2 小节 8 个音。
+  for (let phrase = 0; phrase < 8; phrase++) {
+    for (let i = 0; i < 8; i++) {
+      const deg = major[(i * 3 + phrase * 2) % 7];
+      const leap = (i === 6) ? 12 : 0;
+      const tick = phrase * bar * 2 + i * (PPQ / 2);
+      out.push({
+        id: nextId++, track: 0, tick, dur: PPQ * 3 / 4,
+        pitch: 60 + deg + leap,
+        lyric: lyrics[(phrase * 8 + i) % lyrics.length],
+        vel: 0.62 + ((i * 5 + phrase * 7) % 4) * 0.09,
+      });
+    }
+  }
+
+  // 轨 1：器乐。每小节根音长音，低八度。
+  for (let b = 0; b < 16; b++) {
+    out.push({
+      id: nextId++, track: 1, tick: b * bar, dur: bar - PPQ / 2,
+      pitch: 36 + major[(b * 2) % 7], lyric: '', vel: 0.7,
+    });
+  }
+
+  // 轨 2：和弦。每小节的级数三和弦。
+  for (let b = 0; b < 16; b++) {
+    const deg = [0, 5, 3, 4][b % 4];
+    for (let k = 0; k < 3; k++) {
+      out.push({
+        id: nextId++, track: 2, tick: b * bar, dur: bar - PPQ / 2,
+        pitch: 48 + major[(deg + k * 2) % 7] + (deg + k * 2 >= 7 ? 12 : 0),
+        lyric: '', vel: 0.55,
+      });
+    }
+  }
+  return out;
+}
+
+/* =====================================================================
+   4. 撤销栈
+   ---------------------------------------------------------------------
+   一次**手势**一条记录（按下时抓 before，抬起时若有变化才入栈），
+   而不是每次 mousemove 一条——否则拖一下要按 50 次 Ctrl+Z。
+   ===================================================================== */
+function snapshot(ids) {
+  const set = ids ? new Set(ids) : null;
+  return state.notes
+    .filter((n) => !set || set.has(n.id))
+    .map((n) => ({ ...n }));
+}
+
+function pushUndo(before, after) {
+  marks.undo.push({ before, after });
+  if (marks.undo.length > UNDO_LIMIT) marks.undo.shift();
+  marks.redo.length = 0;
+}
+
+/** 用一组快照**替换**当前音符：快照里有的覆盖，不在快照里的保持。 */
+function applySnapshot(snap, allIds) {
+  const byId = new Map(state.notes.map((n) => [n.id, n]));
+  const seen = new Set();
+  for (const s of snap) {
+    seen.add(s.id);
+    const cur = byId.get(s.id);
+    if (cur) Object.assign(cur, s);
+    else state.notes.push({ ...s });
+  }
+  // 快照是"全集"语义时（新建/删除），把不在里面的删掉
+  if (allIds) {
+    const keep = new Set(snap.map((s) => s.id));
+    state.notes = state.notes.filter((n) => keep.has(n.id) || !allIds.has(n.id));
+  }
+}
+
+function undo() {
+  const m = marks.undo.pop();
+  if (!m) return say('没有可撤销的操作');
+  marks.redo.push(m);
+  replay(m, 'before');
+  say('已撤销');
+}
+function redo() {
+  const m = marks.redo.pop();
+  if (!m) return say('没有可重做的操作');
+  marks.undo.push(m);
+  replay(m, 'after');
+  say('已重做');
+}
+
+/**
+ * 回放一条记录。删除/新建这类"增删"用 before+after 两个全集快照整体替换，
+ * 移动/拉伸这类"改字段"只覆盖涉及的 id。
+ */
+function replay(m, side) {
+  const list = side === 'before' ? m.before : m.after;
+  if (m.structural) {
+    state.notes = list.map((n) => ({ ...n }));
+  } else {
+    const byId = new Map(state.notes.map((n) => [n.id, n]));
+    for (const s of list) {
+      const cur = byId.get(s.id);
+      if (cur) Object.assign(cur, s);
+    }
+  }
+  // 选区里已不存在的 id 清掉
+  const alive = new Set(state.notes.map((n) => n.id));
+  for (const id of [...state.selection]) if (!alive.has(id)) state.selection.delete(id);
+  renderAll();
+}
+
+/* =====================================================================
+   5. DOM 引用
+   ===================================================================== */
+const els = {
+  scroll: document.getElementById('scroll'),
+  grid: document.getElementById('grid'),
+  ruler: document.getElementById('ruler'),
+  rulerInner: document.getElementById('rulerInner'),
+  keyboard: document.getElementById('keyboard'),
+  canvas: document.getElementById('canvas'),
+  gridRows: document.getElementById('gridRows'),
+  beatLines: document.getElementById('beatLines'),
+  notesLayer: document.getElementById('notesLayer'),
+  marquee: document.getElementById('marquee'),
+  playhead: document.getElementById('playhead'),
+  audio: document.getElementById('audio'),
+  clock: document.getElementById('clock'),
+  inspector: document.getElementById('inspector'),
+  inspectJson: document.getElementById('inspectJson'),
+  inspN: document.getElementById('insp-n'),
+};
+
+let audioUrl = null;
+
+/* =====================================================================
+   6. 渲染
+   ===================================================================== */
+function trackColor(trackId) {
+  return state.tracks.find((t) => t.id === trackId)?.color ?? '#888';
+}
+
+/** 几何重建：只在缩放/数据跨度变化时做，滚动和拖拽走不到这里。 */
+function rebuildGeometry() {
+  const w = canvasWidth();
+  const h = canvasHeight();
+  els.grid.style.setProperty('--canvas-w', w + 'px');
+  els.grid.style.setProperty('--canvas-h', h + 'px');
+  renderKeyboard();
+  renderGridRows();
+  renderRuler();
+  renderBeatLines();
+  els.canvas.style.width = w + 'px';
+  els.canvas.style.height = h + 'px';
+}
+
+function renderKeyboard() {
+  const h = rowH();
+  let html = '';
+  for (let p = PITCH_MAX; p >= PITCH_MIN; p--) {
+    const black = isBlackKey(p);
+    const inScale = (((p - state.scaleRoot) % 12) + 12) % 12 === 0
+      || [0,2,4,5,7,9,11].includes((((p - state.scaleRoot) % 12) + 12) % 12);
+    const label = (p % 12 === 0) ? pitchName(p) : '';
+    html += `<div class="piano-key ${black ? 'black' : 'white'}" style="height:${h}px" data-pitch="${p}">`
+      + (black ? `<span class="key-title">${label}</span>` : `<span>${label}</span>`)
+      + (inScale && !black ? '<i class="scale-accent"></i>' : '')
+      + `</div>`;
+  }
+  els.keyboard.innerHTML = html;
+}
+
+function renderGridRows() {
+  const h = rowH();
+  const scale = [0, 2, 4, 5, 7, 9, 11];
+  let html = '';
+  for (let p = PITCH_MAX; p >= PITCH_MIN; p--) {
+    const deg = (((p - state.scaleRoot) % 12) + 12) % 12;
+    const inScale = scale.includes(deg);
+    const isOctave = p % 12 === 0;
+    html += `<div class="grid-row ${inScale ? 'in-scale' : ''} ${isOctave ? 'octave-line' : ''}"`
+      + ` style="top:${pitchToY(p)}px;height:${h}px"></div>`;
+  }
+  els.gridRows.innerHTML = html;
+}
+
+function renderRuler() {
+  const bar = barTicks();
+  const beat = beatTicks();
+  const totalTicks = secToTick(totalSec());
+  let html = '';
+  for (let t = 0; t <= totalTicks; t += beat) {
+    const isBar = Math.abs(t % bar) < 1;
+    const x = tickToX(t);
+    if (isBar) {
+      const barNo = Math.round(t / bar) + 1;
+      html += `<div class="ruler-label bar" style="left:${x}px">${barNo}</div>`;
+    } else {
+      html += `<div class="ruler-label" style="left:${x}px"></div>`;
+    }
+  }
+  html += '<div class="ruler-mark" id="rulerMark" style="left:0"></div>';
+  els.rulerInner.innerHTML = html;
+}
+
+function renderBeatLines() {
+  const bar = barTicks();
+  const beat = beatTicks();
+  const totalTicks = secToTick(totalSec());
+  let html = '';
+  for (let t = 0; t <= totalTicks; t += beat) {
+    const isBar = Math.abs(t % bar) < 1;
+    html += `<div class="beat-line ${isBar ? 'bar' : ''}" style="left:${tickToX(t)}px"></div>`;
+  }
+  els.beatLines.innerHTML = html;
+}
+
+/** 音符只渲染**当前轨**；其它轨画成细幽灵线，用来对位。 */
+function renderNotes() {
+  const h = rowH();
+  const cur = state.currentTrack;
+  let html = '';
+  for (const n of state.notes) {
+    const x = tickToX(n.tick);
+    const w = Math.max(3, tickToX(n.tick + n.dur) - x);
+    if (n.track === cur) {
+      const sel = state.selection.has(n.id) ? ' sel' : '';
+      const opacity = (0.34 + 0.66 * clamp(n.vel, 0, 1)).toFixed(3);
+      html += `<div class="note${sel}" data-id="${n.id}" style="left:${x.toFixed(1)}px;top:${pitchToY(n.pitch) + 1}px;`
+        + `width:${w.toFixed(1)}px;height:${Math.max(4, h - 2)}px;background:${trackColor(n.track)};opacity:${opacity}">`
+        + `<span class="note-lyric">${esc(n.lyric)}</span><i class="handle"></i></div>`;
+    } else {
+      const t = state.tracks.find((k) => k.id === n.track);
+      html += `<div class="note ghost" data-ghost="${n.id}" style="left:${x.toFixed(1)}px;`
+        + `top:${pitchToY(n.pitch) + h / 2 - 1}px;width:${w.toFixed(1)}px;background:${t ? t.dim : '#666'}"></div>`;
+    }
+  }
+  els.notesLayer.innerHTML = html;
+}
+
+function renderPlayhead() {
+  const x = secToX(state.playheadSec);
+  els.playhead.style.left = x + 'px';
+  const mark = document.getElementById('rulerMark');
+  if (mark) mark.style.left = x + 'px';
+  const total = totalSec();
+  els.clock.textContent = `${fmtClock(state.playheadSec)} / ${fmtClock(total)}`;
+}
+
+function fmtClock(sec) {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60);
+  const r = s - m * 60;
+  return `${m}:${r.toFixed(1).padStart(4, '0')}`;
+}
+
+function renderStatus(evt) {
+  const count = state.notes.filter((n) => n.track === state.currentTrack).length;
+  document.getElementById('s-count').textContent = String(count);
+  document.getElementById('s-sel').textContent = String(state.selection.size);
+
+  if (evt) {
+    const { x, y } = localPoint(evt);
+    if (x != null && y != null) {
+      const t = xToTick(x);
+      const p = yToPitch(y);
+      document.getElementById('s-pitch').textContent = pitchName(p);
+      document.getElementById('s-pos').textContent =
+        `${fmtClock(tickToSec(t))}  tick ${Math.round(t)}`;
+    }
+  }
+
+  const selNote = state.notes.find((n) => state.selection.has(n.id));
+  document.getElementById('s-vel').textContent = selNote ? selNote.vel.toFixed(2) : '—';
+}
+
+function renderInspector() {
+  if (!els.inspector.classList.contains('open')) return;
+  const cur = state.notes.filter((n) => n.track === state.currentTrack)
+    .sort((a, b) => a.tick - b.tick);
+  els.inspN.textContent = `${cur.length} 个`;
+  els.inspectJson.textContent = JSON.stringify({
+    ppq: state.ppq,
+    timeSig: state.timeSig,
+    tempoMap: state.tempoMap,
+    track: state.tracks.find((t) => t.id === state.currentTrack)?.name,
+    notes: cur.map((n) => ({
+      tick: Math.round(n.tick), dur: Math.round(n.dur),
+      pitch: n.pitch, lyric: n.lyric, vel: Number(n.vel.toFixed(2)),
+    })),
+  }, null, 1);
+}
+
+function renderAll() {
+  renderNotes();
+  renderPlayhead();
+  renderStatus();
+  renderInspector();
+  syncButtons();
+}
+
+function syncButtons() {
+  document.getElementById('undo').disabled = marks.undo.length === 0;
+  document.getElementById('redo').disabled = marks.redo.length === 0;
+  for (const [id, tool] of [['t-select', 'select'], ['t-pencil', 'pencil'], ['t-erase', 'erase']]) {
+    document.getElementById(id).classList.toggle('on', state.tool === tool);
+  }
+  document.getElementById('follow').classList.toggle('on', state.follow);
+}
+
+let msgTimer = null;
+function say(text) {
+  document.getElementById('s-msg').textContent = text;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => { document.getElementById('s-msg').textContent = ''; }, 2200);
+}
+
+/* =====================================================================
+   7. 命中测试与坐标
+   ===================================================================== */
+/** 鼠标 → 网格内容坐标。用 getBoundingClientRect，滚动被自动算进去。 */
+function localPoint(evt) {
+  const r = els.canvas.getBoundingClientRect();
+  return { x: evt.clientX - r.left, y: evt.clientY - r.top };
+}
+
+function currentTrackNotes() {
+  return state.notes.filter((n) => n.track === state.currentTrack);
+}
+
+/** 返回 {note, zone}；zone = 'body' | 'right'。后命中的在上层，所以倒序遍历。 */
+function hitNote(x, y) {
+  const h = rowH();
+  const list = currentTrackNotes();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const n = list[i];
+    const nx = tickToX(n.tick);
+    const nw = Math.max(3, tickToX(n.tick + n.dur) - nx);
+    const ny = pitchToY(n.pitch) + 1;
+    if (x >= nx && x <= nx + nw && y >= ny && y <= ny + Math.max(4, h - 2)) {
+      return { note: n, zone: (x >= nx + nw - 6) ? 'right' : 'body' };
+    }
+  }
+  return null;
+}
+
+/* =====================================================================
+   8. 手势状态机
+   ---------------------------------------------------------------------
+   所有交互都是「mousedown 起手 → mousemove 更新 → mouseup 提交」。
+   拖动过程中**不改 state**，只挪 DOM；提交时才写 state 并入撤销栈。
+   这样既有 60fps 的跟手，撤销栈也干净。
+   ===================================================================== */
+let drag = null;
+
+function onMouseDown(evt) {
+  if (evt.button !== 0) return;
+  const { x, y } = localPoint(evt);
+
+  // --- 画布上的手势 ---
+  const hit = hitNote(x, y);
+  const bypassSnap = evt.altKey;
+
+  if (hit) {
+    if (state.tool === 'erase') { deleteNotes([hit.note.id]); return; }
+
+    // 选区：点未选中的音符 = 单选；Shift 点 = 加减选
+    if (!state.selection.has(hit.note.id)) {
+      if (!evt.shiftKey) state.selection.clear();
+      state.selection.add(hit.note.id);
+    } else if (evt.shiftKey) {
+      state.selection.delete(hit.note.id);
+      renderNotes(); renderStatus();
+      return;
+    }
+    renderNotes(); renderStatus();
+
+    const ids = [...state.selection];
+    const anchors = new Map(ids.map((id) => {
+      const n = state.notes.find((k) => k.id === id);
+      return [id, { tick: n.tick, dur: n.dur, pitch: n.pitch }];
+    }));
+
+    drag = {
+      mode: hit.zone === 'right' ? 'resize' : 'move',
+      anchorId: hit.note.id, ids, anchors,
+      startX: x, startY: y,
+      startTick: xToTick(x), startPitch: yToPitch(y),
+      before: snapshot(ids), moved: false, bypassSnap,
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return;
+  }
+
+  // --- 空白处 ---
+  if (state.tool === 'pencil') {
+    const tick = snapTick(xToTick(x), bypassSnap);
+    const pitch = yToPitch(y);
+    const note = { id: nextId++, track: state.currentTrack, tick, dur: gridTicks(), pitch, lyric: 'la', vel: 0.8 };
+    const before = snapshotList();
+    state.notes.push(note);
+    state.selection = new Set([note.id]);
+    drag = {
+      mode: 'resize', anchorId: note.id, ids: [note.id],
+      anchors: new Map([[note.id, { tick, dur: note.dur, pitch }]]),
+      startX: x, startY: y, startTick: tick, startPitch: pitch,
+      before, created: true, bypassSnap,
+      structuralBefore: before,
+    };
+    renderAll();
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return;
+  }
+
+  if (state.tool === 'erase') return;
+
+  // 选择工具：空白起手 = 框选
+  if (!evt.shiftKey) { state.selection.clear(); renderNotes(); renderStatus(); }
+  drag = { mode: 'marquee', startX: x, startY: y, additive: evt.shiftKey, base: new Set(state.selection) };
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+}
+
+function snapshotList() {
+  return state.notes.map((n) => ({ ...n }));
+}
+
+function onMouseMove(evt) {
+  if (!drag) { renderStatus(evt); return; }
+  const { x, y } = localPoint(evt);
+  // 拖动中也刷新状态栏：鼠标可能已经移出画布，画布上那个 mousemove 监听收不到。
+  renderStatus(evt);
+
+  if (drag.mode === 'marquee') {
+    const l = Math.min(drag.startX, x), r = Math.max(drag.startX, x);
+    const t = Math.min(drag.startY, y), b = Math.max(drag.startY, y);
+    els.marquee.style.display = 'block';
+    els.marquee.style.left = l + 'px';
+    els.marquee.style.top = t + 'px';
+    els.marquee.style.width = (r - l) + 'px';
+    els.marquee.style.height = (b - t) + 'px';
+    const inside = new Set(drag.additive ? drag.base : []);
+    const h = rowH();
+    for (const n of currentTrackNotes()) {
+      const nx = tickToX(n.tick);
+      const nw = Math.max(3, tickToX(n.tick + n.dur) - nx);
+      const ny = pitchToY(n.pitch);
+      if (nx < r && nx + nw > l && ny < b && ny + h > t) inside.add(n.id);
+    }
+    state.selection = inside;
+    renderNotes(); renderStatus();
+    return;
+  }
+
+  if (drag.mode === 'move') {
+    const rawDt = xToTick(x) - drag.startTick;
+    const dpitch = yToPitch(y) - drag.startPitch;
+    const anchor0 = drag.anchors.get(drag.anchorId);
+    // Alt 每次 move 都重读：DAW 里允许拖到一半才按住 Alt 关掉吸附，
+    // 冻结在 mousedown 会让「先拖后按」这个最自然的动作失效。
+    const wantTick = snapTick(anchor0.tick + rawDt, evt.altKey);
+    const dt = wantTick - anchor0.tick;
+    if (dt !== 0 || dpitch !== 0) drag.moved = true;
+
+    for (const id of drag.ids) {
+      const a = drag.anchors.get(id);
+      const n = state.notes.find((k) => k.id === id);
+      if (!n) continue;
+      n.tick = Math.max(0, a.tick + dt);
+      n.pitch = clamp(a.pitch + dpitch, PITCH_MIN, PITCH_MAX);
+      paintNote(n);
+    }
+    return;
+  }
+
+  if (drag.mode === 'resize') {
+    const a = drag.anchors.get(drag.anchorId);
+    const end = snapTick(xToTick(x), evt.altKey);
+    const min = state.snapDen > 0 ? gridTicks() : 1;
+    const dur = Math.max(min, end - a.tick);
+    for (const id of drag.ids) {
+      const n = state.notes.find((k) => k.id === id);
+      if (!n) continue;
+      if (id === drag.anchorId) { n.dur = dur; drag.moved = true; }
+      paintNote(n);
+    }
+    return;
+  }
+}
+
+/** 拖动时的快速路径：只挪 DOM，不重建整层。 */
+function paintNote(n) {
+  const el = els.notesLayer.querySelector(`.note[data-id="${n.id}"]`);
+  if (!el) return;
+  const x = tickToX(n.tick);
+  const w = Math.max(3, tickToX(n.tick + n.dur) - x);
+  el.style.left = x.toFixed(1) + 'px';
+  el.style.top = (pitchToY(n.pitch) + 1) + 'px';
+  el.style.width = w.toFixed(1) + 'px';
+}
+
+function onMouseUp() {
+  window.removeEventListener('mousemove', onMouseMove);
+  window.removeEventListener('mouseup', onMouseUp);
+  els.marquee.style.display = 'none';
+  stopEdgeScroll();
+
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+
+  if (d.mode === 'marquee') { renderAll(); return; }
+
+  if (d.created) {
+    // 新建：before/after 都是全集快照
+    pushStructural(d.before, snapshotList());
+    renderAll();
+    say('新建音符');
+    return;
+  }
+
+  if (!d.moved) { renderAll(); return; }
+  const after = snapshot(d.ids);
+  // 位置/时值有变化才入栈
+  const changed = after.some((n, i) => {
+    const b = new Map(d.before.map((x) => [x.id, x])).get(n.id);
+    return !b || b.tick !== n.tick || b.dur !== n.dur || b.pitch !== n.pitch;
+  });
+  if (changed) pushUndo(d.before, after);
+  renderAll();
+}
+
+function pushStructural(before, after) {
+  marks.undo.push({ before, after, structural: true });
+  if (marks.undo.length > UNDO_LIMIT) marks.undo.shift();
+  marks.redo.length = 0;
+}
+
+/* --- 空白双击 = 新建（选择工具下的快捷方式，和 DAW 一致） --- */
+function onDblClick(evt) {
+  const { x, y } = localPoint(evt);
+  if (hitNote(x, y)) return;
+  const before = snapshotList();
+  const note = {
+    id: nextId++, track: state.currentTrack,
+    tick: snapTick(xToTick(x), evt.altKey), dur: Math.max(gridTicks(), PPQ / 2),
+    pitch: yToPitch(y), lyric: 'la', vel: 0.8,
+  };
+  state.notes.push(note);
+  state.selection = new Set([note.id]);
+  pushStructural(before, snapshotList());
+  renderAll();
+  say('新建音符');
+}
+
+function deleteNotes(ids) {
+  if (!ids.length) return;
+  const before = snapshotList();
+  const set = new Set(ids);
+  state.notes = state.notes.filter((n) => !set.has(n.id));
+  for (const id of ids) state.selection.delete(id);
+  pushStructural(before, snapshotList());
+  renderAll();
+  say(`删除 ${ids.length} 个音符`);
+}
+
+/* --- 右键删除 --- */
+function onContextMenu(evt) {
+  const { x, y } = localPoint(evt);
+  const hit = hitNote(x, y);
+  if (!hit) return;
+  evt.preventDefault();
+  if (state.selection.has(hit.note.id) && state.selection.size > 1) deleteNotes([...state.selection]);
+  else deleteNotes([hit.note.id]);
+}
+
+/* =====================================================================
+   9. 横向/纵向缩放（锚在鼠标下，DAW 手感的关键）
+   ===================================================================== */
+function zoomX(factor, clientX) {
+  const rect = els.canvas.getBoundingClientRect();
+  const localX = clientX - rect.left;
+  const secAt = localX / state.view.pxPerSec;
+  const next = clamp(state.view.pxPerSec * factor, 8, 600);
+  if (next === state.view.pxPerSec) return;
+  state.view.pxPerSec = next;
+  rebuildGeometry();
+  renderAll();
+  els.scroll.scrollLeft += secAt * next - localX;
+}
+
+function zoomY(factor, clientY) {
+  const rect = els.canvas.getBoundingClientRect();
+  const localY = clientY - rect.top;
+  const pitchAt = localY / state.view.rowHeight;
+  const next = clamp(state.view.rowHeight * factor, 7, 30);
+  if (next === state.view.rowHeight) return;
+  state.view.rowHeight = next;
+  rebuildGeometry();
+  renderAll();
+  els.scroll.scrollTop += pitchAt * next - localY;
+}
+
+/* =====================================================================
+   10. 播放
+   ---------------------------------------------------------------------
+   有音频就跟真音频的 currentTime（这才是能判断"对不对得上"的那一半）；
+   没有就用墙钟推进。两条路都只更新 playheadSec，tick 由它反推。
+   ===================================================================== */
+let playing = false;
+let rafId = null;
+let lastTs = 0;
+
+function play() {
+  if (playing) return;
+  playing = true;
+  document.getElementById('play').textContent = '❚❚';
+  const audio = els.audio;
+  if (audio.src) { audio.currentTime = state.playheadSec; audio.play().catch(() => {}); }
+  lastTs = performance.now();
+  rafId = requestAnimationFrame(loop);
+}
+
+function pause() {
+  if (!playing) return;
+  playing = false;
+  document.getElementById('play').textContent = '▶';
+  if (els.audio.src) els.audio.pause();
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
+}
+
+function stop() {
+  pause();
+  state.playheadSec = 0;
+  if (els.audio.src) els.audio.currentTime = 0;
+  renderPlayhead();
+}
+
+function loop(ts) {
+  if (!playing) return;
+  const dt = (ts - lastTs) / 1000;
+  lastTs = ts;
+  if (els.audio.src) state.playheadSec = els.audio.currentTime;
+  else state.playheadSec += dt;
+  if (state.playheadSec >= totalSec()) { stop(); return; }
+  renderPlayhead();
+  if (state.follow) ensureVisible();
+  rafId = requestAnimationFrame(loop);
+}
+
+function ensureVisible() {
+  const x = secToX(state.playheadSec);
+  const left = els.scroll.scrollLeft;
+  const w = els.scroll.clientWidth;
+  if (!w) return;
+  if (x < left + 40 || x > left + w - 80) els.scroll.scrollLeft = Math.max(0, x - w * 0.3);
+}
+
+/* --- 标尺上点击拖动 = 定位 --- */
+function rulerScrub(evt) {
+  const r = els.ruler.getBoundingClientRect();
+  const sec = clamp((evt.clientX - r.left) / state.view.pxPerSec, 0, totalSec());
+  state.playheadSec = sec;
+  if (els.audio.src) els.audio.currentTime = sec;
+  renderPlayhead();
+}
+
+/* =====================================================================
+   11. 网格边缘自动滚动（拖音符拖到边上要能自己滚）
+   ===================================================================== */
+let edgeRaf = null;
+let edgePointer = null;
+
+function startEdgeScroll() {
+  if (edgeRaf) return;
+  const step = () => {
+    if (!drag || !edgePointer) { edgeRaf = null; return; }
+    const r = els.scroll.getBoundingClientRect();
+    const EDGE = 44;
+    const left = edgePointer.clientX - r.left;
+    const right = r.right - edgePointer.clientX;
+    let d = 0;
+    if (left < EDGE) d = -(EDGE - left) / 6;
+    else if (right < EDGE) d = (EDGE - right) / 6;
+    if (d) {
+      els.scroll.scrollLeft += d;
+      onMouseMove(edgePointer);
+    }
+    edgeRaf = requestAnimationFrame(step);
+  };
+  edgeRaf = requestAnimationFrame(step);
+}
+function stopEdgeScroll() {
+  if (edgeRaf) cancelAnimationFrame(edgeRaf);
+  edgeRaf = null;
+  edgePointer = null;
+}
+
+/* =====================================================================
+   12. 事件接线
+   ===================================================================== */
+els.canvas.addEventListener('mousedown', (e) => { onMouseDown(e); });
+els.canvas.addEventListener('mousemove', (e) => {
+  if (drag) { edgePointer = e; startEdgeScroll(); }
+  renderStatus(e);
+  const { x, y } = localPoint(e);
+  const hit = hitNote(x, y);
+  els.canvas.style.cursor = hit
+    ? (hit.zone === 'right' ? 'ew-resize' : 'move')
+    : (state.tool === 'pencil' ? 'crosshair' : state.tool === 'erase' ? 'not-allowed' : 'default');
+});
+els.canvas.addEventListener('dblclick', onDblClick);
+els.canvas.addEventListener('contextmenu', onContextMenu);
+
+els.ruler.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  rulerScrub(e);
+  const move = (ev) => rulerScrub(ev);
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+
+// 滚轮：Ctrl=横向缩放，Shift=纵向缩放，Alt=力度，其它=滚动
+els.scroll.addEventListener('wheel', (e) => {
+  if (e.ctrlKey) { e.preventDefault(); zoomX(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX); return; }
+  if (e.shiftKey) { e.preventDefault(); zoomY(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientY); return; }
+  if (e.altKey) {
+    e.preventDefault();
+    const { x, y } = localPoint(e);
+    const hit = hitNote(x, y);
+    if (hit) {
+      hit.note.vel = clamp(hit.note.vel + (e.deltaY < 0 ? 0.05 : -0.05), 0, 1);
+      renderNotes(); renderInspector(); renderStatus();
+    }
+    return;
+  }
+}, { passive: false });
+
+// 工具条
+document.getElementById('t-select').onclick = () => setTool('select');
+document.getElementById('t-pencil').onclick = () => setTool('pencil');
+document.getElementById('t-erase').onclick = () => setTool('erase');
+function setTool(t) { state.tool = t; syncButtons(); say(`工具：${{select:'选择',pencil:'画笔',erase:'橡皮'}[t]}`); }
+
+document.getElementById('snap').onchange = (e) => {
+  state.snapDen = Number(e.target.value);
+  say(state.snapDen ? `网格 1/${state.snapDen}` : '吸附已关');
+};
+
+document.getElementById('quantize').onclick = () => {
+  const ids = state.selection.size ? [...state.selection] : currentTrackNotes().map((n) => n.id);
+  if (!ids.length) return say('这条轨没有音符');
+  const before = snapshot(ids);
+  const g = gridTicks();
+  for (const id of ids) {
+    const n = state.notes.find((k) => k.id === id);
+    n.tick = Math.max(0, Math.round(n.tick / g) * g);
+    n.dur = Math.max(g, Math.round(n.dur / g) * g);
+  }
+  pushUndo(before, snapshot(ids));
+  renderAll();
+  say(`量化 ${ids.length} 个音符`);
+};
+
+document.getElementById('undo').onclick = undo;
+document.getElementById('redo').onclick = redo;
+document.getElementById('play').onclick = () => (playing ? pause() : play());
+document.getElementById('stop').onclick = stop;
+document.getElementById('zin').onclick = () => zoomX(1.25, els.canvas.getBoundingClientRect().left + els.scroll.clientWidth / 2);
+document.getElementById('zout').onclick = () => zoomX(1 / 1.25, els.canvas.getBoundingClientRect().left + els.scroll.clientWidth / 2);
+document.getElementById('vzin').onclick = () => zoomY(1.2, els.canvas.getBoundingClientRect().top + els.scroll.clientHeight / 2);
+document.getElementById('vzout').onclick = () => zoomY(1 / 1.2, els.canvas.getBoundingClientRect().top + els.scroll.clientHeight / 2);
+document.getElementById('follow').onclick = (e) => {
+  state.follow = !state.follow;
+  e.currentTarget.classList.toggle('on', state.follow);
+  say(state.follow ? '跟随播放头：开' : '跟随播放头：关');
+};
+document.getElementById('inspect').onclick = () => {
+  els.inspector.classList.toggle('open');
+  renderInspector();
+};
+document.getElementById('inspectClose').onclick = () => els.inspector.classList.remove('open');
+document.getElementById('helpbtn').onclick = () => document.getElementById('help').classList.toggle('open');
+
+const trackSel = document.getElementById('track');
+trackSel.innerHTML = state.tracks.map((t) => `<option value="${t.id}">${t.name}</option>`).join('');
+trackSel.onchange = (e) => {
+  state.currentTrack = Number(e.target.value);
+  state.selection.clear();
+  renderAll();
+};
+
+// 键盘
+window.addEventListener('keydown', (e) => {
+  if (e.target instanceof HTMLSelectElement) return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    e.shiftKey ? redo() : undo();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+  if (e.key === ' ') { e.preventDefault(); playing ? pause() : play(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    if (state.selection.size) deleteNotes([...state.selection]);
+    return;
+  }
+  if (e.key === 'Escape') { state.selection.clear(); renderAll(); return; }
+  if (mod) return;
+  const k = e.key.toLowerCase();
+  if (k === 'v') setTool('select');
+  if (k === 'b') setTool('pencil');
+  if (k === 'e') setTool('erase');
+});
+
+// 可选：拖入音频，只为对齐听感
+function attachAudio(file) {
+  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  audioUrl = URL.createObjectURL(file);
+  els.audio.src = audioUrl;
+  say(`已载入音频：${file.name}`);
+}
+window.addEventListener('dragover', (e) => { e.preventDefault(); els.scroll.classList.add('dragging-file'); });
+window.addEventListener('dragleave', () => els.scroll.classList.remove('dragging-file'));
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  els.scroll.classList.remove('dragging-file');
+  const f = e.dataTransfer?.files?.[0];
+  if (f) attachAudio(f);
+});
+
+/* =====================================================================
+   13. 启动
+   ===================================================================== */
+state.notes = makeDemoNotes();
+rebuildGeometry();
+renderAll();
+// 视线落到 C4 附近，和原型的 scrollToCenterNotes 一致
+els.scroll.scrollTop = pitchToY(64) - 160;
+
+/* --- 给 jsdom 冒烟测试用的门面。浏览器里用不到，但让"拖拽"可被无头验证。 --- */
+window.__PR__ = {
+  state,
+  api: {
+    tickToSec, secToTick, tickToX, xToTick, secToX, canvasWidth, barTicks,
+    gridTicks, snapTick, totalSec, pitchName, yToPitch, hitNote,
+    undo, redo, deleteNotes, snapshotList, pushStructural, setTool, zoomX, zoomY,
+    localPoint, renderAll, makeDemoNotes, currentTrackNotes,
+    setSnap: (den) => { state.snapDen = den; },
+    quantize: () => document.getElementById('quantize').click(),
+    play: () => play(), pause: () => pause(), stop: () => stop(),
+    isPlaying: () => playing,
+  },
+  marks,
+  els,
+};
+</script>
+</body>
+</html>

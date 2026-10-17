@@ -162,6 +162,7 @@ def run(
     quantize: bool = True,
     simplicity: float = 0.0,
     pitch_shift: int = PITCH_SEMITONES,
+    octave_fix: bool = True,
     write: bool = True,
     **options: Any,
 ) -> dict[str, Any]:
@@ -178,6 +179,10 @@ def run(
     `pitch_shift` 是**旋律**的音高后期处理，默认 −12（降一个八度）：模型的旋律整体偏高
     一个八度，而和弦轨是准的，所以只动旋律、不动和弦，见 `pitch.py` 与
     `docs/WebUI问题清单.md` §1。传 0 就是原样。
+
+    `octave_fix`（默认开）是**局部**的八度一致性校正：模型对同一段旋律的不同出现
+    可能给不同的八度，这里按"重复段必须同高"逐段拉齐，见 `octave.py` 与
+    `docs/八度校正规格.md`。传 False 就只做整体平移。
     """
     owned = engine is None
     engine = engine or SheetSage2Engine(EngineConfig())
@@ -191,7 +196,8 @@ def run(
     # ---------------------------------------------------------- 音高后期处理
     # 放在最前面：往后所有东西（tick 域工程、卷帘、SVP）都从 `result` 取音高，
     # 这里统一改完，就不会出现"工程里是对的、下载的 MIDI 里是错的"。
-    result, pitch_stats = apply_pitch_shift(result, out, semitones=int(pitch_shift or 0))
+    result, pitch_stats = apply_pitch_shift(result, out, semitones=int(pitch_shift or 0),
+                                            octave_fix=bool(octave_fix))
 
     labs = result.get("labs") or {}
     duration = float(result.get("duration_seconds") or 0.0)
@@ -523,6 +529,8 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pitch-shift", type=int, default=PITCH_SEMITONES,
                         help="旋律音高后期处理（半音）：默认 -12（模型旋律整体高一个八度）；"
                              "0 = 原样，-24 = 降两个八度。和弦轨不动")
+    parser.add_argument("--no-octave-fix", dest="octave_fix", action="store_false",
+                        help="不做「重复段八度一致性校正」（默认做）")
     args = parser.parse_args(argv)
 
     if not args.audio.is_file():
@@ -537,7 +545,7 @@ def _main(argv: list[str] | None = None) -> int:
     payload = run(args.audio, args.out, engine=engine, progress=progress, bpm=args.bpm,
                   pickup=args.pickup, tempo_mode=args.tempo_mode,
                   quantize=args.quantize, simplicity=args.simplicity,
-                  pitch_shift=args.pitch_shift)
+                  pitch_shift=args.pitch_shift, octave_fix=args.octave_fix)
     decisions = payload["decisions"]
     print(f"\n拍号 {decisions['meter']}   弱起 {decisions['pickup_seconds']}s   "
           f"调性 {','.join(decisions['keys'])}")

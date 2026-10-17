@@ -10,6 +10,7 @@
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "smoke": "node smoke.mjs",
+    "smoke:pianoroll": "node smoke-pianoroll.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

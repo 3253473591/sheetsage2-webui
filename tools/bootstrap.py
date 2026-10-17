@@ -150,10 +150,19 @@ def step_torch(manifest: dict, *, dry_run: bool) -> None:
     if venv_imports("torch"):
         say("    已经装好了，跳过")
         return
-    WHEELS.mkdir(exist_ok=True)
     total = sum(item.get("bytes") or 0 for item in manifest["torch"])
     say(f"    要下 {human_bytes(total)}（按 10 MB/s 约 {total / 10 / 1024 / 1024 / 60:.0f} 分钟）；"
         f"下完会校验 sha256（那几秒也没进度条，正常）")
+    # `--dry-run` 必须在这一行之后**立刻**停住：`download()` 不认识 dry_run，
+    # 放任它跑下去就是真下 1.8 GB（曾经就这么漏过一次，把包目录塞满了轮子）。
+    if dry_run:
+        for item in manifest["torch"]:
+            target = WHEELS / item["name"]
+            state = "本地已有（会重算 sha256）" if target.is_file() else "要下载"
+            say(f"    [dry-run] {item['name']}：{state}（{human_bytes(item.get('bytes') or 0)}）")
+        say("    [dry-run] 然后 pip install 上面这些轮子（跳过）")
+        return
+    WHEELS.mkdir(exist_ok=True)
     local: list[Path] = []
     for item in manifest["torch"]:
         # 一律走 `download()`：本地已有的轮子也会**校验 sha256**（1.8 GB 的包，

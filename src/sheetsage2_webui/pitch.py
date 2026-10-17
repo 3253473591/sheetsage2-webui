@@ -1,4 +1,15 @@
-"""扒谱音高的后期处理：SheetSage2 的**旋律**（Vocal / Ins）整体高一个八度。
+"""扒谱音高的后期处理：**先校八度、再整体降一个八度**。
+
+模型（SheetSage2）的音高有两个毛病，一个全局、一个局部：
+
+| 毛病 | 表现 | 这一层怎么办 |
+|---|---|---|
+| **整体偏高一个八度** | `melody_vocal.mid` 中位 69~81，最高到 95（B6）——人声到不了 | 整条旋律 `−12`（`semitones`，默认值，面板上不暴露） |
+| **个别段落低一个八度** | 同一段副歌三次出现给 66 / 54 / 66（`samples/对齐`）| `octave.py`：重复段必须同高，逐段拉齐 |
+
+第二个是拿到 `samples/对齐` 那对 SVP 之后才发现的：`−12` 是**整体**平移，
+动不了"只有某一段低一个八度"。证据与算法见 `octave.py` 的模块头与
+`docs/八度校正规格.md`。
 
 **为什么只动旋律、不动和弦**（实测，见 `docs/WebUI问题清单.md` §1）：
 
@@ -36,6 +47,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .bootstrap import PROJECT_ROOT
+from .octave import OctavePlan, OctaveStats
+from .octave import plan_from_labs as _octave_plan_from_labs
+from .octave import track_of_name as _track_of_name
+from .octave import normalize_lab_text as _octave_lab_text
 
 #: 一个八度。
 OCTAVE = 12
@@ -68,6 +83,10 @@ class PitchShiftStats:
     playback_notes: int = 0
     abc: str = "not_attempted"
     warnings: list[str] = field(default_factory=list)
+    #: 八度一致性校正的统计（`octave.OctaveStats.as_dict()`）。
+    #: 它和 `semitones` 是两件事：`semitones` 是**整体**平移，
+    #: 这里是**重复段之间**的局部八度校正。
+    octave: dict[str, Any] = field(default_factory=dict)
 
     @property
     def notes(self) -> int:
@@ -83,8 +102,12 @@ class PitchShiftStats:
             "abc": self.abc,
             "warnings": list(self.warnings),
         }
+        if self.octave:
+            data["octave"] = dict(self.octave)
         if not self.enabled:
-            data["reason"] = "关闭了音高修正"
+            data["reason"] = ("关闭了整体平移（八度一致性校正照常做）"
+                              if self.octave.get("moved_notes")
+                              else "关闭了音高修正")
         return data
 
 
@@ -131,10 +154,13 @@ def _is_chord_track(name: str) -> bool:
 
 
 def shift_midi_file(path: Path, semitones: int, *,
-                    skip_chord_tracks: bool = False) -> tuple[int, list[str]]:
+                    skip_chord_tracks: bool = False,
+                    plan: OctavePlan | None = None) -> tuple[int, list[str]]:
     """平移一个 MIDI 里的音高，返回 `(改了几个音, 没动的和弦轨名)`。
 
     `skip_chord_tracks=True` 时（混合 MIDI）轨名带 "chord" 的整轨跳过。
+    `plan`（八度一致性校正）在场时，先按轨名 + 起始秒查这一份局部平移，
+    再加上整体 `semitones`——两条路都在这里落地，MIDI 不会和 lab 走散。
     """
     import pretty_midi
 
@@ -145,26 +171,32 @@ def shift_midi_file(path: Path, semitones: int, *,
         if skip_chord_tracks and _is_chord_track(instrument.name):
             kept.append(instrument.name or "?")
             continue
+        track = _track_of_name(instrument.name)
         for note in instrument.notes:
-            new_pitch = int(note.pitch) + semitones
-            note.pitch = max(0, min(127, new_pitch))
+            local = plan.shift_for(float(note.start), track) if plan else 0
+            note.pitch = max(0, min(127, int(note.pitch) + semitones + local))
             moved += 1
     midi.write(str(path))
     return moved, kept
 
 
 # --------------------------------------------------------------------- playback
-def shift_playback(payload: Mapping[str, Any], semitones: int) -> tuple[dict[str, Any], int]:
+def shift_playback(payload: Mapping[str, Any], semitones: int, *,
+                   plan: OctavePlan | None = None) -> tuple[dict[str, Any], int]:
     """`playback.json`：只动非和弦轨的音高，小节表 / 速度 / 时长原样。"""
     data = json.loads(json.dumps(payload))           # 深拷贝，不动调用方的对象
     moved = 0
     for track in data.get("tracks") or []:
         if _is_chord_track(track.get("name")):
             continue
+        index = _track_of_name(track.get("name"))
         for note in track.get("notes") or []:
             if "pitch" not in note:
                 continue
-            note["pitch"] = max(0, min(127, int(note["pitch"]) + semitones))
+            local = 0
+            if plan and "start" in note:
+                local = plan.shift_for(float(note["start"]), index)
+            note["pitch"] = max(0, min(127, int(note["pitch"]) + semitones + local))
             moved += 1
     return data, moved
 
@@ -206,30 +238,59 @@ def rebuild_abc(out_dir: Path) -> tuple[str | None, str | None]:
 
 # --------------------------------------------------------------------- 入口
 def apply(result: Mapping[str, Any], out_dir: str | Path, *,
-          semitones: int = DEFAULT_SEMITONES) -> tuple[dict[str, Any], PitchShiftStats]:
-    """把一次转写结果里的旋律整体平移，**同时改内存里的 result 和磁盘上的产物**。
+          semitones: int = DEFAULT_SEMITONES,
+          octave_fix: bool = True) -> tuple[dict[str, Any], PitchShiftStats]:
+    """把一次转写结果里的旋律音高改对，**同时改内存里的 result 和磁盘上的产物**。
+
+    两件事，一起做完：
+
+    1. **八度一致性校正**（`octave.py`，`octave_fix=True` 时开）：模型对同一段
+       旋律的不同出现可能给不同的八度（`samples/对齐` 那对 SVP 实证 20% 的音），
+       这一步按"重复段必须同高"把它们拉齐；
+    2. **整体平移** `semitones`（默认 −12）：模型的旋律整体偏高一个八度。
+
+    顺序是"先局部、后整体"——两者都是整八度，可交换，但先局部能让日志说清
+   "哪几个音是重复段校正动的"。
 
     返回新的 `result`（`labs` / `playback` / `abc` 已同步）与统计。
-    `semitones=0` 时原样返回，什么都不碰。
     """
     out = Path(out_dir)
     stats = PitchShiftStats(enabled=bool(semitones), semitones=int(semitones))
     updated = dict(result)
-    if not semitones:
+
+    # labs：内存 + 磁盘兜底（模型可能没把文本放进 result）
+    labs = {name: text for name, text in (updated.get("labs") or {}).items()}
+    for name in MELODY_LABS:
+        if name not in labs:
+            path = out / f"{name}.lab"
+            if path.is_file():
+                labs[name] = path.read_text(encoding="utf-8", errors="replace")
+
+    plan = OctavePlan()
+    octave_stats = OctaveStats(enabled=False)
+    if octave_fix:
+        plan = _octave_plan_from_labs(labs)
+        octave_stats = plan.stats
+        stats.warnings.extend(octave_stats.warnings)
+    stats.octave = octave_stats.as_dict()
+
+    if not semitones and plan.empty:
         return updated, stats
 
-    # labs：内存 + 磁盘
-    labs = dict(updated.get("labs") or {})
+    # labs：局部（八度）→ 整体（semitones）
     for name in MELODY_LABS:
-        path = out / f"{name}.lab"
         text = labs.get(name)
-        if text is None and not path.is_file():
-            continue
         if text is None:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        shifted, moved = shift_lab_text(text, semitones)
+            continue
+        track = {"melody_vocal": 0, "melody_instrumental": 1}.get(name)
+        shifted = text
+        local = 0
+        if not plan.empty:
+            shifted, local = _octave_lab_text(shifted, plan, track=track)
+        shifted, moved = shift_lab_text(shifted, semitones)
         labs[name] = shifted
-        stats.labs[f"{name}.lab"] = moved
+        stats.labs[f"{name}.lab"] = moved + local
+        path = out / f"{name}.lab"
         if path.is_file():                            # 模型没写过就别凭空造产物
             path.write_text(shifted, encoding="utf-8")
     updated["labs"] = labs
@@ -238,12 +299,13 @@ def apply(result: Mapping[str, Any], out_dir: str | Path, *,
     for name in MELODY_MIDIS:
         path = out / name
         if path.is_file():
-            moved, _ = shift_midi_file(path, semitones)
+            moved, _ = shift_midi_file(path, semitones, plan=plan)
             stats.midis[name] = moved
     for name in MIXED_MIDIS:
         path = out / name
         if path.is_file():
-            moved, kept = shift_midi_file(path, semitones, skip_chord_tracks=True)
+            moved, kept = shift_midi_file(path, semitones, skip_chord_tracks=True,
+                                          plan=plan)
             stats.midis[name] = moved
             if kept:
                 stats.warnings.append(f"{name}：和弦轨 {'/'.join(kept)} 保持原音高")
@@ -258,7 +320,7 @@ def apply(result: Mapping[str, Any], out_dir: str | Path, *,
             raw = None
         playback = raw if isinstance(raw, Mapping) else None
     if isinstance(playback, Mapping):
-        shifted_playback, moved = shift_playback(playback, semitones)
+        shifted_playback, moved = shift_playback(playback, semitones, plan=plan)
         updated["playback"] = shifted_playback
         stats.playback_notes = moved
         if playback_path.is_file():
@@ -279,12 +341,15 @@ def apply(result: Mapping[str, Any], out_dir: str | Path, *,
 
 def warnings_for(stats: PitchShiftStats) -> list[str]:
     """给报告用的白话告警（跟量化告警一个风格）。"""
-    if not stats.enabled:
-        return []
-    total = stats.notes or stats.playback_notes
-    octaves = (f"（{abs(stats.semitones) // OCTAVE} 个八度）"
-               if stats.semitones % OCTAVE == 0 else "")
-    messages = [f"音高修正：旋律（人声 + 器乐）整体 {stats.semitones:+d} 半音{octaves}，"
-                f"影响 {total} 个音；和弦轨不动（实测和弦本来就在正确音域）"]
+    messages: list[str] = []
+    if stats.enabled:
+        total = stats.notes or stats.playback_notes
+        octaves = (f"（{abs(stats.semitones) // OCTAVE} 个八度）"
+                   if stats.semitones % OCTAVE == 0 else "")
+        messages.append(
+            f"音高修正：旋律（人声 + 器乐）整体 {stats.semitones:+d} 半音{octaves}，"
+            f"影响 {total} 个音；和弦轨不动（实测和弦本来就在正确音域）")
+    elif stats.octave.get("moved_notes"):
+        messages.append("音高修正：整体平移关掉了，但八度一致性校正照做")
     messages.extend(stats.warnings)
     return messages

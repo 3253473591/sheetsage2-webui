@@ -156,17 +156,67 @@ def test_pitch_is_shifted_down_an_octave_without_asking(tmp_path):
 
 
 def test_pitch_shift_can_be_turned_off_for_debugging(tmp_path):
-    """只想看模型原始音高时（命令行 `--pitch-shift 0`）整条链路都要原样。"""
+    """只想看模型原始音高时（命令行 `--pitch-shift 0`）整条链路都要原样。
+
+    八度一致性校正（`octave.py`）跟整体平移是两件事：这个桩里没有重复段，
+    所以它一个音都没动，但统计块照旧要出现（`octave` 键）。
+    """
     payload = run("stub.flac", tmp_path, engine=StubEngine(melody=MELODY),
                   quantize=False, pitch_shift=0, write=False)
-    assert payload["project"]["pitch"] == {
+    block = payload["project"]["pitch"]
+    assert {k: v for k, v in block.items() if k != "octave"} == {
         "enabled": False, "semitones": 0, "labs": {}, "midis": {},
         "playback_notes": 0, "abc": "not_attempted", "warnings": [],
         "reason": "关闭了音高修正"}
+    assert block["octave"]["moved_notes"] == 0
     model_pitches = sorted(int(row.split()[2]) for row in MELODY.splitlines())
     assert sorted(n["pitch"] for track in payload["project"]["tracks"]
                   for n in track["notes"]) == model_pitches
     assert not any("音高修正" in w for w in payload["project"]["meta"]["warnings"])
+
+
+def test_octave_fix_can_be_turned_off(tmp_path):
+    """`--no-octave-fix`：只做整体平移，统计块里说清楚它没跑。"""
+    payload = run("stub.flac", tmp_path, engine=StubEngine(melody=MELODY),
+                  quantize=False, octave_fix=False, write=False)
+    block = payload["project"]["pitch"]
+    assert block["semitones"] == -12
+    assert block["octave"]["enabled"] is False
+    assert block["octave"]["moved_notes"] == 0
+    model_pitches = sorted(int(row.split()[2]) for row in MELODY.splitlines())
+    got = sorted(n["pitch"] for track in payload["project"]["tracks"]
+                 for n in track["notes"])
+    assert got == sorted(p - 12 for p in model_pitches)
+
+
+def test_octave_fix_reaches_the_project_notes(tmp_path):
+    """八度校正发生在 tick 域工程**之前**，所以卷帘 / SVP 拿到的音高已经是对的。
+
+    桩里放同一段旋律的三次出现（每次 8 个音），中间那次低一个八度：
+    校正后 `project.json` 里应该正好是中间那 8 个音被抬回来。
+    """
+    phrase = [60, 62, 64, 65, 67, 69, 71, 72]
+    rows, t = [], 0.0
+    for index, pitches in enumerate((phrase, [p - 12 for p in phrase], phrase)):
+        if index:
+            t += 0.72                      # 静音 0.62s ≥ REST_GAP，一定断句
+        for pitch in pitches:
+            rows.append(f"{t:.3f} {t + 0.10:.3f} {pitch} 0")
+            t += 0.10
+    melody = "\n".join(rows) + "\n"
+    assert t < 4.0                         # 桩的时间轴只有 4 秒
+
+    fixed = run("stub.flac", tmp_path, engine=StubEngine(melody=melody), write=False)
+    raw = run("stub.flac", tmp_path / "raw", engine=StubEngine(melody=melody),
+              write=False, octave_fix=False)
+
+    assert fixed["project"]["pitch"]["octave"]["moved_notes"] == 8
+    got = [n["pitch"] for track in fixed["project"]["tracks"] for n in track["notes"]]
+    base = [n["pitch"] for track in raw["project"]["tracks"] for n in track["notes"]]
+    assert len(got) == len(base) == 24
+    assert [g - b for g, b in zip(got, base)] == [0] * 8 + [12] * 8 + [0] * 8
+    assert any("八度一致性校正" in w
+               for w in fixed["project"]["meta"]["warnings"])
 
 
 def test_simplicity_is_passed_through_and_changes_the_result(tmp_path):

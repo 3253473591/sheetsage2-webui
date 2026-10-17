@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TextIO
 
 CHUNK = 1 << 20                      # 1 MiB
-USER_AGENT = "sheetsage2-webui-alpha2"
+USER_AGENT = "sheetsage2-webui-alpha3"
 DEFAULT_TIMEOUT = 60
 RETRIES = 3
 #: 多久没收到数据就喊一声（秒）。
