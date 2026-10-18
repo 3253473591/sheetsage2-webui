@@ -30,12 +30,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Mapping
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -45,11 +47,14 @@ from ..bootstrap import PROJECT_ROOT, find_ffmpeg
 from ..svp import (DEFAULT_PARTS, SVP_PARTS, SVP_VERSION, SvpUnavailable,
                    available_parts, build_svp, cache_key, export_path, load_project)
 from .jobs import (DEFAULT_PLAN, PHASE_LABELS, PHASES, ImportedProject, Job, JobManager,
-                   StageNotReady, UploadRejected, asr_model_label, default_options,
-                   is_internal, param_choices, safe_name, validate_options)
+                   StageNotReady, StaleRevision, UploadRejected, asr_model_label,
+                   default_options, is_internal, param_choices, safe_name, validate_options)
 from .lanes import build_lanes
 from .media import clamp_buckets, media_type, parse_range, peaks_for
+from .preflight import preflight
 from .runner import RunnerSession
+from .security import (TOKEN_COOKIE, extract_token, generate_pair_token,
+                       host_is_loopback, origin_is_loopback, token_matches)
 
 #: 前端构建产物（`web/vite.config.ts` 的 `build.outDir` 指向这里）。
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -134,6 +139,11 @@ def create_app(
     hard_timeout: float | Mapping[str, float] | None = None,
     watchdog_interval: float = 1.0,
     use_trash: bool = True,
+    probe_upload: bool = True,
+    pair_token: str | None = None,
+    require_token: bool = False,
+    loopback_guard: bool = False,
+    allowed_hosts: tuple[str, ...] = (),
 ) -> FastAPI:
     """构造应用。
 
@@ -157,7 +167,8 @@ def create_app(
                              max_upload_mb=max_upload_mb, workers=workers,
                              lock_params=lock_params, option_defaults=defaults,
                              stall_timeout=stall_timeout, hard_timeout=hard_timeout,
-                             watchdog_interval=watchdog_interval, use_trash=use_trash)
+                             watchdog_interval=watchdog_interval, use_trash=use_trash,
+                             probe_upload=probe_upload)
     static_ready = (STATIC_DIR / "index.html").is_file()
 
     @asynccontextmanager
@@ -170,6 +181,36 @@ def create_app(
     app = FastAPI(title="SheetSage2 Studio", version=__version__, lifespan=lifespan)
     app.state.manager = manager
     app.state.session = session
+
+    token = pair_token or generate_pair_token()
+    app.state.pair_token = token
+
+    # ------------------------------------------------------------------ 安全（G13）
+    @app.middleware("http")
+    async def security(request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api/"):
+            # 非 API（SPA 壳 / 静态资源）：顺手种下 HttpOnly token cookie（无感）
+            response = await call_next(request)
+            if require_token and not request.cookies.get(TOKEN_COOKIE):
+                response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="strict")
+            return response
+        if require_token:
+            # 非回环监听：所有 API 都要 token（头 / Bearer / ?token= / cookie 都认）
+            if not token_matches(extract_token(request), token):
+                return JSONResponse({"detail": "没有访问凭证，拒绝访问"}, status_code=403)
+        elif loopback_guard:
+            host = request.headers.get("host", "")
+            if host and not host_is_loopback(host) and host not in allowed_hosts:
+                return JSONResponse({"detail": "非本机请求被拒绝"}, status_code=403)
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                origin = request.headers.get("origin") or request.headers.get("referer")
+                if origin and not origin_is_loopback(origin):
+                    return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+        response = await call_next(request)
+        if require_token and not request.cookies.get(TOKEN_COOKIE):
+            response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="strict")
+        return response
 
     # ------------------------------------------------------------------ 基础
     @app.get("/api/healthz")
@@ -198,6 +239,8 @@ def create_app(
             "static_ready": static_ready,
             "max_upload_mb": manager.max_upload_mb,
             "queue": info["queue"],
+            "disk": info.get("disk", {"free": 0, "total": 0, "used": 0}),
+            "preflight": preflight(manager.root),
             "languages": language_choices(),
             # 参数面板的取值真源：前端照着画，PATCH 也照着校验。
             "params": param_choices(asr_models, default_asr),
@@ -286,6 +329,30 @@ def create_app(
             raise HTTPException(status_code=404, detail="回收站里没有这一项")
         return {"purged": entry_id}
 
+    @app.post("/api/jobs/{job_id}/cleanup")
+    async def cleanup_job(job_id: str) -> dict[str, Any]:
+        """清掉一个工程的可重算缓存（zip / SVP / 波形 / prev），释放磁盘（G11）。"""
+        _require(job_id)
+        return await run_in_threadpool(manager.cleanup, job_id)
+
+    # ------------------------------------------------------------------ 诊断（G12）
+    @app.get("/api/diagnose")
+    async def diagnose_all() -> Response:
+        """一键打包诊断信息（全部工程 + env + 日志），下载成 zip。"""
+        payload = await run_in_threadpool(manager.diagnose_bundle)
+        return Response(content=payload, media_type="application/zip",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="diagnose-{int(time.time())}.zip"'})
+
+    @app.get("/api/jobs/{job_id}/diagnose")
+    async def diagnose_job(job_id: str) -> Response:
+        """单个工程的诊断包。"""
+        _require(job_id)
+        payload = await run_in_threadpool(manager.diagnose_bundle, job_id)
+        return Response(content=payload, media_type="application/zip",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="diagnose-{job_id}.zip"'})
+
     @app.post("/api/jobs/{job_id}/stages/{phase}")
     async def run_stage(job_id: str, phase: str) -> dict[str, Any]:
         """单独（重）跑一个阶段。
@@ -313,20 +380,38 @@ def create_app(
         return job.snapshot()                       # type: ignore[union-attr]
 
     @app.patch("/api/jobs/{job_id}/options")
-    async def set_options(job_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def set_options(job_id: str, body: dict[str, Any],
+                          request: Request) -> dict[str, Any]:
         """改工程级可调参数（参数面板：精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）。
 
         校验在 `jobs.validate_options`（和 `/api/env` 发出去的取值表同源）。
         改了参数 = 换了口径，对应阶段的旧结果作废；阶段正在跑改不了（409）。
+
+        **乐观锁**（G8）：body 里带 `expected_rev`（或 `If-Match: <rev>` 头）时，
+        服务端按工程当前的 `rev` 校验——不一致回 409 + 当前快照，前端据此提示"这页是旧的"。
         """
-        _require(job_id)
+        job = _require(job_id)
+        payload = dict(body)
+        raw_rev = payload.pop("expected_rev", None)
+        if raw_rev is None:
+            raw_rev = request.headers.get("if-match")
+        expected_rev: int | None = None
+        if raw_rev is not None and str(raw_rev).strip():
+            try:
+                expected_rev = int(str(raw_rev).strip())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="expected_rev 必须是整数")
         try:
-            job = await run_in_threadpool(manager.set_options, job_id, **body)
+            updated = await run_in_threadpool(manager.set_options, job_id,
+                                              expected_rev, **payload)
+        except StaleRevision as exc:
+            raise HTTPException(status_code=409,
+                                detail={"message": str(exc), "snapshot": job.snapshot()}) from exc
         except ValueError as exc:                    # 值不认识/越界
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:                  # 阶段正在跑 / 4G 特供锁定
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return job.snapshot()                       # type: ignore[union-attr]
+        return updated.snapshot()                    # type: ignore[union-attr]
 
     # ------------------------------------------------------------------ 音源
     @app.post("/api/jobs/{job_id}/stems/{kind}", status_code=201)

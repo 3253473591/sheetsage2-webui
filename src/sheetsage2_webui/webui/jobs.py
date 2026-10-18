@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import queue
@@ -66,6 +67,9 @@ TRASH_DIRNAME = ".trash"
 #: 回收站保留策略：超过这些就真删（`_purge_trash` 在启动与每次删除时跑）。
 TRASH_MAX_DAYS = 7.0
 TRASH_MAX_BYTES = 2 * 1024 ** 3
+
+#: 取消后的"冷静期"（秒，G14）：这段时间里的「开始」当作手抖连点，直接 409。
+CANCEL_COOLDOWN_SECONDS = 5.0
 
 #: 产物清单（`.webui/manifest.json`）：只有它列出的文件才是"当前这一版的结果"。
 MANIFEST_NAME = "manifest.json"
@@ -275,6 +279,19 @@ class ImportedProject(RuntimeError):
     """
 
 
+class StaleRevision(RuntimeError):
+    """乐观锁冲突（G8）：改参数时带了 `expected_rev`，但工程的 `rev` 已经变了。
+
+    意味着"你是基于旧快照改的"，服务端不覆盖，而是回 409 + 当前快照，让前端刷新。
+    `current_rev` 是服务端此刻的版本，前端拿它提示用户"这页是旧的"。
+    """
+
+    def __init__(self, current_rev: int) -> None:
+        self.current_rev = int(current_rev)
+        super().__init__(
+            f"这页是旧的（当前已经是第 {self.current_rev} 版），已帮你刷新，请重试")
+
+
 #: WebUI 自己的东西放在工程目录的哪个子目录里（点开头 = 不是产物，列表与打包都会跳过）。
 INTERNAL_DIRNAME = ".webui"
 
@@ -297,6 +314,24 @@ def unique_project_dir(root: Path, name: str) -> Path:
         candidate = root / f"{name}-{index}"
         index += 1
     return candidate
+
+
+def claim_project_dir(root: Path, name: str, max_tries: int = 50) -> Path:
+    """原子地认领一个工程目录（G9）：**创建目录本身就是互斥**。
+
+    `unique_project_dir` 是"先看名字有没有被占，再返回"，判断与创建之间有窗口——两个并发
+    上传同名文件会同时选到同一个目录，随后 `mkdir(exist_ok=True)` 让它们写进同一个地方。
+    这里反过来：直接 `mkdir(exist_ok=False)`，失败（目录已经存在）就换 `-2`、`-3` 再试，
+    谁创建成功谁就独占这个名字，**没有竞态**。
+    """
+    candidate = root / name
+    for index in range(2, max_tries + 2):
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            candidate = root / f"{name}-{index}"
+    raise OSError(f"同名工程太多，目录 {root / name} 认领失败（试了 {max_tries} 个名字）")
 
 
 def is_internal(relative: str) -> bool:
@@ -332,6 +367,23 @@ def _check_audio(name: str) -> str:
             f"不支持的文件类型 {suffix or '(无后缀)'}；"
             f"请上传 {'/'.join(sorted(s.lstrip('.') for s in AUDIO_SUFFIXES))} 之一")
     return audio
+
+
+def content_fingerprint(path: Path, head_bytes: int = 1024 * 1024) -> str:
+    """内容指纹 = 文件大小 + 前 1MB 的 sha1（G10 去重：同一首歌传两次能被认出来）。"""
+    import hashlib
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    digest = hashlib.sha1()
+    try:
+        with path.open("rb") as handle:
+            digest.update(handle.read(head_bytes))
+    except OSError:
+        return ""
+    return f"{size}:{digest.hexdigest()}"
 
 
 def _write_stream(target: Path, stream: Any, limit: int, limit_mb: float) -> int:
@@ -476,6 +528,12 @@ class Job:
     #: 单独上传的音源：kind -> {name, path, size, created_at}。目前只有 `vocal`（干声）。
     #: 有干声且「音源」选了干声就用它，否则用混音原曲——回退规则在 `runner.lyrics`。
     stems: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: 上传体检（G10）的结果：时长/采样率/是否静音等，给前端提示"太短/太长/纯静音"。
+    audio_info: dict[str, Any] = field(default_factory=dict)
+    #: 内容指纹（大小 + 前 1MB 的 hash）：用于"这个文件已经传过"去重提示。
+    audio_fingerprint: str | None = None
+    #: 命中已有工程（内容指纹一致）时，指向那个工程 id；没有就是 None。
+    duplicate_of: str | None = None
     #: 每个工程自己的可调参数（见 `PARAM_SPECS`）。**这是页面上放开给用户的东西**：
     #: 精度 / 设备 / 范围 / 量化 / 识别模型 / 音源 / 语言。
     options: dict[str, Any] = field(default_factory=default_options)
@@ -485,6 +543,9 @@ class Job:
     warnings: list[str] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     cancel_requested: bool = False
+    #: 最近一次取消的时刻（G14 的"墓碑"）：取消后短时间内的「开始」当作手抖连点拒绝，
+    #: 免得取消又被立刻复活。
+    canceled_at: float | None = None
     #: `output/` 里本来就有的产物目录（不是 WebUI 建的）——只读。
     imported: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
@@ -568,6 +629,9 @@ class Job:
                 "warnings": list(self.warnings),
                 "files": list(self.files),
                 "stems": {kind: dict(info) for kind, info in self.stems.items()},
+                "audio_info": dict(self.audio_info),
+                "audio_fingerprint": self.audio_fingerprint,
+                "duplicate_of": self.duplicate_of,
                 "options": dict(self.options),
                 "highlights": self.highlights,
                 "decisions": self.decisions,
@@ -702,6 +766,16 @@ def _duration_text(seconds: float) -> str:
     return f"{seconds / 3600:.1f} 小时"
 
 
+def _bytes_text(size: float) -> str:
+    """字节 -> 人话（"1.2 GB" / "340 MB"），磁盘预检与清理提示用。"""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
 # --------------------------------------------------------------------- 管理器
 class JobManager:
     """任务队列 + 单工作线程。
@@ -725,6 +799,7 @@ class JobManager:
         trash_max_days: float = TRASH_MAX_DAYS,
         trash_max_bytes: float = TRASH_MAX_BYTES,
         use_trash: bool = True,
+        probe_upload: bool = False,
     ) -> None:
         self.root = Path(root) if root is not None else PROJECT_ROOT / "tmp" / "webui"
         self.max_upload_mb = float(max_upload_mb)
@@ -753,6 +828,9 @@ class JobManager:
         self.use_trash = bool(use_trash)
         self.trash_max_days = float(trash_max_days)
         self.trash_max_bytes = float(trash_max_bytes)
+        #: 上传后是否做内容体检（G10）。默认关——直接 `JobManager(...)` 的测试不上 ffmpeg；
+        #: 产品入口 `create_app` 会显式打开。
+        self.probe_upload = bool(probe_upload)
         self.root.mkdir(parents=True, exist_ok=True)
         # **重启不丢**：把 output/ 里已有的工程读回来（WebUI 建的读 job.json，
         # 命令行跑出来的当"只读产物"收进来）
@@ -807,6 +885,14 @@ class JobManager:
         upload = Path(str(meta.get("upload") or ""))
         if not upload.is_file():
             candidate = root / INTERNAL_DIRNAME / "input" / audio
+            if not candidate.is_file():
+                # 输入文件带 uuid 前缀（G9）：绝对路径对不上时按"任意前缀 + 展示名"再找一次。
+                input_dir = root / INTERNAL_DIRNAME / "input"
+                if input_dir.is_dir():
+                    for item in sorted(input_dir.iterdir()):
+                        if item.is_file() and item.name.endswith(f"-{audio}"):
+                            candidate = item
+                            break
             upload = candidate if candidate.is_file() else root / INTERNAL_DIRNAME / "input"
         job = Job(
             id=str(meta.get("id") or root.name),
@@ -919,7 +1005,16 @@ class JobManager:
             pending = sum(1 for j in self._jobs.values() if j.state == "queued")
             return {"data_root": str(self.root), "max_upload_mb": self.max_upload_mb,
                     "params_locked": self.lock_params,
-                    "queue": {"pending": pending, "running": running}}
+                    "queue": {"pending": pending, "running": running},
+                    "disk": self.disk_info()}
+
+    def disk_info(self) -> dict[str, int]:
+        """数据根所在磁盘的剩余/总量（G11：顶栏显示"剩余 12.3 GB"，< 2GB 变黄）。"""
+        try:
+            usage = shutil.disk_usage(self.root)
+        except OSError:
+            return {"free": 0, "total": 0, "used": 0}
+        return {"free": usage.free, "total": usage.total, "used": usage.used}
 
     # ---------------------------------------------------------------- 生命周期
     def _ensure_workers(self) -> None:
@@ -972,11 +1067,13 @@ class JobManager:
         wanted = [phase for phase in plan if phase in PHASES]
         job_id = uuid.uuid4().hex[:12]
         created = time.time()
-        # 工程目录 = `output/<歌名>/`（和命令行一个形状；重名绝不覆盖）
-        root = unique_project_dir(self.root, project_folder_name(Path(audio).stem))
+        # 工程目录 = `output/<歌名>/`（和命令行一个形状；重名绝不覆盖）。
+        # **原子认领**（G9）：`mkdir(exist_ok=False)`，并发同名上传各得各的目录，不会互相踩。
+        root = claim_project_dir(self.root, project_folder_name(Path(audio).stem))
         upload_dir = root / INTERNAL_DIRNAME / "input"
         upload_dir.mkdir(parents=True, exist_ok=True)
-        upload = upload_dir / audio
+        # 输入文件带 uuid 前缀落盘（G9）：同名文件也绝不互相覆盖；展示名仍存 `job.audio`。
+        upload = upload_dir / f"{job_id}-{audio}"
 
         limit = int(self.max_upload_mb * 1024 * 1024)
         try:
@@ -988,15 +1085,34 @@ class JobManager:
             shutil.rmtree(root, ignore_errors=True)
             raise UploadRejected("上传的是空文件")
 
+        # 内容体检（G10）：ffmpeg 探一下"是不是能播的音频、是不是纯静音"。没 ffmpeg 就跳过。
+        audio_info: dict[str, Any] = {}
+        if self.probe_upload:
+            from .media import probe_audio
+
+            audio_info = probe_audio(upload) or {}
+            if audio_info.get("ok") is False:
+                reason = str(audio_info.get("reason") or "这个音频用不了")
+                shutil.rmtree(root, ignore_errors=True)
+                raise UploadRejected(reason)
+        fingerprint = content_fingerprint(upload)
+
         job = Job(id=job_id, name=Path(audio).stem or audio, audio=audio, root=root,
                   upload=upload, out_dir=root, created_at=created,
-                  plan=list(wanted), options=dict(self.option_defaults))
+                  plan=list(wanted), options=dict(self.option_defaults),
+                  audio_info=audio_info, audio_fingerprint=fingerprint or None)
         job.state = "queued" if wanted else DRAFT_STATE
         job.message = "等待开始" if wanted else "等待参数"
         for phase in wanted:
             job.stages[phase].state = "queued"
         job.emit("log", phase=None, message=f"新建工程 · {audio}"
                  + ("" if wanted else "（选好参数后点「开始扒谱」）"))
+        if fingerprint:
+            with self._lock:
+                for other in self._jobs.values():
+                    if other is not job and other.audio_fingerprint == fingerprint:
+                        job.duplicate_of = other.id
+                        break
         with self._lock:
             self._jobs[job_id] = job
             self._order.insert(0, job_id)
@@ -1027,8 +1143,15 @@ class JobManager:
         if phase == "lyrics" and not chain:
             self._assert_transcribed(job)
         with job.lock:
-            if job.state == "running" and job.stage == phase:
+            # 重复入队去重（G14）：已经在排队 / 正在跑就不重新排，否则连点两次会把同一个
+            # job_id 塞进队列两次（`--workers 2` 时甚至会并发跑两份）。
+            if job.stages[phase].state in ("queued", "running"):
                 return job
+            # 取消后的"墓碑"（G14）：刚取消又立刻点开始，多半是手抖——直接拒绝，
+            # 别让"取消"被这次点击抹掉。
+            if job.canceled_at is not None and \
+                    time.time() - job.canceled_at < CANCEL_COOLDOWN_SECONDS:
+                raise RuntimeError("刚刚取消，稍等几秒再开始")
             run = job.stages[phase]
             run.state = "queued"
             run.progress = 0.0
@@ -1040,12 +1163,13 @@ class JobManager:
             job.stages[phase] = run
             if phase not in job.plan:
                 job.plan.append(phase)
-            # 重跑扒谱会让歌词对不上（音符位置变了）：把歌词退回去，必须重跑
+            # 重跑 = 影响结果，rev +1（G8）；扒谱重跑还连带歌词对不上，必须一起作废
+            job.rev += 1
             if phase == "transcribe":
-                job.rev += 1
                 self._invalidate_lyrics(job, "扒谱重跑")
             job.state = "queued"
             job.cancel_requested = False
+            job.canceled_at = None
         job.emit("log", phase=phase, message=f"{PHASE_LABELS[phase]}：已加入队列")
         self._write_metadata(job)
         self._ensure_workers()
@@ -1070,7 +1194,8 @@ class JobManager:
             raise StageNotReady("请先完成扒谱")
 
     # ---------------------------------------------------------------- 可调项
-    def set_options(self, job_id: str, **values: Any) -> Job | None:
+    def set_options(self, job_id: str, expected_rev: int | None = None,
+                    **values: Any) -> Job | None:
         """改工程级的可调参数（页面上的参数面板，见 :data:`PARAM_SPECS`）。
 
         改参数 = 换口径，旧结果就不作数了（和换音源、重跑扒谱一个道理）：
@@ -1080,6 +1205,9 @@ class JobManager:
 
         值不合法抛 :class:`ValueError`（API 回 400）；参数所属的阶段正在跑抛
         :class:`RuntimeError`（API 回 409）；4G 特供模式一律拒绝。
+
+        **乐观锁**（G8）：传了 `expected_rev` 而它和工程当前的 `rev` 不一致，说明调用方是
+        基于旧快照改的，抛 :class:`StaleRevision`（API 回 409 + 当前快照），而不是静默覆盖。
         """
         job = self.get(job_id)
         if job is None:
@@ -1093,12 +1221,17 @@ class JobManager:
         values = validate_options(values)
         self._assert_stages_idle(job, {PARAM_OWNER[key] for key in values}, "改参数")
         with job.lock:
+            if expected_rev is not None and int(expected_rev) != job.rev:
+                raise StaleRevision(job.rev)
             before = dict(job.options)
             job.options.update(values)
             changed = {key for key, value in values.items()
                        if before.get(key) != job.options.get(key)}
             if not changed:
                 return job
+            # 任何影响结果的变更都 +1（G8）：rev 管"两个标签页会不会互相覆盖"，
+            # 和 G3 的 artifacts_rev（管产物缓存失效）是两码事。
+            job.rev += 1
             why = describe_change(before, job.options)
             invalidated = False
             if any(PARAM_OWNER[key] == "transcribe" for key in changed):
@@ -1154,6 +1287,7 @@ class JobManager:
                                "size": written, "created_at": time.time()}
             if previous and previous.get("name") != audio:
                 (target_dir / str(previous["name"])).unlink(missing_ok=True)
+            job.rev += 1                                # 音源变了 = 影响结果（G8）
             self._invalidate_lyrics(job, f"歌词音源换成 {audio}")
         job.emit("log", phase="lyrics",
                  message=f"{STEM_LABELS[kind]}已就位：{audio}"
@@ -1175,6 +1309,7 @@ class JobManager:
             info = job.stems.pop(kind, None)
             if info:
                 Path(str(info["path"])).unlink(missing_ok=True)
+            job.rev += 1                                # 音源变了 = 影响结果（G8）
             self._invalidate_lyrics(job, f"已移除{STEM_LABELS[kind]}，回退到混音原曲")
         if info:
             job.emit("log", phase="lyrics",
@@ -1222,6 +1357,7 @@ class JobManager:
             if job.state in TERMINAL_STATES:
                 return job
             job.cancel_requested = True
+            job.canceled_at = time.time()
             if job.state in (DRAFT_STATE, "queued"):
                 # 还没开跑（或停在「等参数」），直接落终态，工作线程拿到时会跳过
                 job.state = "cancelled"
@@ -1588,6 +1724,7 @@ class JobManager:
         progress = Progress(job, phase)
         watch = self._watch_begin(job, phase)
         try:
+            self._assert_disk(job, phase)
             payload = runner(job, progress) or {}
         except JobCancelled:
             if not watch.fired:                 # 看门狗判过死就别覆盖它的失败态
@@ -1704,6 +1841,96 @@ class JobManager:
         if export.is_dir():
             for path in export.glob("*.svp*"):
                 path.unlink(missing_ok=True)
+
+    # ---------------------------------------------------------------- 磁盘（G11）
+    def _disk_estimate(self, job: Job) -> int:
+        """一次阶段大概需要多少字节（够粗就行：音频 × 3 + 50MB）。"""
+        try:
+            audio_size = job.upload.stat().st_size if job.upload.is_file() else 0
+        except OSError:
+            audio_size = 0
+        return int(audio_size * 3 + 50 * 1024 * 1024)
+
+    def _assert_disk(self, job: Job, phase: str) -> None:
+        """阶段开跑前的磁盘预检：不够就别白跑，直接给人话（而不是写一半 `OSError`）。"""
+        try:
+            usage = shutil.disk_usage(self.root)
+        except OSError:
+            return
+        needed = self._disk_estimate(job)
+        if usage.free < needed:
+            raise StageFailure(
+                "E_DISK_FULL",
+                f"磁盘空间不够：还剩 {_bytes_text(usage.free)}，这一阶段大约需要 "
+                f"{_bytes_text(needed)}",
+                "清理 output/ 里不要的工程或缓存，或把数据目录换到大一点的盘，再重跑",
+                f"free={usage.free} needed={needed} phase={phase}")
+
+    def cleanup(self, job_id: str) -> dict[str, Any]:
+        """清掉一个工程的可重算缓存（整包 zip / SVP / 波形 / 旧版本 prev），返回释放了多少。
+
+        「清理」页（G11）用：这些都是能从产物再算出来的东西，删了不影响结果，只影响下次
+        下载/画波形时要重算。
+        """
+        job = self.get(job_id)
+        if job is None:
+            return {"freed": 0}
+        internal = job.internal_dir
+        before = 0
+        for path in internal.rglob("*"):
+            try:
+                if path.is_file():
+                    before += path.stat().st_size
+            except OSError:
+                continue
+        # bundle / peaks / prev 都能重算；export 里的 SVP 也能重算（产物还在）。
+        for pattern in self._derived_patterns():
+            for path in internal.glob(pattern):
+                path.unlink(missing_ok=True)
+        export = internal / "export"
+        if export.is_dir():
+            shutil.rmtree(export, ignore_errors=True)
+        prev = internal / "prev"
+        if prev.is_dir():
+            shutil.rmtree(prev, ignore_errors=True)
+        after = 0
+        for path in internal.rglob("*"):
+            try:
+                if path.is_file():
+                    after += path.stat().st_size
+            except OSError:
+                continue
+        freed = max(0, before - after)
+        job.emit("log", phase=None,
+                 message=f"已清理缓存，释放 {_bytes_text(freed)}（产物本身没动）")
+        return {"freed": freed}
+
+    # ---------------------------------------------------------------- 诊断包（G12）
+    def diagnose_bundle(self, job_id: str | None = None) -> bytes:
+        """把诊断信息打成 zip（`job.json` + 工程 `summary.json` + `/api/env` + 日志）。
+
+        崩溃之后用户能一键发回来的是这个包，而不是一句"它转圈了"。
+        """
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            jobs = [self.get(job_id)] if job_id is not None else self.list()
+            for job in jobs:
+                if job is None:
+                    continue
+                base = f"jobs/{safe_name(job.id)}/"
+                for name in ("job.json", "summary.json"):
+                    path = job.root / name
+                    if path.is_file():
+                        zf.write(path, base + name)
+                manifest = job.manifest_path
+                if manifest.is_file():
+                    zf.write(manifest, base + ".webui/manifest.json")
+            zf.writestr("env.json", json.dumps(self.env(), ensure_ascii=False, indent=2))
+            from .logs import log_dir
+
+            for log_file in sorted(log_dir(self.root).glob("*.log*")):
+                zf.write(log_file, f"logs/{log_file.name}")
+        return buffer.getvalue()
 
     def _quarantine_stage_outputs(self, job: Job, phase: str) -> None:
         """把这阶段上一轮写的产物挪进 `.webui/prev/<rev>-<时间>/`。

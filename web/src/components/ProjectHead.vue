@@ -6,7 +6,7 @@ import { formatClock, formatSize, formatStamp } from '@/format'
 import type { JobSnapshot } from '@/types'
 
 const props = defineProps<{ job: JobSnapshot }>()
-const emit = defineEmits<{ remove: []; reset: [] }>()
+const emit = defineEmits<{ remove: []; reset: []; cleanup: [] }>()
 
 /** 左边主按钮：直接下 SVP（先弹勾选框）；右边小箭头：展开产物菜单（zip + 单个文件）。 */
 const openMenu = ref(false)
@@ -23,9 +23,17 @@ const created = computed(() => formatStamp(props.job.created_at))
         rev {{ job.rev }} · 创建于 {{ created }}
         <template v-if="duration"> · {{ formatClock(duration) }}</template>
         <template v-if="job.audio"> · {{ job.audio }}</template>
+        <template v-if="job.duplicate_of"> · 这个音频已经传过（工程 {{ job.duplicate_of }}）</template>
       </div>
     </div>
     <div class="ph-actions">
+      <button
+        class="btn-secondary"
+        title="清掉可重算的缓存（zip / SVP / 波形），释放磁盘；产物本身不受影响"
+        @click="emit('cleanup')"
+      >
+        清理缓存
+      </button>
       <button class="btn-secondary danger" @click="emit('remove')">删除</button>
       <div class="dl-group">
         <button

@@ -59,11 +59,16 @@ export function useStudio() {
   )
   const pluginsReady = computed(() => Boolean(env.value))
 
+  /** 后台服务是否已经停了（G16：红色横幅 + 阶段卡置灰）。 */
+  const serviceDown = ref(false)
+
   let unsubscribe: (() => void) | null = null
   let retryHandle: number | null = null
   let lastSeq = 0
   let attempts = 0
   let disposed = false
+  let healthHandle: number | null = null
+  let healthFails = 0
 
   // ---------------------------------------------------------------- 通用
   function upsert(job: JobSnapshot): void {
@@ -157,6 +162,40 @@ export function useStudio() {
         break
       default:
         break
+    }
+  }
+
+  // ---------------------------------------------------------------- 存活探测（G16）
+  async function probeHealth(): Promise<void> {
+    try {
+      const response = await fetch('/api/healthz')
+      if (response.ok) {
+        healthFails = 0
+        if (serviceDown.value) serviceDown.value = false
+        return
+      }
+    } catch {
+      /* 服务没响应：计数 */
+    }
+    healthFails += 1
+    if (healthFails >= 3) serviceDown.value = true
+  }
+
+  /** 每 3 秒探一次存活：服务被关掉/崩溃后，30 秒内页面给出明确提示。 */
+  function startHealthWatch(): void {
+    if (healthHandle !== null) return
+    const tick = (): void => {
+      void probeHealth().finally(() => {
+        if (!disposed) healthHandle = window.setTimeout(tick, 3000)
+      })
+    }
+    healthHandle = window.setTimeout(tick, 0)
+  }
+
+  function stopHealthWatch(): void {
+    if (healthHandle !== null) {
+      window.clearTimeout(healthHandle)
+      healthHandle = null
     }
   }
 
@@ -270,6 +309,7 @@ export function useStudio() {
     const running = jobs.value.find((job) => job.state === 'running' || job.state === 'queued')
     const first = running ?? jobs.value[0]
     if (first) await select(first.id)
+    startHealthWatch()
   }
 
   /**
@@ -386,7 +426,27 @@ export function useStudio() {
     if (!job) return
     error.value = null
     try {
-      upsert(await api.setJobOptions(job.id, patch))
+      // 乐观锁（G8）：基于当前 rev 改，服务端发现这页是旧的会回 409 + 新快照。
+      upsert(await api.setJobOptions(job.id, patch, job.rev))
+    } catch (exc) {
+      if (exc instanceof api.StaleOptionsError) {
+        // 用服务端给的最新快照原地刷新，别覆盖别人的改动
+        if (exc.snapshot) upsert(exc.snapshot)
+        error.value = exc.message
+        return
+      }
+      error.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  }
+
+  /** 清掉当前工程的可重算缓存（zip / SVP / 波形 / prev），释放磁盘（G11）。 */
+  async function cleanup(): Promise<void> {
+    const job = active.value
+    if (!job) return
+    error.value = null
+    try {
+      const result = await api.cleanupJob(job.id)
+      pushLog(0, null, `已清理缓存，释放 ${Math.round(result.freed / 1024 / 1024)} MB`, 'ok')
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     }
@@ -446,6 +506,7 @@ export function useStudio() {
   onUnmounted(() => {
     disposed = true
     detach()
+    stopHealthWatch()
   })
 
   /** 回到"没有选中工程"的状态：主区显示拖拽提示，后台任务照跑。 */
@@ -471,6 +532,7 @@ export function useStudio() {
     streamedLyrics,
     logs,
     error,
+    serviceDown,
     uploadProgress,
     lanesLoading,
     pluginsReady,
@@ -483,6 +545,7 @@ export function useStudio() {
     attachStem,
     detachStem,
     setOptions,
+    cleanup,
     remove,
     trash,
     loadTrash,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ from ..fsutil import write_text_atomic
 
 #: 解码超时（秒）。ffmpeg 卡住时以前会**永久**占着一个线程池线程（对比 `asr.py` 的 300s）。
 PEAK_TIMEOUT_SECONDS = 300.0
+
+#: 上传体检（G10）的解码超时：只是"能不能听"的亚秒级探测，别等太久。
+PROBE_TIMEOUT_SECONDS = 20.0
+#: 体检时最多解码多少秒（算静音用）。抽 20 秒足够判断是不是纯静音。
+PROBE_SAMPLE_SECONDS = 20.0
+#: 静音判定的 RMS 阈值（f32le 全量程 ±1.0）。低于它 = 基本没声音。
+SILENCE_RMS_THRESHOLD = 1e-3
 
 #: 波形包络的采样率。只要形状，不需要音质。
 PEAK_SAMPLE_RATE = 4000
@@ -131,6 +139,88 @@ def peaks_for(job_root: Path, audio: Path, buckets: int,
     except OSError:
         pass                                    # 缓存写不进去不影响返回
     return data
+
+
+# --------------------------------------------------------------------- 上传体检（G10）
+def probe_audio(path: str | Path) -> dict[str, Any] | None:
+    """上传后的**亚秒级**体检：只靠 ffmpeg 判断"是不是能播的音频、是不是纯静音"。
+
+    不加载模型、不解码整首（抽前 20 秒算 RMS）。返回 ``None`` = 本机没有 ffmpeg，
+    无法体检（退回只查后缀的老行为，不拦）。
+
+    返回 dict：
+      ``ok``         是否可当音频用（False = 读不出 / 纯静音）
+      ``code``       失败时的错误码（`E_AUDIO_UNREADABLE` / `E_AUDIO_SILENT`）
+      ``reason``     给人看的失败原因（中文）
+      ``duration_seconds`` / ``sample_rate`` / ``silent`` / ``rms``：体检到的信息
+      ``detail``     技术原文（ffmpeg stderr 尾部）
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return None
+
+    container = _probe_container(ffmpeg, path)
+    if container is None or not container.get("has_audio"):
+        tail = (container or {}).get("stderr", "")[-300:].strip()
+        return {"ok": False, "code": "E_AUDIO_UNREADABLE",
+                "reason": "读不出音频内容：可能不是有效的音频文件", "detail": tail}
+
+    silence = _probe_silence(ffmpeg, path)
+    out: dict[str, Any] = {
+        "ok": True,
+        "duration_seconds": container.get("duration_seconds"),
+        "sample_rate": container.get("sample_rate"),
+        "silent": silence["silent"],
+        "rms": silence["rms"],
+    }
+    if silence["silent"]:
+        out.update({"ok": False, "code": "E_AUDIO_SILENT",
+                    "reason": "听起来是纯静音（没有内容可识别），换一首有声音的再传"})
+    return out
+
+
+def _probe_container(ffmpeg: str, path: str | Path) -> dict[str, Any] | None:
+    """`ffmpeg -i` 只探测容器头（不真正解码），解析出时长 / 采样率 / 有没有音频流。"""
+    command = [ffmpeg, "-hide_banner", "-i", str(path)]
+    try:
+        result = subprocess.run(command, capture_output=True, check=False,
+                                timeout=PROBE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return {"has_audio": False, "stderr": "ffmpeg 探测超时"}
+    text = result.stderr.decode(errors="replace")
+    info: dict[str, Any] = {"stderr": text, "has_audio": False}
+    duration = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if duration:
+        hours, minutes, seconds = duration.groups()
+        info["duration_seconds"] = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    for line in text.splitlines():
+        if "Stream #" in line and "Audio:" in line:
+            info["has_audio"] = True
+            sample_rate = re.search(r"(\d+)\s*Hz", line)
+            if sample_rate:
+                info["sample_rate"] = int(sample_rate.group(1))
+            break
+    return info if info["has_audio"] or info.get("duration_seconds") is not None else None
+
+
+def _probe_silence(ffmpeg: str, path: str | Path) -> dict[str, Any]:
+    """解码前 20 秒算 RMS：判断是不是纯静音。"""
+    command = [ffmpeg, "-v", "error", "-i", str(path), "-t", str(PROBE_SAMPLE_SECONDS),
+               "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]
+    try:
+        result = subprocess.run(command, capture_output=True, check=False,
+                                timeout=PROBE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return {"silent": False, "rms": 0.0}
+    if result.returncode != 0 or not result.stdout:
+        return {"silent": False, "rms": 0.0}
+    import numpy as np
+
+    samples = np.frombuffer(result.stdout, dtype="<f4")
+    if samples.size == 0:
+        return {"silent": False, "rms": 0.0}
+    rms = float(np.sqrt(np.mean(np.square(samples.astype("float32")))))
+    return {"silent": rms < SILENCE_RMS_THRESHOLD, "rms": round(rms, 6)}
 
 
 def parse_range(header: str | None, size: int) -> tuple[int, int] | None:

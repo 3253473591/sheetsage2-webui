@@ -23,7 +23,9 @@ from ..asr import AsrConfig
 from ..bootstrap import PROJECT_ROOT
 from ..engine import EngineConfig
 from .app import create_app, data_root_from_env
+from .logs import attach_uvicorn, install_crash_hook, setup_logging
 from .runner import RunnerSession
+from .security import generate_pair_token
 from .singleton import AlreadyRunning, InstanceLock
 
 DEFAULT_ASR_MODEL = "models/Qwen3-ASR-1.7B"
@@ -122,9 +124,22 @@ def main(argv: list[str] | None = None) -> int:
                       max_vram=args.asr_max_vram, **asr_options),
             free_between_stages=not args.keep_models,
         )
+        # 落盘日志（G12）：崩溃之后现场还在，能导出诊断包。
+        log_path = setup_logging(data_root)
+        attach_uvicorn(log_path, args.log_level)
+        install_crash_hook(data_root)
+
+        # 安全（G13）：回环监听做 Origin/Host 校验；非回环监听强制要求 token。
+        loopback_hosts = ("127.0.0.1", "localhost", "::1")
+        loopback = args.host in loopback_hosts
+        require_token = not loopback
+        pair_token = generate_pair_token() if require_token else None
+
         app = create_app(data_root=data_root, session=session,
                          max_upload_mb=args.max_upload_mb,
-                         workers=args.workers, lock_params=args.lock_params)
+                         workers=args.workers, lock_params=args.lock_params,
+                         loopback_guard=True, require_token=require_token,
+                         pair_token=pair_token)
 
         try:
             import uvicorn
@@ -135,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         display = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         print(f"SheetSage2 Studio -> http://{display}:{args.port}")
         print(f"  数据目录 {app.state.manager.root}")
+        print(f"  日志目录 {log_path.parent}")
         print(f"  扒谱 {args.model}（{args.device}） · 歌词 {args.asr_model}（{args.asr_device}）"
               + (f"，显存预算 {args.asr_max_vram}" if args.asr_max_vram else ""))
         print(f"  上传上限 {args.max_upload_mb:g} MB"
@@ -142,9 +158,10 @@ def main(argv: list[str] | None = None) -> int:
         print("  参数面板：" + ("已锁定（4G 特供）" if args.lock_params
                                 else "可调（精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）"))
         lock.update(port=args.port, url=f"http://{display}:{args.port}")
-        if args.host not in ("127.0.0.1", "localhost"):
+        if not loopback:
             print(f"  ⚠ 监听 {args.host}：同一网络的其他人也能访问这个服务（能上传/删除/导出），"
                   "只在可信网络里这么用")
+            print(f"  🔑 已启用访问凭证（pair token）：http://{display}:{args.port}/?token={pair_token}")
         uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
         return 0
     finally:

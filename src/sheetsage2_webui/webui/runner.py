@@ -151,6 +151,18 @@ def transcribe_options(job: Job) -> dict[str, Any]:
     return options
 
 
+def _fallback_since(engine: Any, before: int) -> str | None:
+    """这一趟 `pipeline_run` 里有没有触发"OOM 退回 CPU"（G17）。
+
+    `engine.records` 是**进程内累计**的（同一个引擎会被多个工程复用），所以只看
+    这次调用之前到现在的增量，别把上一个工程的历史 fallback 记到这个工程头上。
+    """
+    for record in engine.records[before:]:
+        if getattr(record, "fallback_reason", None):
+            return str(record.fallback_reason)
+    return None
+
+
 # --------------------------------------------------------------------- 模型持有
 class EngineProvider:
     """进程内复用一个 `SheetSage2Engine`（加载一次几十秒，之后每个任务都省掉）。
@@ -370,8 +382,14 @@ class RunnerSession:
         engine = self.engine.get(progress, config)
         progress.check()
         progress.step(*STEP_READ)
+        before_records = len(engine.records)
         payload = pipeline_run(job.upload, job.out_dir, engine=engine,
                                progress=_model_progress(progress), **options)
+        # **OOM 退 CPU 要明确告知**（G17）：以前这条 fallback 只写进 engine.records，
+        # 界面毫无感知——用户以为在用 GPU，实际一首歌要跑半小时。
+        fallback = _fallback_since(engine, before_records)
+        if fallback:
+            progress.log("显存不够，已自动改用 CPU 重跑（会慢很多，约几十分钟）")
         progress.check()
         progress.step(*STEP_PACK)
         progress.set(0.99, "整理产物清单")
@@ -385,6 +403,9 @@ class RunnerSession:
                                       (payload.get("summary") or {}).get("duration_seconds"))
         if not artifacts["ok"]:
             progress.log("产物自检没通过：" + "；".join(artifacts["problems"][:3]))
+        warnings = list(payload.get("warnings") or [])
+        if fallback:
+            warnings.append("显存不够，已自动改用 CPU 重跑")
         return {"detail": {
             "dtype": engine.effective_dtype,
             "device": engine.device,
@@ -392,7 +413,8 @@ class RunnerSession:
             "quantize": grid.get("grid_note"),
             "pitch": PITCH_LABEL,
             "notes": (payload.get("highlights") or {}).get("notes") or {},
-            "warnings": list(payload.get("warnings") or []),
+            "warnings": warnings,
+            "fallback": fallback,
             "files": len(payload.get("files") or []),
             "artifacts": artifacts,
         }}

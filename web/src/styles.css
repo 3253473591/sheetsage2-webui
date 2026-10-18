@@ -116,6 +116,9 @@ a {
   display: flex;
   gap: 10px;
 }
+.nav-meta .meta-warn {
+  color: var(--warn, #b45309);
+}
 .theme-toggle {
   width: 28px;
   height: 28px;

@@ -78,6 +78,14 @@ export interface JobOptions {
   language?: string
 }
 
+/** 启动预检（G15）里的一项：`error`/`warn`/`info` 会在顶栏画横幅。 */
+export interface PreflightCheck {
+  key: string
+  level: 'ok' | 'warn' | 'error' | 'info'
+  title: string
+  detail?: string
+}
+
 export interface EnvInfo {
   version: string
   model: string
@@ -89,6 +97,10 @@ export interface EnvInfo {
   static_ready: boolean
   max_upload_mb: number
   queue: { pending: number; running: string | null }
+  /** 数据根所在磁盘的剩余/总量（G11：顶栏显示"剩余 12.3 GB"）。 */
+  disk: { free: number; total: number; used: number }
+  /** 启动预检结果（G15）。 */
+  preflight: PreflightCheck[]
   phases: PhaseInfo[]
   languages: LanguageChoice[]
   params: ParamSpecs
@@ -233,6 +245,12 @@ export interface JobSnapshot {
   warnings: string[]
   files: JobFile[]
   stems: Partial<Record<'vocal', StemInfo>>
+  /** 上传体检（G10）结果：时长/采样率/是否静音等。 */
+  audio_info?: Record<string, unknown>
+  /** 内容指纹（G10 去重用）。 */
+  audio_fingerprint?: string | null
+  /** 内容指纹命中了已有工程时，指向那个工程 id（G10 去重提示）。 */
+  duplicate_of?: string | null
   /** 工程级参数（页面上可调的那些，见 `ParamSpecs`）。 */
   options: JobOptions
   highlights: Highlights | null

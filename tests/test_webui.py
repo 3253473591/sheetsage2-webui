@@ -203,6 +203,9 @@ class GateRunner:
 
 
 def make_client(tmp_path: Path, runners, **kwargs) -> tuple[TestClient, JobManager]:
+    # 默认关闭上传体检：测试里的假 WAV 字节 ffmpeg 解不出，会误伤几十条用例；
+    # G10 的测试单独传 `probe_upload=True`。
+    kwargs.setdefault("probe_upload", False)
     app = create_app(data_root=tmp_path / "data", runners=runners, **kwargs)
     return TestClient(app), app.state.manager
 
@@ -1084,7 +1087,9 @@ def test_project_folder_is_the_output_dir_and_internals_are_hidden(tmp_path):
         root = tmp_path / "output" / "晚风"
         assert job.root == root and job.out_dir == root
         assert (root / "job.json").is_file()
-        assert (root / ".webui" / "input" / "晚风.wav").is_file()
+        # 输入文件带 uuid 前缀（G9）：展示名仍存 job.audio，落盘名 = `<job_id>-<原名>`。
+        input_files = list((root / ".webui" / "input").iterdir())
+        assert len(input_files) == 1 and input_files[0].name.endswith("-晚风.wav")
 
         write_artifacts(root)
         listing = {item["path"] for item in scan_files(root)}

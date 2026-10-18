@@ -24,6 +24,7 @@ const {
   streamedLyrics,
   logs,
   error,
+  serviceDown,
   uploadProgress,
   lanesLoading,
   trash,
@@ -36,6 +37,7 @@ const {
   attachStem,
   detachStem,
   setOptions,
+  cleanup,
   remove,
   loadTrash,
   restoreTrash,
@@ -62,6 +64,31 @@ const busy = computed(() => uploadProgress.value !== null)
 const anyRunning = computed(() =>
   jobs.value.some((job) => job.state === 'running' || job.state === 'queued'),
 )
+
+/** 启动预检（G15）：顶栏横幅按最严重的一项上色（error > warn > info）。 */
+const preflightNote = computed(() => {
+  const checks = env.value?.preflight ?? []
+  const order = ['error', 'warn', 'info'] as const
+  for (const level of order) {
+    const hit = checks.find((item) => item.level === level)
+    if (hit) return hit
+  }
+  return null
+})
+
+/** 磁盘剩余（G11）：顶栏显示，< 2GB 变黄。 */
+const diskText = computed(() => {
+  const disk = env.value?.disk
+  if (!disk || !disk.total) return ''
+  const free = disk.free
+  const unit = free >= 1024 ** 3 ? 'GB' : 'MB'
+  const value = free >= 1024 ** 3 ? free / 1024 ** 3 : free / 1024 ** 2
+  return `剩余 ${value.toFixed(1)} ${unit}`
+})
+const diskLow = computed(() => {
+  const free = env.value?.disk?.free ?? 0
+  return free > 0 && free < 2 * 1024 ** 3
+})
 
 function stopAll(): void {
   void cancel()
@@ -158,7 +185,9 @@ function toggleTheme(): void {
           <span v-if="env">扒谱 {{ env.model }}</span>
           <span v-if="env">歌词 {{ env.asr?.model ?? '—' }}</span>
           <span v-if="env && env.queue.pending">排队 {{ env.queue.pending }}</span>
+          <span v-if="diskText" :class="{ 'meta-warn': diskLow }" :title="diskLow ? '磁盘不多了，建议清理缓存' : ''">{{ diskText }}</span>
         </div>
+        <a class="nav-tab" href="/api/diagnose" title="打包诊断信息（工程 + 日志 + 环境），出问题时发我">诊断包</a>
         <button
           class="nav-tab"
           :title="'回收站：删掉的工程 7 天内可以恢复'"
@@ -184,6 +213,14 @@ function toggleTheme(): void {
       <main class="main">
         <div class="workspace">
           <div class="ws-inner">
+            <div v-if="serviceDown" class="error-box" style="border-left-color: #dc2626">
+              <b>后台服务已停止</b>（可能被关闭或崩溃了）。
+              请重新运行 <code>webui.bat</code>，然后刷新本页。
+            </div>
+            <div v-else-if="preflightNote" :class="preflightNote.level === 'error' ? 'error-box' : 'warn-box'">
+              <b>{{ preflightNote.title }}</b>
+              <span v-if="preflightNote.detail"> · {{ preflightNote.detail }}</span>
+            </div>
             <div v-if="error" class="error-box">
               <span>{{ error }}</span>
               <button @click="dismissError()">×</button>
@@ -200,6 +237,7 @@ function toggleTheme(): void {
                 :job="active"
                 @remove="askRemove(active.id)"
                 @reset="reset"
+                @cleanup="cleanup"
               />
               <TrackList
                 :job="active"

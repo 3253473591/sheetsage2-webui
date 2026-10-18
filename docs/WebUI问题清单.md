@@ -1,4 +1,4 @@
-﻿# WebUI 问题清单
+# WebUI 问题清单
 
 > **这份文档专门装 WebUI 的问题与改进**：发现一个记一个，修完标 ✅ 并写清根因、证据、
 > 改了哪些文件。**不要再往 [`交接-下一次对话.md`](交接-下一次对话.md) 里加条目**——
@@ -26,6 +26,16 @@
 | 12 | [写盘不是原子的，中断后留半截文件](#12-写盘不是原子的中断后留半截文件-) | ✅ 已修（原子写 + `prev/`） | WebUI / 一致性 |
 | 13 | [卡住就是永远转圈](#13-卡住就是永远转圈-) | ✅ 已修（超时 + 看门狗） | WebUI / 守护 |
 | 14 | [报错直接吐异常名与英文原文](#14-报错直接吐异常名与英文原文-) | ✅ 已修（错误码表） | WebUI / 可理解 |
+| 15 | [两个标签页互相覆盖（无乐观锁）](#15-两个标签页互相覆盖无乐观锁-) | ✅ 已修（`expected_rev` + 409） | WebUI / 一致性 |
+| 16 | [并发上传同名文件撞进同一目录](#16-并发上传同名文件撞进同一目录-) | ✅ 已修（原子认领 + uuid 前缀） | WebUI / 并发 |
+| 17 | [重复点「开始」重复入队](#17-重复点开始重复入队-) | ✅ 已修（去重 + 取消墓碑） | WebUI / 幂等 |
+| 18 | [上传只查后缀不查内容](#18-上传只查后缀不查内容-) | ✅ 已修（ffmpeg 体检 + 静音 + 去重指纹） | WebUI / 入口 |
+| 19 | [没有磁盘预检与产物回收](#19-没有磁盘预检与产物回收-) | ✅ 已修（阶段前预检 + 清理缓存） | WebUI / 数据安全 |
+| 20 | [日志只在内存、崩溃后无现场](#20-日志只在内存崩溃后无现场-) | ✅ 已修（滚动日志 + 诊断包） | WebUI / 可诊断 |
+| 21 | [无 CSRF/Origin 校验、非回环裸奔](#21-无-csrrorigin-校验非回环裸奔-) | ✅ 已修（Origin/Host 校验 + token） | WebUI / 安全 |
+| 22 | [启动不做完整预检](#22-启动不做完整预检-) | ✅ 已修（`/api/env.preflight` 横幅） | WebUI / 入口 |
+| 23 | [服务消失后页面静默冻结](#23-服务消失后页面静默冻结-) | ✅ 已修（存活探测 + 红色横幅） | WebUI / 守护 |
+| 24 | [显存不足退 CPU 不告知](#24-显存不足退-cpu-不告知-) | ✅ 已修（`fallback_reason` 进日志与告警） | WebUI / 可理解 |
 
 **新增一条的写法**：现象（谁在什么操作下看到什么）→ 证据（数字 / 文件 / 可复现命令）→
 根因（指到具体函数）→ 修法与影响面 → 状态。
@@ -805,6 +815,129 @@ WebUI 的 `done` 唯一依据是"runner 没抛异常"。模型中途吐半套产
 
 ---
 
+## 15. 两个标签页互相覆盖（无乐观锁）✅
+
+**状态**：✅ 已修（`set_options(expected_rev=)` + `StaleRevision` → 409 + 当前快照）
+
+- **现象**：A 标签页改精度、B 标签页（停在旧快照）改语言 → A 的改动被**静默回滚**。
+- **修法**：`PATCH /options` 接受 body 里的 `expected_rev`（或 `If-Match` 头），不匹配回
+  **409 + `detail.snapshot`**；`rev` 语义改成"任何影响结果的变更都 +1"（改参数/换音源/重跑）；
+  前端 `setJobOptions` 带上 `job.rev`，收到 `StaleOptionsError` 就用服务端给的新快照原地刷新。
+- **验证**：`tests/test_webui_p1.py::test_optimistic_lock_rejects_a_stale_revision`、
+  `test_rev_bumps_on_any_result_changing_edit`。
+- **涉及文件**：`webui/jobs.py`、`webui/app.py`、`web/src/api.ts`、`web/src/composables/useStudio.ts`。
+
+## 16. 并发上传同名文件撞进同一目录 ✅
+
+**状态**：✅ 已修（原子认领 + 输入文件 uuid 前缀）
+
+- **现象**：`unique_project_dir` 先 `candidate.exists()` 再 `mkdir(exist_ok=True)`，判断与创建之间
+  有窗口 → 并发同名上传写进同一个目录。
+- **修法**：新增 `claim_project_dir`（`mkdir(exist_ok=False)` + 重试 `-2/-3`，创建即互斥）；
+  输入文件落盘名改成 `<job_id>-<原名>`（展示名仍存 `job.audio`），`_job_from_meta` 恢复时按
+  "任意前缀 + 原名"找回。
+- **验证**：`test_concurrent_creates_get_distinct_directories`（10 线程 → 10 个不同目录）、
+  `test_claim_project_dir_is_atomic`。
+- **涉及文件**：`webui/jobs.py`。
+
+## 17. 重复点「开始」重复入队 ✅
+
+**状态**：✅ 已修（queued/running 早退 + 取消墓碑 5s）
+
+- **现象**：连点两次「开始扒谱」= 同一个 `job_id` 进队两次；第二次点击还会把
+  `cancel_requested` 抹掉（取消被复活）。
+- **修法**：`run_stage` 在锁内对 `stages[phase].state in ("queued","running")` 直接早退；
+  `cancel` 记 `canceled_at`，之后 5 秒内的「开始」直接 409（"刚刚取消，稍等几秒再开始"）。
+- **验证**：`test_run_stage_deduplicates_queued_and_running`（`phase_done` 恰一条）、
+  `test_cancel_tombstone_blocks_immediate_restart`。
+- **涉及文件**：`webui/jobs.py`。
+
+## 18. 上传只查后缀不查内容 ✅
+
+**状态**：✅ 已修（ffmpeg 体检 + 静音 RMS + 内容指纹去重）
+
+- **现象**：把 Word 文档改名成 `.mp3` 也能传，几十秒后才炸；纯静音/伴奏版传进去
+  白跑半小时没人知道。
+- **修法**：`media.probe_audio`：`ffmpeg -i` 探容器/时长/音频流（读不出 → `E_AUDIO_UNREADABLE`），
+  解码前 20s 算 RMS（纯静音 → `E_AUDIO_SILENT`）；`content_fingerprint`（大小 + 前 1MB sha1）
+  命中已有工程时快照里给 `duplicate_of`。`create_app(probe_upload=True)` 是产品默认，
+  测试默认关。
+- **验证**：`test_probe_audio_rejects_a_renamed_document`、`test_probe_audio_accepts_a_real_tone`、
+  `test_probe_upload_rejects_bad_content`、`test_content_fingerprint_changes_with_bytes`。
+- **涉及文件**：`webui/media.py`、`webui/jobs.py`、`webui/errors.py`（`E_AUDIO_SILENT`）。
+
+## 19. 没有磁盘预检与产物回收 ✅
+
+**状态**：✅ 已修（阶段前预检 + `/api/env.disk` + `POST /cleanup`）
+
+- **现象**：笔记本跑到第 5 首歌磁盘满 → 写一半 `OSError`，一句英文（叠加 #14）。
+- **修法**：`_assert_disk` 在阶段开跑前按"音频 × 3 + 50MB"预检，不够就 `E_DISK_FULL`（不白跑）；
+  `/api/env` 带 `disk.free/total/used`（顶栏"剩余 12.3 GB"，< 2GB 变黄）；
+  `POST /api/jobs/{id}/cleanup` 清掉 zip/SVP/波形/prev 等可重算缓存并报告释放字节数。
+- **验证**：`test_env_reports_disk_and_cleanup_frees_bytes`、`test_bytes_text_is_human_readable`。
+- **涉及文件**：`webui/jobs.py`、`webui/app.py`、`web/src/App.vue`、`ProjectHead.vue`。
+
+## 20. 日志只在内存、崩溃后无现场 ✅
+
+**状态**：✅ 已修（滚动日志 + 诊断包 + 崩溃钩子）
+
+- **现象**：进程被强杀/蓝屏/驱动重置后现场全丢，用户能提供的只有"它转圈了"。
+- **修法**：`webui/logs.py`：`logging` + `RotatingFileHandler` 写 `<数据根>/.logs/studio.log`
+  （10MB × 5），uvicorn access/error 接进去；`sys.excepthook` + `threading.excepthook`
+  写 `crash-<时间>.txt`；`GET /api/diagnose`（或 `GET /api/jobs/{id}/diagnose`）打包
+  `job.json` + `summary.json` + `env.json` + 日志下载成 zip。
+- **验证**：`test_diagnose_bundle_contains_env_and_metadata`、`test_setup_logging_writes_a_log_file`。
+- **涉及文件**：`webui/logs.py`（新）、`webui/jobs.py`（`diagnose_bundle`）、`webui/app.py`、`webui/__main__.py`。
+
+## 21. 无 CSRF/Origin 校验、非回环裸奔 ✅
+
+**状态**：✅ 已修（`loopback_guard` + `require_token`）
+
+- **现象**：任意网页都能向 `127.0.0.1` 发简单 POST（取消/开跑/删工程）；DNS rebinding 能读
+  `/api/jobs`；`--host 0.0.0.0` 时同 WiFi 下任何人可上传/删除/导出。
+- **修法**：`webui/security.py` + `app.py` 中间件两个开关（默认关，`__main__.py` 打开）：
+  `loopback_guard`（非 GET 校验 `Origin`/`Referer` 回环 + `/api/*` 校验 `Host`）；
+  `require_token`（非回环监听强制，token 从 `X-Pair-Token` / Bearer / `?token=` / HttpOnly cookie 取，
+  启动时打印 `/?token=...`）。
+- **验证**：`test_loopback_guard_rejects_cross_origin_post`、`test_require_token_blocks_requests_without_the_pair_token`、
+  `test_security_helpers`。
+- **涉及文件**：`webui/security.py`（新）、`webui/app.py`、`webui/__main__.py`。
+
+## 22. 启动不做完整预检 ✅
+
+**状态**：✅ 已修（`/api/env.preflight` + 前端横幅）
+
+- **现象**：缺 ffmpeg / 缺权重 / 没显卡都要到点「开始」才炸，浏览器里没有任何提示。
+- **修法**：`webui/preflight.py`：ffmpeg / 数据目录可写 / 扒谱权重 / 歌词权重 / CUDA / 磁盘
+  六项体检，结果进 `/api/env.preflight`；前端按最严重一项（error > warn > info）画横幅。
+- **验证**：`test_preflight_returns_the_expected_checks`、`test_env_exposes_preflight`。
+- **涉及文件**：`webui/preflight.py`（新）、`webui/app.py`、`web/src/App.vue`、`web/src/types.ts`。
+
+## 23. 服务消失后页面静默冻结 ✅
+
+**状态**：✅ 已修（`/api/healthz` 每 3s 探测 + 红色横幅）
+
+- **现象**：任务在跑时用户关掉黑色窗口/电脑睡一觉 → 页面进度条还停在 62%，看起来一切正常，
+  只是不动了，用户可能就这么等下去。
+- **修法**：`useStudio` 起一个 3s 一次的存活探测（`GET /api/healthz`），连续 3 次失败置
+  `serviceDown`；`App.vue` 顶部红色横幅"后台服务已停止（可能被关闭或崩溃了）"。
+- **验证**：`npm run typecheck` + `npm run build` + `npm test`（34 项）兜住；后端无新增断言。
+- **涉及文件**：`web/src/composables/useStudio.ts`、`web/src/App.vue`。
+
+## 24. 显存不足退 CPU 不告知 ✅
+
+**状态**：✅ 已修（`engine.records` 的 `fallback_reason` 进日志与告警）
+
+- **现象**：`engine` 捕获 OOM → `_move_to_cpu()` → 重跑，这条 fallback 只写进 `engine.records`，
+  界面毫无感知——用户以为在用 GPU，实际一首歌要跑半小时。
+- **修法**：`runner._fallback_since(engine, before)` 只看这一趟的增量 records，命中就
+  `progress.log("显存不够，已自动改用 CPU 重跑…")`，并把这条告警并进阶段 `warnings`
+  （顺带进 `detail.fallback`）——`ResultsPanel` 的告警块会自动显示。
+- **验证**：`test_fallback_since_reads_only_the_new_records`（只看增量、别翻旧账）。
+- **涉及文件**：`webui/runner.py`。
+
+---
+
 ## 附：第一期（P0）整体验证
 
 - `pytest tests -q`：**354 项通过 / 6 跳过**（原来是 334 / 6；新增 20 项 = 14 项健壮性 + 6 项单实例锁）。
@@ -812,5 +945,11 @@ WebUI 的 `done` 唯一依据是"runner 没抛异常"。模型中途吐半套产
 - `cd web && npm run build`：通过，前端产物已更新。
 - 真机：`webui.bat` 双击两次只起一个服务；上传 → 删除 → 回收站 → 恢复 全链路走通。
 
-> 剩下的 P1（乐观锁、目录竞态、上传体检、磁盘预检、日志/诊断包、CSRF、启动预检、
-> OOM 告知、页面存活提示）与 P2 见 `docs/健壮性保障评估.md` §5、§6，按那里的顺序继续。
+## 附：第二期（P1）整体验证
+
+- `pytest tests -q`：**374 项通过 / 6 跳过**（P0 后新增 `tests/test_webui_p1.py` 20 项）。
+- `cd web && npm run typecheck && npm test`：typecheck 通过，**34 项通过**。
+- `cd web && npm run build`：通过，前端产物已更新（含预检/存活横幅、磁盘显示、诊断包入口）。
+
+> 剩下的 P2（前端超时/SSE 单调进度、耗时预估、断点续跑、数据迁移引导）见
+> `docs/健壮性保障评估.md` §6，按那里的顺序继续。

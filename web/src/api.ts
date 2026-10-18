@@ -228,18 +228,65 @@ export async function deleteStem(id: string, kind: 'vocal' = 'vocal'): Promise<J
   return (await response.json()) as JobSnapshot
 }
 
-/** 改工程级参数（参数面板：精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）。 */
+/** 乐观锁冲突（G8）：改参数时工程已经被别人改过了，带着"新快照"抛出来。 */
+export class StaleOptionsError extends Error {
+  snapshot: JobSnapshot | null
+  constructor(message: string, snapshot: JobSnapshot | null) {
+    super(message)
+    this.snapshot = snapshot
+  }
+}
+
+/**
+ * 改工程级参数（参数面板：精度 / 设备 / 范围 / 量化 / 模型 / 音源 / 语言）。
+ *
+ * `expectedRev` 是乐观锁（G8）：带上当前 `rev`，服务端发现版本不一致就回 409 + 当前快照，
+ * 而不是把别人的改动静默盖掉。
+ */
 export async function setJobOptions(
   id: string,
   values: JobOptions,
+  expectedRev?: number,
 ): Promise<JobSnapshot> {
+  const body: Record<string, unknown> = { ...values }
+  if (expectedRev !== undefined) body.expected_rev = expectedRev
   const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}/options`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(values),
+    body: JSON.stringify(body),
   })
-  if (!response.ok) throw new Error(await readError(response, '设置失败'))
+  if (!response.ok) {
+    if (response.status === 409) {
+      try {
+        const payload = (await response.json()) as { detail?: unknown }
+        const detail = payload.detail
+        if (detail && typeof detail === 'object') {
+          const d = detail as { message?: unknown; snapshot?: unknown }
+          throw new StaleOptionsError(
+            typeof d.message === 'string' ? d.message : '这页是旧的',
+            (d.snapshot as JobSnapshot) ?? null,
+          )
+        }
+      } catch (exc) {
+        if (exc instanceof StaleOptionsError) throw exc
+      }
+    }
+    throw new Error(await readError(response, '设置失败'))
+  }
   return (await response.json()) as JobSnapshot
+}
+
+/** 清掉一个工程的可重算缓存（zip / SVP / 波形 / prev），释放磁盘（G11）。 */
+export async function cleanupJob(id: string): Promise<{ freed: number }> {
+  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}/cleanup`,
+                                { method: 'POST' })
+  if (!response.ok) throw new Error(await readError(response, '清理失败'))
+  return (await response.json()) as { freed: number }
+}
+
+/** 诊断包下载地址（G12）。不传 id = 全部工程 + env + 日志。 */
+export function diagnoseUrl(id?: string): string {
+  return id ? `${BASE}/jobs/${encodeURIComponent(id)}/diagnose` : `${BASE}/diagnose`
 }
 
 export interface StreamHandlers {
