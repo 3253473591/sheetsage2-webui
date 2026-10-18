@@ -42,6 +42,8 @@ const {
   loadTrash,
   restoreTrash,
   purgeTrash,
+  backupUrl,
+  restoreBackup,
   reset,
   dismissError,
 } = useStudio()
@@ -54,6 +56,27 @@ const PHASES: PhaseKey[] = ['transcribe', 'lyrics']
 /** 等待确认的删除（G2：删除按钮不再单击即删）。 */
 const pendingDelete = ref<{ id: string; name: string; message: string } | null>(null)
 const showTrash = ref(false)
+
+/** 导入备份（G22）：隐藏的 file input，点顶栏按钮时触发。 */
+const backupInput = ref<HTMLInputElement | null>(null)
+const importingBackup = ref(false)
+
+function pickBackup(): void {
+  backupInput.value?.click()
+}
+
+async function onBackupPicked(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''                       // 允许同一个包再导一次
+  if (!file) return
+  importingBackup.value = true
+  try {
+    await restoreBackup(file)
+  } finally {
+    importingBackup.value = false
+  }
+}
 
 const phases = computed(() => env.value?.phases ?? [
   { key: 'transcribe' as const, label: '扒谱', engine: 'SheetSage2' },
@@ -188,6 +211,26 @@ function toggleTheme(): void {
           <span v-if="diskText" :class="{ 'meta-warn': diskLow }" :title="diskLow ? '磁盘不多了，建议清理缓存' : ''">{{ diskText }}</span>
         </div>
         <a class="nav-tab" href="/api/diagnose" title="打包诊断信息（工程 + 日志 + 环境），出问题时发我">诊断包</a>
+        <a
+          class="nav-tab"
+          :href="backupUrl"
+          title="把所有工程（含原音频与产物）打成一个 zip：换电脑 / 重装系统前点一下"
+        >备份</a>
+        <button
+          class="nav-tab"
+          :disabled="importingBackup"
+          title="导入之前导出的备份包：重名工程不会覆盖，会落成「-2」"
+          @click="pickBackup"
+        >
+          {{ importingBackup ? '导入中…' : '导入备份' }}
+        </button>
+        <input
+          ref="backupInput"
+          type="file"
+          accept=".zip,application/zip"
+          style="display: none"
+          @change="onBackupPicked"
+        />
         <button
           class="nav-tab"
           :title="'回收站：删掉的工程 7 天内可以恢复'"

@@ -696,6 +696,12 @@ a {
   gap: 8px;
   min-height: 15px;
 }
+/* 耗时预估（G20）：等待时"还要等多久"比任何数字都重要，单独给一行 */
+.sg-eta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
 .sg-foot {
   display: flex;
   justify-content: space-between;

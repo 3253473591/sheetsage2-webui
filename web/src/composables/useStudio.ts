@@ -13,6 +13,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import * as api from '@/api'
 import type {
+  BackupSummary,
   EnvInfo,
   JobEvent,
   JobOptions,
@@ -26,6 +27,7 @@ import type {
 import { TERMINAL_STATES } from '@/types'
 import { splitDroppedFiles } from '@/drop'
 import { lyricsBlockedMessage } from '@/stageActions'
+import { patchFromEvent, startsNewRun } from '@/progress'
 
 export interface LogLine {
   seq: number
@@ -97,25 +99,33 @@ export function useStudio() {
     switch (event.type) {
       case 'phase':
         if (run) {
+          // 新一轮才允许把进度归零（G18）：重连补发的旧 `phase` 事件不能把 80% 打回 0。
+          if (startsNewRun(time, run.started_at)) {
+            run.progress = 0
+            run.started_at = time
+          }
           run.state = (event.data.state as never) ?? 'running'
-          run.progress = 0
           run.error = null
+          run.eta = event.data.eta ?? run.eta ?? null
         }
         pushLog(event.seq, phase, `开始${event.data.label ?? ''}`, 'info', time)
         break
       case 'step':
-        if (run) {
-          run.step = event.data.step ?? ''
-          if (typeof event.data.progress === 'number') run.progress = event.data.progress
+      case 'progress': {
+        // 只增不减 + 旧事件不算数（G18），规则都在 `@/progress`
+        const patch = run ? patchFromEvent(run, event) : null
+        const stepChanged = Boolean(run && patch?.step !== undefined && patch.step !== run.step)
+        if (run && patch) {
+          if (patch.step !== undefined) run.step = patch.step
+          if (patch.progress !== undefined) run.progress = patch.progress
+          if (patch.message !== undefined) run.message = patch.message
         }
-        pushLog(event.seq, phase, event.data.step ?? '', 'info', time)
-        break
-      case 'progress':
-        if (run) {
-          if (typeof event.data.progress === 'number') run.progress = event.data.progress
-          run.message = event.data.message ?? run.message
+        // 小步骤只在**真的换了**的时候记一行日志，否则逐窗口回调会把日志抽屉刷满
+        if (event.type === 'step' && stepChanged) {
+          pushLog(event.seq, phase, patch?.step ?? '', 'info', time)
         }
         break
+      }
       case 'lyrics':
         if (event.data.lines) streamedLyrics.value = event.data.lines
         if (run && event.data.lines) {
@@ -167,15 +177,10 @@ export function useStudio() {
 
   // ---------------------------------------------------------------- 存活探测（G16）
   async function probeHealth(): Promise<void> {
-    try {
-      const response = await fetch('/api/healthz')
-      if (response.ok) {
-        healthFails = 0
-        if (serviceDown.value) serviceDown.value = false
-        return
-      }
-    } catch {
-      /* 服务没响应：计数 */
+    if (await api.pingHealth()) {
+      healthFails = 0
+      if (serviceDown.value) serviceDown.value = false
+      return
     }
     healthFails += 1
     if (healthFails >= 3) serviceDown.value = true
@@ -503,6 +508,41 @@ export function useStudio() {
     }
   }
 
+  // ---------------------------------------------------------------- 备份 / 迁移（G22）
+  /** 备份包下载地址（顶栏那个「备份」按钮）。 */
+  const backupUrl = api.backupUrl(false)
+
+  /**
+   * 导入一个备份包：把里面的工程收进来（**不覆盖**已有的，重名会落成 `-2`）。
+   *
+   * 导入完重新列一遍工程——用户下一步通常就是打开其中一个看看。
+   */
+  async function restoreBackup(file: File): Promise<BackupSummary | null> {
+    error.value = null
+    try {
+      const summary = await api.restoreBackup(file)
+      jobs.value = await api.listJobs()
+      const names = summary.restored.map((item) => item.name).slice(0, 5)
+      pushLog(0, null,
+              `已导入 ${summary.count} 个工程`
+              + (names.length ? `：${names.join('、')}${summary.restored.length > 5 ? ' …' : ''}` : ''),
+              'ok')
+      if (summary.skipped.length) {
+        pushLog(0, null,
+                `有 ${summary.skipped.length} 个没导进来：${summary.skipped[0]!.reason}`,
+                'warn')
+      }
+      if (summary.restored.length) {
+        const first = jobs.value.find((item) => item.id === summary.restored[0]!.id)
+        if (first) await select(first.id)
+      }
+      return summary
+    } catch (exc) {
+      error.value = exc instanceof Error ? exc.message : String(exc)
+      return null
+    }
+  }
+
   onUnmounted(() => {
     disposed = true
     detach()
@@ -551,6 +591,8 @@ export function useStudio() {
     loadTrash,
     restoreTrash,
     purgeTrash,
+    backupUrl,
+    restoreBackup,
     reset,
     dismissError: () => {
       error.value = null

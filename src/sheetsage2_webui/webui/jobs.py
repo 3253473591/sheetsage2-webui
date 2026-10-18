@@ -28,6 +28,7 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -39,6 +40,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 from ..bootstrap import PROJECT_ROOT
 from ..fsutil import move_into, write_text_atomic
 from .errors import StageFailure, describe as describe_error
+from .eta import estimate as estimate_seconds
 
 #: 阶段顺序与显示名。界面上的两张卡就是这两个。
 PHASES = ("transcribe", "lyrics")
@@ -471,7 +473,7 @@ class StageRun:
         end = self.finished_at if self.finished_at is not None else time.time()
         return max(0.0, end - self.started_at)
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, eta: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return {
             "key": self.key,
             "label": self.label,
@@ -487,6 +489,9 @@ class StageRun:
             "error_code": self.error_code,
             "error_action": self.error_action,
             "error_detail": self.error_detail,
+            # 耗时预估（G20）：`{seconds, low, high, label, device, audio_seconds}`
+            # 或 null（还不知道音频多长）。只给"还没跑完"的阶段算，跑完了就不用猜了。
+            "eta": dict(eta) if eta else None,
             "detail": self.detail,
         }
 
@@ -548,6 +553,10 @@ class Job:
     canceled_at: float | None = None
     #: `output/` 里本来就有的产物目录（不是 WebUI 建的）——只读。
     imported: bool = False
+    #: 耗时预估（G20）的提供者：`(job, phase) -> {seconds,low,high,label,…} | None`。
+    #: 由 :class:`JobManager` 在登记工程时挂上——`Job` 自己不知道显卡、音频时长这些上下文。
+    eta_provider: Callable[["Job", str], Mapping[str, Any] | None] | None = field(
+        default=None, repr=False, compare=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _seq: int = 0
 
@@ -600,9 +609,25 @@ class Job:
             return max(0.0, end - min(starts))
 
     # ---------------------------------------------------------------- 快照
+    def stage_eta(self, run: StageRun) -> Mapping[str, Any] | None:
+        """这个阶段的耗时预估（G20）。
+
+        只算**还没跑完**的阶段：`done` 了进度条就是 100%，再挂一句"预计 3 分钟"只会误导。
+        provider 抛异常不影响快照——预估是锦上添花，不能把接口带挂。
+        """
+        if self.eta_provider is None:
+            return None
+        if run.state in STAGE_TERMINAL:
+            return None
+        try:
+            return self.eta_provider(self, run.key)
+        except Exception:                            # noqa: BLE001 - 预估坏了不该影响快照
+            return None
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             current = self.stages.get(self.stage) if self.stage else None
+            stages = {key: run.as_dict(self.stage_eta(run)) for key, run in self.stages.items()}
             return {
                 "id": self.id,
                 "name": self.name,
@@ -611,11 +636,13 @@ class Job:
                 "artifacts_rev": self.artifacts_rev,
                 "state": self.state,
                 "stage": self.stage,
-                "stages": {key: run.as_dict() for key, run in self.stages.items()},
+                "stages": stages,
                 # 下面几个是"当前阶段"的扁平视图，顶栏/列表用起来方便
                 "stage_label": current.label if current else "",
                 "step": current.step if current else "",
                 "progress": round(current.progress, 4) if current else 0.0,
+                # 当前阶段的耗时预估（G20，没在跑就是 null）
+                "eta": (stages.get(self.stage) or {}).get("eta") if self.stage else None,
                 "message": self.message,
                 "created_at": self.created_at,
                 "elapsed_seconds": round(self.elapsed_seconds, 2),
@@ -831,6 +858,10 @@ class JobManager:
         #: 上传后是否做内容体检（G10）。默认关——直接 `JobManager(...)` 的测试不上 ffmpeg；
         #: 产品入口 `create_app` 会显式打开。
         self.probe_upload = bool(probe_upload)
+        #: 这台机器实际会跑在什么设备上（`"cuda"` / `"cpu"` / `None` = 不知道）。
+        #: `create_app` 用 `RunnerSession.describe()` 的结果填它；**只影响耗时预估的系数**（G20），
+        #: 不影响真跑哪台设备（那是 `EngineProvider.config_for` 的事）。
+        self.device_hint: str | None = None
         self.root.mkdir(parents=True, exist_ok=True)
         # **重启不丢**：把 output/ 里已有的工程读回来（WebUI 建的读 job.json，
         # 命令行跑出来的当"只读产物"收进来）
@@ -938,7 +969,7 @@ class JobManager:
         job.message = "上次运行被中断（程序重启），可以重跑" if interrupted else "已恢复"
         job.emit("log", phase=None, message="工程已恢复（重启后从 output/ 载入）"
                  + ("；上次没跑完，可以重跑" if interrupted else ""))
-        return job
+        return self._attach_eta(job)
 
     def _import(self, root: Path) -> Job:
         """`output/` 里本来就有的产物目录：只读收编。"""
@@ -961,7 +992,7 @@ class JobManager:
         job.highlights = self._highlights_from_disk(root)
         job.emit("log", phase=None,
                  message="从 output/ 载入已有产物（只读：能看卷帘 / 下载 / 导 SVP，不能重跑）")
-        return job
+        return self._attach_eta(job)
 
     @staticmethod
     def _highlights_from_disk(root: Path) -> dict[str, Any] | None:
@@ -1015,6 +1046,54 @@ class JobManager:
         except OSError:
             return {"free": 0, "total": 0, "used": 0}
         return {"free": usage.free, "total": usage.total, "used": usage.used}
+
+    # ---------------------------------------------------------------- 耗时预估（G20）
+    def set_device_hint(self, device: str | None) -> None:
+        """告诉管理器"这台机器实际跑在哪"（`create_app` 用 `RunnerSession.describe()` 填）。"""
+        self.device_hint = str(device) if device else None
+
+    def audio_seconds(self, job: Job) -> float | None:
+        """音频有多长（秒）。三个来源按可信度排：上传体检 > 产物摘要 > 概要。
+
+        都没有就返回 `None`：那时不给预估（界面不显示），比编一个数字强。
+        """
+        for source in (job.audio_info, job.summary, job.highlights):
+            if not isinstance(source, Mapping):
+                continue
+            try:
+                value = float(source.get("duration_seconds") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    def _device_for(self, job: Job) -> str:
+        """这一趟按什么口径估：工程自己选的「设备」优先，其次是本机的实际情况。
+
+        `auto` + 本机没检测到显卡时，`create_app` 已经把 `device_hint` 设成 `cpu` 了；
+        两个都不知道就按显卡估（有卡的机器远多于没卡的，且**低估**比高估更不吓人——
+        真跑慢了，进度条上的"上次进展 xx 秒前"会自己说明问题）。
+        """
+        wanted = str(job.options.get("device") or "auto").strip().lower()
+        if wanted.startswith("cpu"):
+            return "cpu"
+        if wanted.startswith("cuda"):
+            return "cuda"
+        hint = str(self.device_hint or "").strip().lower()
+        if hint.startswith("cpu"):
+            return "cpu"
+        return "cuda"
+
+    def eta_for(self, job: Job, phase: str) -> Mapping[str, Any] | None:
+        """某个阶段的耗时预估（G20）。纯计算，不读写磁盘。"""
+        return estimate_seconds(phase, self.audio_seconds(job), self._device_for(job),
+                                job.options)
+
+    def _attach_eta(self, job: Job) -> Job:
+        """给工程挂上预估提供者（`Job.snapshot()` 里按阶段调它）。"""
+        job.eta_provider = self.eta_for
+        return job
 
     # ---------------------------------------------------------------- 生命周期
     def _ensure_workers(self) -> None:
@@ -1101,6 +1180,7 @@ class JobManager:
                   upload=upload, out_dir=root, created_at=created,
                   plan=list(wanted), options=dict(self.option_defaults),
                   audio_info=audio_info, audio_fingerprint=fingerprint or None)
+        self._attach_eta(job)
         job.state = "queued" if wanted else DRAFT_STATE
         job.message = "等待开始" if wanted else "等待参数"
         for phase in wanted:
@@ -1714,7 +1794,9 @@ class JobManager:
         # 旧产物先挪进 `.webui/prev/`——`output/` 永远只表示"当前这一版"。
         self._clean_derived(job)
         self._quarantine_stage_outputs(job, phase)
-        job.emit("phase", phase=phase, state="running", label=run.label)
+        # 开跑就把预估推给界面（G20）：不然用户要等下一次快照拉取才看到"预计几分钟"。
+        job.emit("phase", phase=phase, state="running", label=run.label,
+                 eta=job.stage_eta(run))
         runner = self._runners.get(phase)
         if runner is None:
             from .runner import default_runners
@@ -1931,6 +2013,100 @@ class JobManager:
             for log_file in sorted(log_dir(self.root).glob("*.log*")):
                 zf.write(log_file, f"logs/{log_file.name}")
         return buffer.getvalue()
+
+    # ---------------------------------------------------------------- 备份 / 迁移（G22）
+    def backup_file(self, *, include_audio: bool = True,
+                    include_cache: bool = False) -> tuple[Path, dict[str, Any]]:
+        """把所有工程打成一个备份 zip，返回 `(临时文件路径, 摘要)`。
+
+        落在系统临时目录而不是数据根里：数据根是用户的东西，别在旁边拉一坨几百 MB 的包
+        （而且它会被磁盘预检算进去）。调用方（API）负责把临时目录清掉。
+        """
+        from . import backup as backup_mod
+
+        projects: list[dict[str, Any]] = []
+        pairs: list[tuple[str, Path]] = []
+        used: set[str] = set()
+        for job in self.list():
+            folder = safe_name(job.root.name) or "工程"
+            if folder in used:                      # 目录名撞了（极少见）：带一段 id
+                folder = f"{folder}-{safe_name(job.id)[:8]}"
+            used.add(folder)
+            pairs.append((folder, job.root))
+            projects.append({
+                "id": job.id, "name": job.name, "folder": folder,
+                "created_at": job.created_at, "state": job.state,
+                "rev": job.rev, "artifacts_rev": job.artifacts_rev,
+                "imported": job.imported, "audio": job.audio,
+                "duration_seconds": self.audio_seconds(job),
+            })
+        manifest = backup_mod.build_manifest(
+            projects, data_root=self.root,
+            include_audio=include_audio, include_cache=include_cache)
+        folder = Path(tempfile.mkdtemp(prefix="sheetsage2-backup-"))
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = folder / f"sheetsage2-backup-{stamp}.zip"
+        summary = backup_mod.write_backup(target, pairs, manifest,
+                                          include_audio=include_audio,
+                                          include_cache=include_cache)
+        summary["projects"] = len(projects)
+        return target, summary
+
+    def restore_backup(self, archive: str | Path) -> dict[str, Any]:
+        """把备份包里的工程收进来（**不覆盖**已有的，重名自动 `-2`）。
+
+        包里每个工程都会经过和"重启恢复"完全相同的那条路（`_restore`）：带 `job.json` 的
+        按元数据恢复（原音频绝对路径对不上就按布局重找），只有产物的当只读工程收编。
+        """
+        from . import backup as backup_mod
+
+        staging = Path(tempfile.mkdtemp(prefix="sheetsage2-restore-"))
+        restored: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        try:
+            manifest, projects = backup_mod.extract_backup(Path(archive), staging)
+            if not projects:
+                raise backup_mod.BackupRejected("备份包里没有工程")
+            for source in projects:
+                name = safe_name(source.name) or "工程"
+                try:
+                    target = claim_project_dir(self.root, project_folder_name(name))
+                except OSError as exc:
+                    skipped.append({"name": name, "reason": f"目录建不出来：{exc}"})
+                    continue
+                try:
+                    for child in source.iterdir():
+                        move_into(child, target / child.name)
+                except OSError as exc:
+                    shutil.rmtree(target, ignore_errors=True)
+                    skipped.append({"name": name, "reason": f"文件写不进去：{exc}"})
+                    continue
+                job = self._restore(target)
+                if job is None:
+                    shutil.rmtree(target, ignore_errors=True)
+                    skipped.append({"name": name, "reason": "包里没有可识别的工程"})
+                    continue
+                with self._lock:
+                    if job.id in self._jobs:         # id 撞了（同一个包导两次）：换个 id
+                        job.id = f"{job.id}-{uuid.uuid4().hex[:4]}"
+                    self._jobs[job.id] = job
+                    self._order.insert(0, job.id)
+                job.emit("log", phase=None, message=f"已从备份导入：{job.name}")
+                self._write_metadata(job)
+                self.write_manifest(job)
+                restored.append({"id": job.id, "name": job.name, "files": len(job.files)})
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        return {
+            "restored": restored,
+            "skipped": skipped,
+            "count": len(restored),
+            "backup": {
+                "created_at": manifest.get("created_at"),
+                "app_version": manifest.get("app_version"),
+                "projects": len(manifest.get("projects") or []),
+            },
+        }
 
     def _quarantine_stage_outputs(self, job: Job, phase: str) -> None:
         """把这阶段上一轮写的产物挪进 `.webui/prev/<rev>-<时间>/`。

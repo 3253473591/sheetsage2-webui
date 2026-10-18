@@ -37,8 +37,12 @@ def _has_model(directory: Path) -> bool:
     return (directory / "config.json").is_file()
 
 
-def _cuda_available() -> bool | None:
-    """有没有可用的 CUDA。返回 None = 读不到（torch 没装/初始化失败），当"无显卡"处理。"""
+def cuda_available() -> bool | None:
+    """有没有可用的 CUDA。返回 None = 读不到（torch 没装/初始化失败），当"无显卡"处理。
+
+    `JobManager` 拿它把「设备 = 自动」解析成实际口径，好让耗时预估（G20）的系数选对——
+    CPU 上扒谱的系数是显卡的十几倍，估错了那句话就没意义了。
+    """
     try:
         import torch
 
@@ -112,7 +116,7 @@ def preflight(data_root: str | Path | None = None) -> list[dict[str, Any]]:
         })
 
     # 5. 显卡：没卡就 CPU 跑，会很慢，提前说一声。
-    cuda = _cuda_available()
+    cuda = cuda_available()
     if cuda:
         checks.append({"key": "cuda", "level": "ok", "title": "检测到显卡（CUDA）"})
     else:

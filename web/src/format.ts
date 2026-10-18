@@ -22,6 +22,20 @@ export function formatClock(seconds: number | null | undefined): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
+/**
+ * 秒 -> 人话（`45 秒` / `3 分钟` / `1.5 小时`），用在耗时预估上（G20）。
+ *
+ * 和 `formatClock` 的区别：这是给人"判断要不要去泡杯茶"用的，不是给时间轴用的，
+ * 所以超过一分钟就全用分钟，不显示秒。
+ */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return '—'
+  const total = Math.max(0, Math.round(seconds))
+  if (total < 60) return `${total} 秒`
+  if (total < 5400) return `${Math.max(1, Math.round(total / 60))} 分钟`
+  return `${(total / 3600).toFixed(1)} 小时`
+}
+
 export function formatNumber(value: number | null | undefined, digits = 3): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   return String(Number(value.toFixed(digits)))

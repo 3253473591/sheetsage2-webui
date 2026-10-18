@@ -24,6 +24,7 @@ from ..bootstrap import PROJECT_ROOT
 from ..engine import EngineConfig
 from .app import create_app, data_root_from_env
 from .logs import attach_uvicorn, install_crash_hook, setup_logging
+from .preflight import cuda_available
 from .runner import RunnerSession
 from .security import generate_pair_token
 from .singleton import AlreadyRunning, InstanceLock
@@ -135,11 +136,17 @@ def main(argv: list[str] | None = None) -> int:
         require_token = not loopback
         pair_token = generate_pair_token() if require_token else None
 
+        # 耗时预估（G20）的口径：「设备」选自动时先问一次有没有卡——CPU 上扒谱的
+        # 系数是显卡的十几倍，估错了界面那句"预计几分钟"就没意义了。
+        hint = args.device
+        if hint == "auto":
+            hint = "cuda" if cuda_available() else "cpu"
+
         app = create_app(data_root=data_root, session=session,
                          max_upload_mb=args.max_upload_mb,
                          workers=args.workers, lock_params=args.lock_params,
                          loopback_guard=True, require_token=require_token,
-                         pair_token=pair_token)
+                         pair_token=pair_token, device_hint=hint)
 
         try:
             import uvicorn

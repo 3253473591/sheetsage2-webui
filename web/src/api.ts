@@ -1,14 +1,17 @@
 /**
  * 后端 API 客户端。
  *
- * 三个约定：
+ * 四个约定：
  * 1. 上传走 XHR——只有它给得出上传进度；其余请求走 fetch。
  * 2. 进度走 SSE（`text/event-stream`），事件带单调递增的 `id`；断线时我们主动关流、
  *    带着 `?since=` 重连，后端从下一个事件补发，所以刷新页面也不会丢进度。
  * 3. 任务终态一到就主动 `close()`，否则 EventSource 会对着已结束的流无限重连。
+ * 4. **每个请求都有超时**（G19）：服务卡住（模型卡死、磁盘挂住）时页面不能永远 pending，
+ *    只能靠用户手动刷新。超时之后给一句人话，让用户知道"服务还在，只是没回"。
  */
 
 import type {
+  BackupSummary,
   EnvInfo,
   ExportOptions,
   JobEvent,
@@ -22,6 +25,42 @@ import type {
 
 const BASE = '/api'
 
+/** 普通请求的超时（毫秒）。30 秒还没回来说明服务真的卡住了。 */
+export const REQUEST_TIMEOUT_MS = 30_000
+/** 上传/导入的超时：几百 MB 的音频慢网也要几分钟，别在这里误杀。 */
+export const UPLOAD_TIMEOUT_MS = 10 * 60_000
+
+/** 把一个底层异常翻成人话。**超时**要说得像"服务没响应"而不是"网络错误"。 */
+export function describeNetworkError(exc: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Error {
+  if (exc instanceof Error && exc.name === 'AbortError') {
+    return new Error(
+      `服务没响应（已等 ${Math.round(timeoutMs / 1000)} 秒），可能还在忙：`
+      + '稍等一下重试；一直这样就把后台窗口关掉重启一次',
+    )
+  }
+  const text = exc instanceof Error ? exc.message : String(exc)
+  return new Error(`连不上后台服务（${text || '网络错误'}）：可能已经关闭或崩溃了`)
+}
+
+/**
+ * 带超时的 fetch。超时用 `AbortController` 掐掉，**不会**留下一个永远 pending 的 Promise。
+ */
+export async function fetchWithTimeout(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(BASE + path, { ...init, signal: controller.signal })
+  } catch (exc) {
+    throw describeNetworkError(exc, timeoutMs)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function readError(response: Response, fallback: string): Promise<string> {
   try {
     const body = (await response.json()) as { detail?: unknown }
@@ -32,14 +71,26 @@ async function readError(response: Response, fallback: string): Promise<string> 
   return `${fallback}（HTTP ${response.status}）`
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(BASE + path)
+async function getJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const response = await fetchWithTimeout(path, {}, timeoutMs)
   if (!response.ok) throw new Error(await readError(response, '请求失败'))
   return (await response.json()) as T
 }
 
 export function fetchEnv(): Promise<EnvInfo> {
   return getJson<EnvInfo>('/env')
+}
+
+/** 存活探测（G16/G19）：单独一个短超时——服务没响应时要**尽快**判定，别陪着等 30 秒。 */
+export const HEALTH_TIMEOUT_MS = 5000
+
+export async function pingHealth(): Promise<boolean> {
+  try {
+    const response = await fetchWithTimeout('/healthz', { method: 'GET' }, HEALTH_TIMEOUT_MS)
+    return response.ok
+  } catch {
+    return false
+  }
 }
 
 export async function listJobs(): Promise<JobSnapshot[]> {
@@ -74,6 +125,7 @@ export function uploadJob(
     const request = new XMLHttpRequest()
     request.open('POST', `${BASE}/jobs`)
     request.responseType = 'text'
+    request.timeout = UPLOAD_TIMEOUT_MS
     request.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total)
     })
@@ -96,13 +148,15 @@ export function uploadJob(
       reject(new Error(detail))
     })
     request.addEventListener('error', () => reject(new Error('网络错误，上传失败')))
+    request.addEventListener('timeout', () => reject(new Error(
+      '上传超时：文件太大或后台服务卡住了，稍后重试；一直这样就重启一次服务')))
     request.addEventListener('abort', () => reject(new Error('上传已取消')))
     request.send(form)
   })
 }
 
 async function post(path: string): Promise<JobSnapshot> {
-  const response = await fetch(BASE + path, { method: 'POST' })
+  const response = await fetchWithTimeout(path, { method: 'POST' })
   if (!response.ok) throw new Error(await readError(response, '请求失败'))
   return (await response.json()) as JobSnapshot
 }
@@ -125,8 +179,8 @@ export function runChain(id: string): Promise<JobSnapshot> {
  */
 export async function deleteJob(id: string, permanent = false): Promise<void> {
   const query = permanent ? '?permanent=true' : ''
-  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}${query}`,
-                               { method: 'DELETE' })
+  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}${query}`,
+                                         { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '删除失败'))
 }
 
@@ -138,7 +192,7 @@ export async function fetchTrash(): Promise<TrashEntry[]> {
 
 /** 从回收站恢复一个工程（目录挪回 output/），返回恢复后的快照。 */
 export async function restoreTrash(entryId: string): Promise<JobSnapshot> {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `${BASE}/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST' })
   if (!response.ok) throw new Error(await readError(response, '恢复失败'))
   return (await response.json()) as JobSnapshot
@@ -146,8 +200,8 @@ export async function restoreTrash(entryId: string): Promise<JobSnapshot> {
 
 /** 彻底删掉回收站里的一项（不可恢复）。 */
 export async function purgeTrash(entryId: string): Promise<void> {
-  const response = await fetch(`${BASE}/trash/${encodeURIComponent(entryId)}`,
-                               { method: 'DELETE' })
+  const response = await fetchWithTimeout(`${BASE}/trash/${encodeURIComponent(entryId)}`,
+                                         { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '彻底删除失败'))
 }
 
@@ -195,6 +249,7 @@ export function uploadStem(
     const request = new XMLHttpRequest()
     request.open('POST', `${BASE}/jobs/${encodeURIComponent(id)}/stems/${kind}`)
     request.responseType = 'text'
+    request.timeout = UPLOAD_TIMEOUT_MS
     request.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total)
     })
@@ -217,13 +272,15 @@ export function uploadStem(
       reject(new Error(detail))
     })
     request.addEventListener('error', () => reject(new Error('网络错误，上传失败')))
+    request.addEventListener('timeout', () => reject(new Error(
+      '上传超时：文件太大或后台服务卡住了，稍后重试；一直这样就重启一次服务')))
     request.send(form)
   })
 }
 
 export async function deleteStem(id: string, kind: 'vocal' = 'vocal'): Promise<JobSnapshot> {
-  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}/stems/${kind}`,
-                               { method: 'DELETE' })
+  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}/stems/${kind}`,
+                                         { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '移除失败'))
   return (await response.json()) as JobSnapshot
 }
@@ -250,7 +307,7 @@ export async function setJobOptions(
 ): Promise<JobSnapshot> {
   const body: Record<string, unknown> = { ...values }
   if (expectedRev !== undefined) body.expected_rev = expectedRev
-  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}/options`, {
+  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}/options`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -278,8 +335,8 @@ export async function setJobOptions(
 
 /** 清掉一个工程的可重算缓存（zip / SVP / 波形 / prev），释放磁盘（G11）。 */
 export async function cleanupJob(id: string): Promise<{ freed: number }> {
-  const response = await fetch(`${BASE}/jobs/${encodeURIComponent(id)}/cleanup`,
-                                { method: 'POST' })
+  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}/cleanup`,
+                                         { method: 'POST' })
   if (!response.ok) throw new Error(await readError(response, '清理失败'))
   return (await response.json()) as { freed: number }
 }
@@ -287,6 +344,49 @@ export async function cleanupJob(id: string): Promise<{ freed: number }> {
 /** 诊断包下载地址（G12）。不传 id = 全部工程 + env + 日志。 */
 export function diagnoseUrl(id?: string): string {
   return id ? `${BASE}/jobs/${encodeURIComponent(id)}/diagnose` : `${BASE}/diagnose`
+}
+
+// ---------------------------------------------------------------- 备份 / 迁移（G22）
+/** 备份包下载地址：所有工程 + 原音频 + 产物，换电脑/重装前点一下。 */
+export function backupUrl(includeCache = false): string {
+  return `${BASE}/backup${includeCache ? '?include_cache=true' : ''}`
+}
+
+/**
+ * 导入备份包（zip）。**不覆盖已有工程**：重名会在数据目录里落成 `-2`、`-3`。
+ */
+export function restoreBackup(file: File): Promise<BackupSummary> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    const request = new XMLHttpRequest()
+    request.open('POST', `${BASE}/backup/restore`)
+    request.responseType = 'text'
+    request.timeout = UPLOAD_TIMEOUT_MS
+    request.addEventListener('load', () => {
+      if (request.status >= 200 && request.status < 300) {
+        try {
+          resolve(JSON.parse(request.responseText) as BackupSummary)
+        } catch {
+          reject(new Error('服务端返回的不是 JSON'))
+        }
+        return
+      }
+      let detail = `导入失败（HTTP ${request.status}）`
+      try {
+        const body = JSON.parse(request.responseText) as { detail?: unknown }
+        if (typeof body.detail === 'string' && body.detail) detail = body.detail
+      } catch {
+        /* 保持兜底文案 */
+      }
+      reject(new Error(detail))
+    })
+    request.addEventListener('error', () => reject(new Error('网络错误，导入失败')))
+    request.addEventListener('timeout', () => reject(new Error(
+      '导入超时：备份包太大或后台服务卡住了，稍后重试；一直这样就重启一次服务')))
+    request.addEventListener('abort', () => reject(new Error('导入已取消')))
+    request.send(form)
+  })
 }
 
 export interface StreamHandlers {

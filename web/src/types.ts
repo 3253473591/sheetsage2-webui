@@ -144,6 +144,21 @@ export interface ExportOptions {
   svp: { available: boolean; version: string; hint: string }
 }
 
+/** 耗时预估（G20）：`stages.{phase}.eta`。`null` = 还不知道音频多长，界面就不显示。 */
+export interface StageEta {
+  /** 中位估计（秒）：界面用它算"预计还需多久" */
+  seconds: number
+  /** 区间下界 / 上界（秒） */
+  low: number
+  high: number
+  /** 现成的一句话：「预计 2~4 分钟」 */
+  label: string
+  /** 按什么口径估的：`cuda` / `cpu` */
+  device: 'cuda' | 'cpu' | string
+  /** 参与计算的音频秒数（选了"前 30 秒"时就已经截过） */
+  audio_seconds: number
+}
+
 export interface StageSnapshot {
   key: PhaseKey
   label: string
@@ -164,6 +179,8 @@ export interface StageSnapshot {
   error_action?: string | null
   /** 技术原文（折叠在「详情」里） */
   error_detail?: string | null
+  /** 耗时预估（G20）：还没跑完时才有，`null` = 不知道（缺音频时长） */
+  eta?: StageEta | null
   detail: Record<string, unknown>
 }
 
@@ -185,6 +202,18 @@ export interface TrashEntry {
   deleted_at: number
   size: number
   files: number
+}
+
+/** 导入备份包的结果（`POST /api/backup/restore`，G22）。 */
+export interface BackupSummary {
+  restored: { id: string; name: string; files: number }[]
+  skipped: { name: string; reason: string }[]
+  count: number
+  backup: {
+    created_at: number | null
+    app_version: string | null
+    projects: number
+  }
 }
 
 export interface Highlights {
@@ -238,6 +267,8 @@ export interface JobSnapshot {
   stage_label: string
   step: string
   progress: number
+  /** 当前阶段的耗时预估（G20）：没在跑就是 null */
+  eta?: StageEta | null
   message: string
   created_at: number
   elapsed_seconds: number
@@ -288,6 +319,8 @@ export interface JobEvent {
     progress?: number
     message?: string
     detail?: Record<string, unknown>
+    /** `phase` 事件带上的耗时预估（G20） */
+    eta?: StageEta | null
     /** 失败事件带的三段（`error` 是人话，`detail` 是技术原文） */
     code?: string
     action?: string

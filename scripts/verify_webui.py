@@ -466,9 +466,15 @@ def main(argv: list[str] | None = None) -> int:
               f"HTTP {svp.status_code} {svp.text[:120]}")
         check("给的是 .svp 文件名", ".svp" in (svp.headers.get("content-disposition") or ""),
               svp.headers.get("content-disposition", ""))
-        svp_json = json.loads(svp.content.rstrip(b"\x00").decode("utf-8"))
-        svp_tempos = svp_json["time"]["tempo"]
-        svp_tracks = svp_json["tracks"]
+        # 拿不到 SVP 时**别直接崩**：脚本要能把"哪一项不合格"报全，而不是抛个 KeyError
+        # （人声那组没有音符时后端会回 400，这是合法结果，不是脚本错误）。
+        try:
+            svp_json = json.loads(svp.content.rstrip(b"\x00").decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            svp_json = {}
+        svp_tempos = (svp_json.get("time") or {}).get("tempo") or []
+        svp_meters = (svp_json.get("time") or {}).get("meter") or []
+        svp_tracks = svp_json.get("tracks") or []
         # SVP 的音符挂在 track.mainGroup.notes（不是 track.groups，那个是音符组列表）
         svp_notes = [note for track in svp_tracks
                      for note in (track.get("mainGroup") or {}).get("notes") or []]
@@ -479,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
                        if str(note.get("lyrics") or "").strip() not in fillers]
         print(f"  默认（只人声）：{len(svp_tracks)} 轨 · {len(svp_notes)} 音"
               f"（其中 {len(real_lyrics)} 个有真歌词）· "
-              f"{len(svp_tempos)} 个 tempo 点 · {len(svp_json['time']['meter'])} 个拍号")
+              f"{len(svp_tempos)} 个 tempo 点 · {len(svp_meters)} 个拍号")
         check("SVP 里有音符", len(svp_notes) > 0)
         check("SVP 里带速度轴（变速）", len(svp_tempos) >= 1)
         if args.transcribe_only:
@@ -488,9 +494,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             check("识别的歌词进了 SVP", len(real_lyrics) > 0,
                   f"真歌词 {len(real_lyrics)} / {len(svp_notes)}")
-        check("tempo 位置是 SVP 的 blick 单位（不是我们的 tick）",
-              max(item["position"] for item in svp_tempos) > 1_000_000,
-              str([item["position"] for item in svp_tempos[:3]]))
+        # 位置单位是 blick（一个四分音符 705600000），libresvip 的 tick 是 480/四分音符，
+        # 所以任何位置都该是 1_470_000 的整数倍。**恒速曲的 tempo 只有一条、位置正好是 0**，
+        # 光看它判不出单位（以前就是这么误判成 FAIL 的），所以把音符起点一起算进来。
+        blick = 705_600_000 // 480
+        positions = [int(item["position"]) for item in svp_tempos] + \
+            [int(note.get("onset") or 0) for note in svp_notes]
+        check("位置单位是 blick（1_470_000/四分音符），不是我们的 tick",
+              bool(positions) and all(item % blick == 0 for item in positions)
+              and max(positions, default=0) >= blick,
+              f"tempo {[item['position'] for item in svp_tempos[:3]]} · "
+              f"音符起点 {[note.get('onset') for note in svp_notes[:3]]}")
         # 速度也只写变化点：恒速曲一条到底（逐小节抄的话每个小节都标一次 125），
         # 变速曲保留真的转速度点，但相邻两条不该是同一个数
         check("速度轴不写重复的相邻点",
@@ -504,7 +518,6 @@ def main(argv: list[str] | None = None) -> int:
                       str([(item["position"], item["bpm"]) for item in svp_tempos[:6]]))
         # 拍号只写变化点：逐小节抄的话 SynthV 会在每个小节上面都标一次 4/4
         # （实测《光芒》45s 版：21 条 → 20 条一模一样的 4/4）
-        svp_meters = svp_json["time"]["meter"]
         check("拍号只写变化点（相邻两条不相同）",
               all((a["numerator"], a["denominator"]) != (b["numerator"], b["denominator"])
                   for a, b in zip(svp_meters, svp_meters[1:])),

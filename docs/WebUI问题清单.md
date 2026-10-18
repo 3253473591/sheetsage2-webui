@@ -936,6 +936,102 @@ WebUI 的 `done` 唯一依据是"runner 没抛异常"。模型中途吐半套产
 - **验证**：`test_fallback_since_reads_only_the_new_records`（只看增量、别翻旧账）。
 - **涉及文件**：`webui/runner.py`。
 
+## 25. 进度条会倒退（SSE 打回旧值）✅
+
+**状态**：✅ 已修（`web/src/progress.ts`：只增不减 + 旧事件过滤 + 只有新一轮才归零）
+
+- **现象**：重跑一个阶段后重连（带 `?since=`），后端先把这一趟的事件补发过来、又把上一趟
+  残留的事件补发过来，`applyEvent` 直接 `run.progress = event.data.progress`，于是进度条
+  从 12% 跳回 80%。用户会以为任务在倒着跑。
+- **修法**：把规则提成纯函数并单测：
+  1. `monotonicProgress(当前, 事件)` = `max`，并夹在 0~1；
+  2. `isStaleEvent(event.time, run.started_at)`——比这一趟开始还早的事件不算数；
+  3. `startsNewRun()`——只有时间不早于 `started_at` 的 `phase` 事件才能把进度归零；
+  4. **不用**"改参数后把 `lastSeq` 归零"：那会重放整段历史，反而更容易把旧快照打到新状态上。
+- **验证**：`web/test/progress.test.ts` 13 项（含"从 12% 跳回 80%"这条真实场景）。
+- **涉及文件**：`web/src/progress.ts`（新）、`web/src/composables/useStudio.ts`。
+
+## 26. 前端请求没有超时，服务卡住就永远转圈 ✅
+
+**状态**：✅ 已修（`api.fetchWithTimeout`：普通 30s / 上传 10min / 存活探测 5s）
+
+- **现象**：`api.ts` 全是裸 `fetch`，没有 `AbortController`/超时。模型卡死（#13）时后端不再
+  回话，页面上的请求就**永远 pending**，用户只能刷新——而且刷完还是 pending。
+- **修法**：所有非 SSE 请求走 `fetchWithTimeout()`（`AbortController` + `setTimeout`，
+  超时真的掐断，不留 pending 的 Promise）；XHR 上传/导入设 `timeout = 10 分钟` 并处理
+  `ontimeout`；超时文案是人话（"服务没响应（已等 30 秒），可能还在忙…"），
+  连不上是另一句（"连不上后台服务…可能已经关闭或崩溃了"）；存活探测单独 5 秒超时。
+- **验证**：`web/test/api.test.ts` 5 项（"永不 resolve、只响应 abort"的 fetch 造场景）。
+- **涉及文件**：`web/src/api.ts`、`web/src/composables/useStudio.ts`。
+
+## 27. 不知道一首歌要跑多久 ✅
+
+**状态**：✅ 已修（`webui/eta.py` → 快照 `stages.*.eta` → 阶段卡「⏱ 预计 2~4 分钟」）
+
+- **现象**：拖进一首 6 分钟的歌，用户不知道要等 3 分钟还是 40 分钟；进度条第一次长时间不动
+  时，他没有参照物判断"该等"还是"卡死了"。
+- **修法**：`eta.estimate(phase, audio_seconds, device, options)`
+  - 口径：扒谱 `音频秒数 × 0.6（GPU）/ × 8（CPU）`，歌词 `× 0.5 / × 4`，再加模型加载开销
+    （25s / 45s）；区间 = 低估 20% / 高估 30%；选了「前 30/60 秒」按截断后的时长算。
+  - 时长来源按可信度排：上传体检 `audio_info` > 产物 `summary` > `highlights`；都没有就
+    **不给预估**（`eta: null`，界面不显示）。
+  - 设备口径：「设备」参数优先；`auto` 用启动探测结果（`preflight.cuda_available()`）；
+    都不知道按显卡估（低估比高估不吓人）。
+  - 界面：没跑时「预计 2~4 分钟」，跑起来「预计还需约 3 分钟」，估快了就说"预计快好了"。
+- **验证**：`tests/test_webui_p2.py` 6 项（GPU/CPU 系数不能写反、范围截断、缺时长不给、
+  快照字段、设备优先级、跑完就撤）。
+- **涉及文件**：`webui/eta.py`（新）、`webui/jobs.py`（`stage_eta` / `eta_for` / `set_device_hint`）、
+  `webui/app.py`、`webui/__main__.py`、`webui/preflight.py`（`cuda_available` 转公开）、
+  `web/src/components/StageCard.vue`、`web/src/format.ts`。
+
+## 28. 换电脑 / 重装系统没有备份引导 ✅
+
+**状态**：✅ 已修（顶栏「备份」「导入备份」+ `GET /api/backup` + `POST /api/backup/restore`）
+
+- **现象**：`SHEETSAGE_WEBUI_DATA` 能改，但小白不会用；换电脑就是"把整个 `output/` 拷过去"，
+  而 `job.json` 里存的是绝对路径（`_job_from_meta` 有兜底重建，但没人指望用户知道）。
+- **修法**：`webui/backup.py` + 两个接口：
+  - **导出**：`backup.json`（版本/时间/工程清单/参数）+ 产物 + `job.json` + `.webui/input` 原音频
+    + `manifest.json`；**默认不带**可重算的缓存（`bundle.zip` / `peaks-*` / `export/*.svp` / `prev/`），
+    `?include_cache=true` 才带。先写 `.part` 再改名；临时的包随下载结束清掉（`BackgroundTask`）。
+  - **导入**：解到临时目录 → 逐条目校验 → 每个工程走和重启恢复相同的 `_restore`（原音频按布局
+    重找）。重名**绝不覆盖**（`-2`），同一个包导两次会换 id，删一个不连坐另一个。
+  - **安全**：拒绝绝对路径 / `..` / 盘符 / 符号链接条目（zip-slip）、条目数与解压总量有上限
+    （zip 炸弹）、必须有 `backup.json` 且版本认得出，否则 400 + 人话。
+- **验证**：`tests/test_webui_p2.py` 8 项（清单与内容、缓存默认不带、换数据根后产物/原音频/参数
+  都在、导两次不覆盖、非本程序包 400、zip-slip 整包拒绝、版本不认拒绝）。
+- **涉及文件**：`webui/backup.py`（新）、`webui/jobs.py`、`webui/app.py`、`web/src/api.ts`、
+  `web/src/App.vue`、`web/src/types.ts`、`web/src/composables/useStudio.ts`。
+
+## 29. 断点续跑（G21）⏸ 未做，单独排期
+
+**状态**：⏸ 评估过、有依据地推后（不是漏了）
+
+- **为什么**：SheetSage2 的窗口循环在**上游 remote code** 里——`engine.transcribe()` 只是把
+  `progress` 回调透传给 `self._model.transcribe()`（`engine.py:253-256`），我们只收到
+  `window_complete` 这种**通知**，拿不到窗口级中间结果，也就没法"跳过已完成的窗口"。
+- **能做的那半**：歌词阶段的切片循环确实在 `asr.transcribe_sections`（我们的代码）里，
+  落 `.webui/ckpt/<rev>/s<idx>.json` 可行；但它需要一整套"缓存 vs 参数/音源/切片边界"的
+  一致性校验，错了就是**给错结果**（比慢严重得多）。
+- **下一步**：单独一期，先做歌词切片续跑 + 一致性校验，扒谱等上游给窗口级接口。
+- **现状兜底**：重启后阶段标"上次运行被中断，可以重跑"；卡死有看门狗（#13）；
+  重跑不会混旧产物（#12 的 `.webui/prev/`）。
+
+## 30. 验证脚本自己会崩、还会误判（工具链）✅
+
+**状态**：✅ 已修（`scripts/verify_webui.py`）
+
+- **现象 1（崩）**：默认 SVP 下载失败时（人声那组没有音符 → 后端 400），脚本紧接着
+  `json.loads(400 的 body)` 再取 `svp_json["time"]["tempo"]`，直接抛
+  `KeyError: 'time'`，把后面 8/8b/8c/9 全部验证跳过，只留下一条与真实原因无关的报错。
+- **现象 2（误判）**：`max(tempo.position) > 1_000_000` 这条断言本意是"位置单位是 blick
+  不是我们的 tick"，但**恒速曲的 tempo 只有一条、位置正好是 0**，于是稳定 FAIL。
+- **修法**：①解析前先判状态码，解析失败就当空结构，后续断言各自报 FAIL 而不是整脚本崩；
+  ②单位判定改成"所有 tempo 位置 + 音符 onset 都是 705600000/480 = 1_470_000 的整数倍
+  且最大位置 ≥ 1_470_000"（实测：`onset` 36_698_550_000、`tempo.position` 0）。
+- **验证**：`verify_webui.py` 由 `FAILED：1 项` 变成**全部通过**（45s 切片，真跑两个模型）。
+- **涉及文件**：`scripts/verify_webui.py`。
+
 ---
 
 ## 附：第一期（P0）整体验证
@@ -951,5 +1047,21 @@ WebUI 的 `done` 唯一依据是"runner 没抛异常"。模型中途吐半套产
 - `cd web && npm run typecheck && npm test`：typecheck 通过，**34 项通过**。
 - `cd web && npm run build`：通过，前端产物已更新（含预检/存活横幅、磁盘显示、诊断包入口）。
 
-> 剩下的 P2（前端超时/SSE 单调进度、耗时预估、断点续跑、数据迁移引导）见
-> `docs/健壮性保障评估.md` §6，按那里的顺序继续。
+## 附：第三期（P2）整体验证
+
+- `pytest tests -q`：**388 项通过 / 6 跳过**（P1 后新增 `tests/test_webui_p2.py` 14 项：
+  G20 耗时预估 6 项、G22 备份/迁移 8 项）。
+- `cd web && npm test`：**52 项通过**（新增 `progress.test.ts` 13 项 = G18、
+  `api.test.ts` 5 项 = G19）。
+- `cd web && npm run typecheck`：通过。
+- `cd web && npm run build`：通过，前端产物已更新（阶段卡的「⏱ 预计…」、顶栏「备份」「导入备份」）。
+- **真机端到端**：`scripts\verify_webui.py`（45s 切片、真跑 SheetSage2 + Qwen3-ASR）
+  由「FAILED 1 项」变成**全部通过**（顺带修了脚本自己的两处问题，见 §30）。
+- **真机 UI 冒烟**：`cd web; node smoke.mjs http://127.0.0.1:8123`（对着上面那台真服务）
+  → 「组件树在真实数据上渲染正常，控制台无 Vue 报错」，页面文字里能看到
+  `诊断包 · 备份 · 导入备份 · 回收站`。
+- **真机备份/迁移**：对三个真工程（14.8 MB）导出 → 99 个条目、含原音频、**不含**
+  `bundle.zip`/`peaks-*`；再导回同一个数据根 → 201、三个工程各落成 `-2`，原有工程没被覆盖。
+
+> 还剩一件事没做：**G21 断点续跑**（理由与下一步见 §29）。
+> 其余 P2（前端超时 / SSE 单调进度 / 耗时预估 / 数据迁移引导）已全部落地。

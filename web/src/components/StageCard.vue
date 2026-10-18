@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { formatDuration } from '@/format'
 import type { ParamRow } from '@/params'
 import type { ArtifactCheck, PhaseInfo, StageSnapshot } from '@/types'
 
@@ -57,6 +58,19 @@ const idleSeconds = computed(() => {
   return Math.max(0, Date.now() / 1000 - last)
 })
 const stagnant = computed(() => idleSeconds.value >= 60)
+
+/**
+ * 耗时预估（G20）：还没跑的时候显示"预计 2~4 分钟"，跑起来之后显示"预计还需约 3 分钟"。
+ *
+ * 估得比实际快时会归零——那时候不再编一个"还需 0 分钟"，直接说"快好了"。
+ */
+const etaText = computed(() => {
+  const eta = props.stage.eta
+  if (!eta) return ''
+  if (props.stage.state !== 'running') return eta.label
+  const left = eta.seconds - (props.stage.elapsed_seconds || 0)
+  return left > 10 ? `预计还需约 ${formatDuration(left)}` : '预计快好了'
+})
 </script>
 
 <template>
@@ -83,6 +97,11 @@ const stagnant = computed(() => idleSeconds.value >= 60)
           · <b :class="{ 'sg-stagnant': stagnant }">上次进展 {{ idleSeconds.toFixed(0) }}s 前</b>
         </template>
       </span>
+    </div>
+
+    <!-- 耗时预估（G20）：等待才有意义，所以只在"还没跑完"的时候出现 -->
+    <div v-if="etaText" class="sg-eta" :title="`按音频 ${Math.round(stage.eta?.audio_seconds ?? 0)} 秒、${stage.eta?.device === 'cpu' ? 'CPU' : '显卡'}估算`">
+      ⏱ {{ etaText }}
     </div>
 
     <!-- 失败时的"下一步"（人话，来自后端的错误码表；技术原文折叠起来） -->

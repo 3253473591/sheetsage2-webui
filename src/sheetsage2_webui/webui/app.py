@@ -30,15 +30,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator, Mapping
+from typing import Annotated, Any, AsyncIterator, BinaryIO, Mapping
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
@@ -46,6 +49,7 @@ from ..asr import language_choices
 from ..bootstrap import PROJECT_ROOT, find_ffmpeg
 from ..svp import (DEFAULT_PARTS, SVP_PARTS, SVP_VERSION, SvpUnavailable,
                    available_parts, build_svp, cache_key, export_path, load_project)
+from .backup import BackupRejected
 from .jobs import (DEFAULT_PLAN, PHASE_LABELS, PHASES, ImportedProject, Job, JobManager,
                    StageNotReady, StaleRevision, UploadRejected, asr_model_label,
                    default_options, is_internal, param_choices, safe_name, validate_options)
@@ -69,11 +73,36 @@ PHASE_ENGINES = {"transcribe": "SheetSage2", "lyrics": "Qwen3-ASR"}
 POLL_SECONDS = 0.2
 HEARTBEAT_SECONDS = 15.0
 
+#: 导入备份包的大小上限（MB）：备份要装得下几十首歌的产物与原音频。
+MAX_BACKUP_MB = 8192.0
+
 BUILD_HINT = (
     "SheetSage2 Studio 服务已启动，但还没有前端产物。\n\n"
     "在 web/ 目录里执行：\n    npm install\n    npm run build\n\n"
     "然后刷新本页。开发时也可以用 `npm run dev`（Vite 会把 /api 代理到本服务）。\n"
 )
+
+
+def _copy_upload(stream: BinaryIO, target: Path, limit: int) -> int:
+    """把上传流落到 `target`，超过 `limit` 立刻拒绝（备份包可能是几 GB，别读进内存）。"""
+    written = 0
+    with target.open("wb") as handle:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > limit:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"备份包超过 {MAX_BACKUP_MB:g} MB 上限，请分批导入")
+            handle.write(chunk)
+    return written
+
+
+def _cleanup_temp_dir(path: Path) -> None:
+    """下载完把备份的临时目录删掉（包里可能有几百 MB，不能一直留着）。"""
+    shutil.rmtree(path.parent, ignore_errors=True)
 
 
 def _sse(payload: dict[str, Any]) -> bytes:
@@ -144,6 +173,7 @@ def create_app(
     require_token: bool = False,
     loopback_guard: bool = False,
     allowed_hosts: tuple[str, ...] = (),
+    device_hint: str | None = None,
 ) -> FastAPI:
     """构造应用。
 
@@ -151,6 +181,8 @@ def create_app(
     - 测试：`runners={"transcribe": 假函数, "lyrics": 假函数}`，不碰模型
     - `lock_params=True`（「4G 特供」）：参数由服务端锁死，`PATCH /options` 一律 409
     - `stall_timeout` / `hard_timeout`：阶段守护的阈值（测试里传个很小的数就能验）
+    - `device_hint`：这台机器实际跑在 `cuda` 还是 `cpu`。**只影响耗时预估的系数**（G20），
+      不传就按会话/`auto` 猜（有卡按显卡算）。
     """
     if session is None and runners is None:
         session = RunnerSession()
@@ -170,6 +202,14 @@ def create_app(
                              watchdog_interval=watchdog_interval, use_trash=use_trash,
                              probe_upload=probe_upload)
     static_ready = (STATIC_DIR / "index.html").is_file()
+
+    # 耗时预估（G20）的设备口径：显式传入 > 会话自报 > 不知道（按显卡算）。
+    resolved_hint = device_hint
+    if resolved_hint is None and session is not None:
+        resolved_hint = session.describe().get("device")
+    if str(resolved_hint or "").strip().lower() in ("", "auto", "none"):
+        resolved_hint = None
+    manager.set_device_hint(resolved_hint)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -352,6 +392,41 @@ def create_app(
         return Response(content=payload, media_type="application/zip",
                         headers={"Content-Disposition":
                                  f'attachment; filename="diagnose-{job_id}.zip"'})
+
+    # ------------------------------------------------------------------ 备份 / 迁移（G22）
+    @app.get("/api/backup")
+    async def backup(include_audio: bool = True, include_cache: bool = False) -> FileResponse:
+        """把所有工程打成一个 zip（换电脑 / 重装系统前点一下）。
+
+        默认带原音频（不带就没法重跑）与产物、`job.json`；`include_cache=true` 才带
+        `bundle.zip` / 波形 / SVP 缓存——那些都能从产物重算，带着只是让包翻倍。
+        """
+        target, summary = await run_in_threadpool(
+            manager.backup_file, include_audio=include_audio, include_cache=include_cache)
+        return FileResponse(
+            target, filename=target.name, media_type="application/zip",
+            headers={"X-Backup-Projects": str(summary.get("projects") or 0)},
+            background=BackgroundTask(_cleanup_temp_dir, target))
+
+    @app.post("/api/backup/restore", status_code=201)
+    async def restore_backup(
+        file: Annotated[UploadFile, File(...)],
+    ) -> dict[str, Any]:
+        """导入备份包：把里面的工程收进当前数据目录（重名自动 `-2`，绝不覆盖）。"""
+        limit = int(MAX_BACKUP_MB * 1024 * 1024)
+        handle, path = tempfile.mkstemp(prefix="sheetsage2-restore-", suffix=".zip")
+        os.close(handle)
+        try:
+            written = await run_in_threadpool(_copy_upload, file.file, Path(path), limit)
+            if written == 0:
+                raise HTTPException(status_code=400, detail="上传的是空文件")
+            try:
+                return await run_in_threadpool(manager.restore_backup, path)
+            except BackupRejected as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            Path(path).unlink(missing_ok=True)
+
 
     @app.post("/api/jobs/{job_id}/stages/{phase}")
     async def run_stage(job_id: str, phase: str) -> dict[str, Any]:

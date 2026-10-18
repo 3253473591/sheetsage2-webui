@@ -320,6 +320,8 @@ structure.lab（模型原始产物，不动）
 | GET | `/api/trash` | 回收站列表（软删除的工程：`id` / `name` / `deleted_at` / `size` / `files`） |
 | POST | `/api/trash/{entry}/restore` | 从回收站恢复（目录挪回 `output/`，返回恢复后的快照） |
 | DELETE | `/api/trash/{entry}` | 彻底删除回收站里的一项（不可恢复） |
+| GET | `/api/backup` | **备份**：所有工程打成一个 zip（含 `backup.json` 清单 + 产物 + 原音频 + `job.json`）。`?include_audio=false` 不带原音频、`?include_cache=true` 才带可重算缓存 |
+| POST | `/api/backup/restore` | **导入备份**（multipart `file`）：收进当前数据目录，重名自动 `-2`、绝不覆盖；201 + `{restored, skipped, count, backup}`，不是本程序的包 → 400 |
 
 下载类响应（`/download`、`/files/{path}`）带 `X-Artifact-Rev` 头 = 工程的**产物版本戳**：
 重跑过阶段之后它一定变大，据此能判断手里的文件是不是最新那一版。
@@ -350,6 +352,11 @@ Range 越界 416。
                    "step": "整理产物", "elapsed_seconds": 23.07, "error": null,
                    "error_code": null, "error_action": null, "error_detail": null,
                    "last_advance_at": 1792223158.07,
+                   // 耗时预估（G20）：还没跑完时才有；done/failed/cancelled 之后是 null。
+                   // 音频时长都不知道时也是 null（界面就不显示，不猜）
+                   "eta": {"seconds": 169.0, "low": 135.2, "high": 219.7,
+                           "label": "预计 2~4 分钟", "device": "cuda",
+                           "audio_seconds": 240.0},
                    "detail": {"dtype": "bf16", "device": "cuda", "range": "full",
                               "quantize": "三十二分", "notes": {"...": 0},
                               // 产物自检（完成门禁）：不通过就不会是 done
@@ -368,6 +375,19 @@ Range 越界 416。
 
 `last_advance_at` 是"最后一次有进展"的时刻：看门狗拿它判卡死，界面拿它显示
 "上次进展 xx 秒前"（超过 60 秒标黄）。
+
+`eta` 是**耗时预估**（G20）：`seconds` 是中位估计（界面用它算"预计还需约几分钟"），
+`low`/`high` 是区间，`label` 是现成的一句话（`预计 2~4 分钟`），`device` 说明按显卡还是
+CPU 估的。只在"还没跑完"时给——进度条 100% 了再挂一句"预计 3 分钟"只会误导。
+`phase` 事件也会带上同一个 `eta`，所以开跑的瞬间就能看到，不用等下一次快照。
+
+### 前端的三个约定（G18 / G19 / G20）
+
+| 约定 | 位置 | 为什么 |
+|---|---|---|
+| 进度只增不减 + 旧事件过滤 | `web/src/progress.ts` | 重连补发的事件会把进度从 12% 拉回 80%，看起来像任务在倒退 |
+| 每个请求都有超时 | `web/src/api.ts`（`fetchWithTimeout`） | 模型卡死时后端不回话，没有超时页面就**永远 pending** |
+| 进度条旁边写「预计…」 | `StageCard.vue` | 第一次长时间不动时，用户需要参照物判断"该等"还是"卡死了" |
 
 ### SSE
 
