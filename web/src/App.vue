@@ -210,7 +210,7 @@ function toggleTheme(): void {
           <span v-if="env && env.queue.pending">排队 {{ env.queue.pending }}</span>
           <span v-if="diskText" :class="{ 'meta-warn': diskLow }" :title="diskLow ? '磁盘不多了，建议清理缓存' : ''">{{ diskText }}</span>
         </div>
-        <a class="nav-tab" href="/api/diagnose" title="打包诊断信息（工程 + 日志 + 环境），出问题时发我">诊断包</a>
+        <a class="nav-tab" href="/api/diagnose" title="打包诊断信息（工程 + 日志 + 环境）：出问题时把压缩包发给任意 AI 帮你看">诊断包</a>
         <a
           class="nav-tab"
           :href="backupUrl"

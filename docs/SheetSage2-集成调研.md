@@ -82,7 +82,7 @@ peak_gpu_mib / elapsed_seconds / windows`。
 |---|---|
 | ffmpeg | **必需**。默认路径走 `subprocess` 调 `ffmpeg -i ... -f f32le pipe:1` 解码成 24 kHz 单声道；`preset="paper"` 则走 torchaudio 的 ffmpeg 后端。找不到就抛 `RuntimeError` |
 | 采样率 | 内部固定 24 kHz；数组输入必须自带 `sampling_rate` |
-| Python 版本 | 官方 README 写 3.10/3.11；**调研时在 3.13.9 上实测可用**。⚠️ 项目后来整体换成 **3.12.11 的独立环境**（本地 torch 轮子是 `cp312`），见 `README.md` §环境 |
+| Python 版本 | 官方 README 写 3.10/3.11；**调研时在 3.13.9 上实测可用**。⚠️ 项目后来整体换成 **3.12.11 的独立环境**（本地 torch 轮子是 `cp312`），见 `docs/开发指南.md` §1 |
 | transformers | README 锁 4.45.2；本次用 **4.57.6 实测可用**（有 `torch_dtype` 弃用警告，无害） |
 | OpenMP | conda 环境 + torch 会撞 `libiomp5md.dll`，必须在 `import torch` 前设 `KMP_DUPLICATE_LIB_OK=TRUE`（见 `bootstrap.py`） |
 | 联网 | `trust_remote_code=True` 默认会联网校验并下载 remote code。首次必须联网；之后用 `local_files_only=True` 可完全离线 |

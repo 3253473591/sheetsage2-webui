@@ -187,7 +187,7 @@ class Project(BaseModel):
 xsdata / tatsu-lts / portion / ko-pron / jyutping …），这在**项目自己的环境**里是正常代价；
 `svp.py` 仍然**延迟 import**，没装 `[svp]` 时其余功能照常，只有导出回 501 + 安装提示。
 
-环境本身见 `README.md` §环境：**Python 3.12.11**（torch 的本地轮子是 `cp312`）+ torch 2.10.0+cu130。
+环境本身见 `docs/开发指南.md` §1：**Python 3.12.11**（torch 的本地轮子是 `cp312`）+ torch 2.10.0+cu130。
 装完的验证：`pytest tests -q` **234 项全过**、真机端到端 **103 项判据全过**（模型在 GPU 上跑通）。
 
 ### 5.2 时间轴：两个坑都踩过了

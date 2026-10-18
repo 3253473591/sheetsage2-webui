@@ -1883,7 +1883,7 @@ class JobManager:
                 text += f"：{problems[0]}"
             return StageFailure(
                 "E_ARTIFACTS_INCOMPLETE", text,
-                "重跑这一阶段；如果反复出现，把诊断信息发给我",
+                "重跑这一阶段；如果反复出现，点顶栏「诊断包」发给任意 AI 帮你看",
                 "；".join(problems) or f"missing={missing}")
 
         required = ("project.json", "report.json", "summary.json") \
@@ -1894,7 +1894,7 @@ class JobManager:
         if missing:
             return StageFailure(
                 "E_ARTIFACTS_INCOMPLETE", f"产物不完整：缺 {', '.join(missing)}",
-                "重跑这一阶段；如果反复出现，把诊断信息发给我",
+                "重跑这一阶段；如果反复出现，点顶栏「诊断包」发给任意 AI 帮你看",
                 f"{phase} 结束时缺 {missing}")
         for name in required:
             if not name.endswith(".json"):
@@ -1904,7 +1904,7 @@ class JobManager:
             except (OSError, ValueError) as exc:
                 return StageFailure(
                     "E_ARTIFACTS_INCOMPLETE", f"{name} 读不出来（可能只写了一半）",
-                    "重跑这一阶段；如果反复出现，把诊断信息发给我",
+                    "重跑这一阶段；如果反复出现，点顶栏「诊断包」发给任意 AI 帮你看",
                     f"{name}: {type(exc).__name__}: {exc}")
         return None
 
