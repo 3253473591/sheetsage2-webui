@@ -51,3 +51,6 @@ reference/Vocal2Midi V2/
 *.swp
 Thumbs.db
 desktop.ini
+
+pytest-of-*/
+sheetsage-asr-*/
