@@ -121,11 +121,40 @@ def copy_tree(source: Path, target: Path, *, label: str,
     log.append((label, count, total))
 
 
+def half_checkpoint(source: Path, target: Path) -> bool:
+    """把 fp32 的 `model.pt` 转成 fp16 写到 `target`。返回是否命中了缓存。
+
+    转一次要读 151MB、写 76MB（约 30s），而打包经常因为改一行文档就要重来。
+    所以结果缓存在 `models/TIFA-1.0/.fp16-cache/`：**源文件没变就直接复制**，
+    变了（mtime 更新）才重新转。
+    """
+    cache_dir = source.parent / ".fp16-cache"
+    cached = cache_dir / "model.pt"
+    if cached.is_file() and cached.stat().st_mtime >= source.stat().st_mtime:
+        shutil.copy2(cached, target)
+        return True
+
+    import torch
+
+    state = torch.load(source, map_location="cpu", weights_only=False)
+    inner = state.get("state_dict", state) if isinstance(state, dict) else state
+    if isinstance(inner, dict):
+        inner = {key: (value.half() if torch.is_tensor(value) and value.is_floating_point()
+                       else value) for key, value in inner.items()}
+        if isinstance(state, dict) and "state_dict" in state:
+            state["state_dict"] = inner
+        else:
+            state = inner
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(state, cached)
+    shutil.copy2(cached, target)
+    return False
+
+
 def include_tifa(package: Path, log: list[tuple[str, int, int]]) -> None:
     """把 TIFA 权重按 fp16 打进包（模型 CC BY-NC-SA 4.0，和代码的许可分开）。
 
-    fp32 151MB，fp16 76MB（实测边界差 ≤10ms），压进 zip 约 74MB。
-    缺权重时只记一条日志，不拦打包。
+    fp32 151MB，fp16 76MB（实测边界差 ≤10ms）。缺权重时只记一条日志，不拦打包。
     """
     source = TIFA_SOURCE
     checkpoint = source / "model.pt"
@@ -137,21 +166,12 @@ def include_tifa(package: Path, log: list[tuple[str, int, int]]) -> None:
     for item in source.rglob("*"):
         if not item.is_file() or item.name == "model.pt":
             continue
+        if ".fp16-cache" in item.parts:
+            continue
         destination = target / item.relative_to(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(item, destination)
-    import torch
-
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    inner = state.get("state_dict", state) if isinstance(state, dict) else state
-    if isinstance(inner, dict):
-        inner = {key: (value.half() if torch.is_tensor(value) and value.is_floating_point()
-                       else value) for key, value in inner.items()}
-        if isinstance(state, dict) and "state_dict" in state:
-            state["state_dict"] = inner
-        else:
-            state = inner
-    torch.save(state, target / "model.pt")
+    cached = half_checkpoint(checkpoint, target / "model.pt")
     (target / "LICENSE-model.txt").write_text(
         "TIFA-1.0 权重\n"
         "==============\n"
@@ -162,7 +182,8 @@ def include_tifa(package: Path, log: list[tuple[str, int, int]]) -> None:
         encoding="utf-8")
     files = sum(1 for item in target.rglob("*") if item.is_file())
     size = sum(item.stat().st_size for item in target.rglob("*") if item.is_file())
-    log.append(("models/TIFA-1.0（fp16 权重）", files, size))
+    log.append((f"models/TIFA-1.0（fp16 权重{'，缓存' if cached else '，已转换'}）",
+                files, size))
 
 
 def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[str, int, int]]:
