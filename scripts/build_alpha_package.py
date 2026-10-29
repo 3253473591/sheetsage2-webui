@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -38,6 +39,12 @@ DEFAULT_FFMPEG = ROOT / "reference" / "Vocal2Midi" / "ffmpeg.exe"
 
 #: TIFA 对齐权重。代码包里带一份 fp16，省得再从 GitHub Release 下（国内镜像也没有）。
 TIFA_SOURCE = ROOT / "models" / "TIFA-1.0"
+
+#: 7-Zip 可执行文件。有它就多打一份 `.7z`：实测比 zip 小 11 MB（98.9 -> 87.5），
+#: 因为 LZMA2 对便携 Python 那种二进制更狠，而权重两者都压不动。
+SEVEN_ZIP_CANDIDATES = (Path(r"D:\7-Zip\7z.exe"),
+                        Path(r"C:\Program Files\7-Zip\7z.exe"),
+                        Path(r"C:\Program Files (x86)\7-Zip\7z.exe"))
 
 #: 目录整体带走。
 COPY_DIRS = ("src", "scripts", "tools", "web", "docs", "tests")
@@ -208,6 +215,27 @@ def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[st
     return log
 
 
+def find_seven_zip() -> Path | None:
+    for candidate in SEVEN_ZIP_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    found = shutil.which("7z")
+    return Path(found) if found else None
+
+
+def seven_zip_package(package: Path, archive: Path, seven_zip: Path) -> int:
+    """用 7-Zip 的 LZMA2 打一份 .7z（最高压缩）。返回字节数。"""
+    if archive.exists():
+        archive.unlink()
+    result = subprocess.run([str(seven_zip), "a", "-t7z", "-mx=9", "-mmt=on",
+                             str(archive), package.name],
+                            cwd=str(package.parent), capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise SystemExit(f"7-Zip 打包失败：{(result.stderr or result.stdout)[-300:]}")
+    return archive.stat().st_size
+
+
 def zip_package(package: Path, archive: Path) -> tuple[int, int]:
     if archive.exists():
         archive.unlink()
@@ -260,6 +288,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    解压后 {human(total_bytes)}；内测者还要下 torch+模型（见 downloads.json）")
     (args.out / f"{args.name}.sha256").write_text(
         f"{digest}  {archive.name}\n", encoding="utf-8")
+
+    seven_zip = find_seven_zip()
+    if seven_zip is None:
+        print("    （没找到 7-Zip，只出 zip；装上之后重跑会多一份 .7z）")
+        return 0
+    smaller = args.out / f"{args.name}.7z"
+    size7 = seven_zip_package(package, smaller, seven_zip)
+    saved = size - size7
+    print(f"\n  {smaller}")
+    print(f"    {human(size7)}（比 zip 小 {human(saved)}，"
+          f"-{saved / size * 100:.1f}%；sha256 {sha256_of(smaller)[:16]}…）")
+    with (args.out / f"{args.name}.sha256").open("a", encoding="utf-8") as handle:
+        handle.write(f"{sha256_of(smaller)}  {smaller.name}\n")
     return 0
 
 
