@@ -12,7 +12,7 @@
 | `venv` | 用包里 `runtime\\python` 建 `.venv`（自带 pip，不需要 uv） | `.venv\\Scripts\\python.exe` 在 |
 | `torch` | torch + torchaudio 轮子：先看 `wheels/`，没有再按清单下（1.8 GB，可续传） | `.venv` 里 `import torch` 已经能过 |
 | `pip` | `pip install -e ".[web,svp]" transformers==4.57.6 qwen-asr`（走清华镜像） | `sheetsage2_webui` + `fastapi` 都能 import |
-| `models` | 模型：默认**最小集 6.0 GB**；1.7B 识别模型是**可选**的（+4.5 GB） | `models/<仓库名>/config.json` 等关键文件在 |
+| `models` | 模型：默认**最小集 4.3 GB**（对齐器已随包带）；1.7B 识别模型可选（+4.5 GB），日语对齐器要 `--with-ja`（+1.7 GB） | `models/<仓库名>/config.json` 等关键文件在 |
 | `selfcheck` | `import torch` + CUDA 可用性 + ffmpeg 版本 + 模型齐不齐，写 `bootstrap-state.json` | 每次跑 |
 
     runtime\\python\\python.exe tools\\bootstrap.py                 # 全流程
@@ -193,7 +193,14 @@ def step_pip(manifest: dict, *, dry_run: bool) -> None:
         dry_run=dry_run)
 
 
-def chosen_repos(manifest: dict, mode: str, with_17b: bool) -> list[str]:
+def chosen_repos(manifest: dict, mode: str, with_17b: bool,
+                 with_ja: bool = False) -> list[str]:
+    """按档位给出要下的仓库。
+
+    **对齐器不再默认下**：TIFA 随包带，中/粤/英都用它；只有日语还需要
+    Qwen3-ForcedAligner（TIFA 1.0 没有日语的离线 G2P），所以它挪进了可选，
+    用 `--with-ja` 才下。
+    """
     models = manifest["models"]
     repositories = models["repositories"]
     if mode == "skip":
@@ -201,13 +208,17 @@ def chosen_repos(manifest: dict, mode: str, with_17b: bool) -> list[str]:
     if mode == "full":
         return list(models["full"])
     repos = list(models["minimal"])                 # 默认最小集
-    optional = [repo for repo in models["full"] if repo not in models["minimal"]]
-    if with_17b:
-        repos += [repo for repo in optional if repo not in repos]
-    return repos
+    optional = models.get("optional") or {}
+    asr_17b = optional.get("asr_1.7b")
+    ja_aligner = optional.get("ja_aligner")
+    if with_17b and asr_17b:
+        repos.append(asr_17b)
+    if with_ja and ja_aligner:
+        repos.append(ja_aligner)
+    return [repo for repo in dict.fromkeys(repos) if repo in repositories]
 
 
-def step_models(manifest: dict, *, mode: str, with_17b: bool,
+def step_models(manifest: dict, *, mode: str, with_17b: bool, with_ja: bool,
                 dry_run: bool) -> list[dict]:
     title("[5/6] 模型")
     models = manifest["models"]
@@ -216,12 +227,16 @@ def step_models(manifest: dict, *, mode: str, with_17b: bool,
         say("    --models skip：跳过")
         return []
 
-    repos = chosen_repos(manifest, mode, with_17b)
-    optional = [repo for repo in models["full"] if repo not in models["minimal"]]
-    if mode == "minimal" and optional and not with_17b:
-        extra = sum(repositories[repo]["bytes"] for repo in optional)
-        say(f"    （{optional[0]} 是可选项，{human_bytes(extra)}，"
-            f"想装就加 --with-1.7b 或重跑 setup.bat 时选全量）")
+    repos = chosen_repos(manifest, mode, with_17b, with_ja)
+    optional = models.get("optional") or {}
+    if mode == "minimal":
+        if "asr_1.7b" in optional and not with_17b:
+            size = repositories[optional["asr_1.7b"]]["bytes"]
+            say(f"    （1.7B 识别模型是可选项，{human_bytes(size)}，加 --with-1.7b）")
+        if "ja_aligner" in optional and not with_ja:
+            size = repositories[optional["ja_aligner"]]["bytes"]
+            say(f"    （中文/粤语/英语用随包的 TIFA 对齐器，不用额外下；"
+                f"要唱日语再加 --with-ja，{human_bytes(size)}）")
 
     plan = sum(repositories[repo]["bytes"] for repo in repos)
     say(f"    档位 {mode}：{len(repos)} 个仓库，合计 {human_bytes(plan)}"
@@ -316,6 +331,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="模型档位：minimal 最小集（默认）/ full 全量 / skip 跳过")
     parser.add_argument("--with-1.7b", dest="with_17b", action="store_true",
                         help="在最小集之外**额外**下 1.7B 识别模型（+4.5 GB，专有名词更准）")
+    parser.add_argument("--with-ja", dest="with_ja", action="store_true",
+                        help="额外下 Qwen 对齐器（+1.7 GB）：只在唱**日语**歌时需要，"
+                             "中/粤/英用随包的 TIFA")
     parser.add_argument("--check", action="store_true", help="只体检，什么都不下")
     parser.add_argument("--dry-run", action="store_true", help="只打印要做的事")
     args = parser.parse_args(argv)
@@ -338,9 +356,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             say()
             say("  模型档位（1.7B 识别模型是**可选项**）：")
-            say("    1  最小集：SheetSage2 + MERT + 0.6B 识别 + 对齐器  约 6.0 GB  —— 默认")
+            say("    1  最小集：SheetSage2 + MERT + 0.6B 识别  约 4.3 GB  —— 默认")
+            say("       （中文/粤语/英语的逐字对齐用包里自带的 TIFA，不用再下对齐器）")
             say("    2  全量：再加 1.7B 识别模型（专有名词更准）        +4.5 GB")
             say("    3  先不下模型（只想看界面）")
+            say("  要唱**日语**歌的话，另外加 --with-ja 下 Qwen 对齐器（+1.7 GB）")
             answer = input("  选一个 1/2/3（回车 = 1）: ").strip() or "1"
             mode = {"1": "minimal", "2": "full", "3": "skip"}.get(answer, "minimal")
 
@@ -362,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         step_pip(manifest, dry_run=args.dry_run)
     if "models" in steps:
         model_results = step_models(manifest, mode=mode, with_17b=args.with_17b,
-                                    dry_run=args.dry_run)
+                                    with_ja=args.with_ja, dry_run=args.dry_run)
     if "selfcheck" in steps:
         report["selfcheck"] = step_selfcheck(manifest, model_results, dry_run=args.dry_run)
 

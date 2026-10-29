@@ -35,7 +35,9 @@ if exist "%PY%" goto launch
 echo.
 echo   First run - preparing the environment.
 echo   Downloads torch about 1.8 GB, plus the models, minimal set
-echo   about 6.0 GB. The 1.7B ASR model is optional.
+echo   about 4.3 GB (the TIFA aligner is bundled, no extra download).
+echo   The 1.7B ASR model is optional; so is the Qwen aligner, only
+echo   needed for Japanese songs (setup.bat --with-ja).
 echo   It is resumable: if it stops, run webui.bat again.
 echo.
 

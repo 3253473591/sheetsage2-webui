@@ -24,7 +24,7 @@
 2. 双击 **`webui.bat`**（首次会自动建环境、下依赖与模型，可断点续传）；
 3. 浏览器会自动打开 <http://127.0.0.1:8000>，把音频拖进去就行。
 
-首次运行要联网下 **torch 约 1.8 GB + 模型最小集约 6.0 GB**（1.7B 歌词模型可选，+4.5 GB，随时 `setup.bat --with-1.7b` 补）。只下过一次，之后离线可用；下载/安装没跑完就再双击一次，已完成的部分会跳过。详见 [`README-internal-test.md`](README-internal-test.md)。
+首次运行要联网下 **torch 约 1.8 GB + 模型最小集约 4.3 GB**（1.7B 歌词模型可选，+4.5 GB，随时 `setup.bat --with-1.7b` 补；日语歌才需要的 Qwen 对齐器 `--with-ja`）。逐字对齐用的 TIFA 只有 40M，已经随包带，中/粤/英不用另外下对齐器。只下过一次，之后离线可用；下载/安装没跑完就再双击一次，已完成的部分会跳过。详见 [`README-internal-test.md`](README-internal-test.md)。
 
 ### 方式二：从源码（已经会 Python 的人）
 

@@ -11,12 +11,15 @@ rem  What it does (idempotent - safe to run again):
 rem    - create .venv from the bundled runtime\python
 rem    - install torch / torchaudio from the manifest (resumable)
 rem    - pip install the project + deps (Tsinghua mirror)
-rem    - download the models (minimal by default, 1.7B optional)
+rem    - download the models (minimal by default; 1.7B and the
+rem      Japanese aligner are optional)
 rem
 rem  Usage:
 rem    setup.bat                 interactive (asks about 1.7B)
 rem    setup.bat --check         report only, download nothing
 rem    setup.bat --with-1.7b     also fetch the 1.7B ASR model
+rem    setup.bat --with-ja       also fetch the Qwen aligner (Japanese only;
+rem                              zh/yue/en use the bundled TIFA aligner)
 rem    setup.bat --models full   everything (~10.4 GB)
 rem ============================================================
 chcp 65001 >nul 2>nul

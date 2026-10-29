@@ -28,6 +28,8 @@ SHEETSAGE_MODEL_DIR = PROJECT_ROOT / "models" / "SheetSage2"
 ASR_MODEL_DIR = PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B"
 #: 逐字对齐器权重（可选，缺了只影响歌词对齐）。
 ALIGNER_MODEL_DIR = PROJECT_ROOT / "models" / "Qwen3-ForcedAligner-0.6B"
+#: 随包带的 TIFA 对齐器（中/粤/英）；在它就在，不必再下 Qwen 对齐器。
+TIFA_MODEL_DIR = PROJECT_ROOT / "models" / "TIFA-1.0"
 
 #: 磁盘低于这个字节数就变黄。
 DISK_WARN_BYTES = 2 * 1024 ** 3
@@ -106,12 +108,15 @@ def preflight(data_root: str | Path | None = None) -> list[dict[str, Any]]:
         })
 
     # 4. 歌词权重（可选：缺了只影响歌词识别）。
-    if _has_model(ASR_MODEL_DIR) and _has_model(ALIGNER_MODEL_DIR):
+    #    对齐器有两种：随包的 TIFA（中/粤/英）和 Qwen3-ForcedAligner（日语才要）。
+    #    所以只要 ASR + 其中任意一个在，就算就绪。
+    if _has_model(ASR_MODEL_DIR) and (_has_model(TIFA_MODEL_DIR)
+                                      or _has_model(ALIGNER_MODEL_DIR)):
         checks.append({"key": "lyrics_model", "level": "ok", "title": "歌词识别权重就绪"})
     else:
         checks.append({
             "key": "lyrics_model", "level": "warn",
-            "title": "歌词识别权重不完整（缺 Qwen3-ASR 或对齐器）",
+            "title": "歌词识别权重不完整（缺 Qwen3-ASR，或两种对齐器都不在）",
             "detail": "歌词识别会不可用；只想扒谱可以忽略",
         })
 

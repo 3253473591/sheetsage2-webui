@@ -1,5 +1,5 @@
 {
-  "version": "alpha3",
+  "version": "alpha4",
   "note": "内测包清单：随包带 Python + ffmpeg，torch 与模型首次运行时按这里下载。",
   "bundled": {
     "python": {
@@ -33,12 +33,16 @@
     }
   ],
   "models": {
+    "note": "对齐器不再默认下载：TIFA 随包带（models/TIFA-1.0），中/粤/英都用它；只有唱日语时才需要 Qwen3-ForcedAligner（TIFA 1.0 没有日语的离线 G2P），用 --with-ja 下。",
     "minimal": [
       "m-a-p/SheetSage2",
       "m-a-p/MERT-v2-FullSong",
-      "Qwen/Qwen3-ASR-0.6B",
-      "Qwen/Qwen3-ForcedAligner-0.6B"
+      "Qwen/Qwen3-ASR-0.6B"
     ],
+    "optional": {
+      "asr_1.7b": "Qwen/Qwen3-ASR-1.7B",
+      "ja_aligner": "Qwen/Qwen3-ForcedAligner-0.6B"
+    },
     "full": [
       "m-a-p/SheetSage2",
       "m-a-p/MERT-v2-FullSong",
@@ -46,7 +50,7 @@
       "Qwen/Qwen3-ASR-0.6B",
       "Qwen/Qwen3-ForcedAligner-0.6B"
     ],
-    "minimal_bytes": 6484437060,
+    "minimal_bytes": 4644363888,
     "full_bytes": 11187552165,
     "repositories": {
       "m-a-p/SheetSage2": {
@@ -82,7 +86,8 @@
         "revision": "master",
         "files": 11,
         "bytes": 1840073172,
-        "minimal": true
+        "minimal": false,
+        "note": "只有日语歌需要；中/粤/英由随包的 TIFA 负责"
       }
     },
     "api": "https://www.modelscope.cn/api/v1/models/{repo}/repo/files?Revision={revision}&Recursive=true"

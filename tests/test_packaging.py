@@ -127,7 +127,7 @@ def test_the_bundled_ffmpeg_is_where_the_packager_puts_it():
 # --------------------------------------------------------------------- 清单
 def test_downloads_manifest_is_complete():
     manifest = json.loads((PROJECT_ROOT / "downloads.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "alpha3"
+    assert manifest["version"] == "alpha4"
 
     # 随包的两样必须在
     assert manifest["bundled"]["python"]["path"] == "runtime/python"
@@ -140,11 +140,15 @@ def test_downloads_manifest_is_complete():
         assert item["name"].endswith(".whl")
         assert len(item["sha256"]) == 64 and item["sha256"].isalnum()
 
-    # 模型：**1.7B 必须只是可选**（不在最小集里），而且每个仓库都有目标目录与体积
+    # 模型：**1.7B 与 Qwen 对齐器都必须只是可选**（不在最小集里）
     models = manifest["models"]
     assert "Qwen/Qwen3-ASR-0.6B" in models["minimal"]
     assert "Qwen/Qwen3-ASR-1.7B" not in models["minimal"]
     assert "Qwen/Qwen3-ASR-1.7B" in models["full"]
+    # 对齐器随包带的是 TIFA；Qwen 对齐器只有日语才要，走 --with-ja
+    assert "Qwen/Qwen3-ForcedAligner-0.6B" not in models["minimal"]
+    assert models["optional"]["ja_aligner"] == "Qwen/Qwen3-ForcedAligner-0.6B"
+    assert models["optional"]["asr_1.7b"] == "Qwen/Qwen3-ASR-1.7B"
     assert set(models["minimal"]) < set(models["full"])           # 最小集是全量的真子集
     for repo, info in models["repositories"].items():
         assert info["target"].startswith("models/")
