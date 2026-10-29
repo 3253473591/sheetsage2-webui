@@ -43,6 +43,21 @@ _INTERVAL = re.compile(
 
 _LOCK = threading.Lock()
 
+#: 推理真正需要的第三方包（用于「依赖缺失就退回 Qwen」，别让整条链路炸掉）。
+_REQUIRED_IMPORTS = ("lightning", "omegaconf", "g2pflow", "einops", "h5py",
+                     "colorednoise", "matplotlib")
+
+
+def ensure_available() -> None:
+    """快速检查 TIFA 的依赖在不在；缺了抛 ImportError（调用方负责退回 Qwen）。"""
+    vendor = str(_VENDOR)
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
+    import importlib
+
+    for name in _REQUIRED_IMPORTS:
+        importlib.import_module(name)
+
 
 def default_model_path() -> Path:
     """`models/TIFA-1.0/model.pt`（和 bootstrap 的约定一致）。"""

@@ -18,6 +18,18 @@ dependencies = [
     "pretty_midi",
     "mido",
     "soundfile",
+    # --- TIFA 对齐后端（默认）的运行时依赖 -------------------------------------
+    # 模型只有 40M，重的是上游宿主那一套（lightning/omegaconf/…）；
+    # `g2pflow[lstm]` 再多带一个 onnxruntime，英文 G2P 用它的 LSTM 资产。
+    # 这些在清华源上都有（setup.bat 走的就是它），所以不占代码包体积。
+    "g2pflow[lstm]>=0.3,<0.4",
+    "lightning>=2.0",
+    "omegaconf",
+    "einops>=0.7",
+    "h5py",
+    "colorednoise",
+    "matplotlib",
+    "textgrid",
 ]
 
 [project.optional-dependencies]

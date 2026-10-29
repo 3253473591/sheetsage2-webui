@@ -478,14 +478,19 @@ class AsrEngine:
         return target
 
     def _tifa_ready(self) -> tuple[bool, str]:
-        """TIFA 权重在不在。缺了就退回 Qwen，别让整个歌词阶段失败。"""
-        from .tifa_align import default_model_path
+        """TIFA 权重与依赖都在不在。缺了就退回 Qwen，别让整个歌词阶段失败。"""
+        from .tifa_align import default_model_path, ensure_available
 
         path = Path(self.config.tifa_model) if self.config.tifa_model else default_model_path()
-        if path.is_file():
-            return True, ""
-        return False, (f"没找到 TIFA 权重（{path}），这次退回 Qwen 对齐器；"
-                       f"要稳定得多，建议把 models/TIFA-1.0 放进来")
+        if not path.is_file():
+            return False, (f"没找到 TIFA 权重（{path}），这次退回 Qwen 对齐器；"
+                           f"要稳定得多，建议把 models/TIFA-1.0 放进来")
+        try:
+            ensure_available()
+        except ImportError as exc:
+            return False, (f"TIFA 的依赖没装全（{exc}），这次退回 Qwen 对齐器；"
+                           f"装一下 `g2pflow[lstm]` 和 lightning 就能用")
+        return True, ""
 
     def _align_with_tifa(self, pending: Sequence[tuple[Path, str, float]],
                          run: AsrRun, requested: str | None) -> list[AlignedChar]:
@@ -525,7 +530,9 @@ class AsrEngine:
         """
         units = text.split() if language == "en" else list(text)
         if language == "en":
-            # 识别结果里带标点（"sea,"），歌词里不该留
+            # 识别结果里带标点（"sea,"）和孤立符号（"-" / "+"）的都要清掉：
+            # 前者不该进歌词，后者会被误当成一个「词」占掉一个音。
+            units = [unit for unit in units if unit not in ("-", "+", "—", "–")]
             units = [unit.strip('.,;:!?"\'()[]{}') for unit in units]
         return units if len(units) == len(spans) else []
 
