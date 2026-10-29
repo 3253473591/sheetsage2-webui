@@ -265,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="随包的 ffmpeg.exe（默认参考项目里那份裁剪版）")
     parser.add_argument("--out", type=Path, default=DIST, help="输出目录")
     parser.add_argument("--no-zip", action="store_true", help="只拼目录，不压缩")
+    parser.add_argument("--with-zip", action="store_true",
+                        help="除了 .7z 再多出一份 .zip（默认只出 .7z）")
     args = parser.parse_args(argv)
 
     package = args.out / args.name
@@ -280,27 +282,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_zip:
         return 0
-    archive = args.out / f"{args.name}.zip"
-    files, size = zip_package(package, archive)
-    digest = sha256_of(archive)
-    print(f"\n  {archive}")
-    print(f"    {files} 个文件，{human(size)}（sha256 {digest[:16]}…）")
-    print(f"    解压后 {human(total_bytes)}；内测者还要下 torch+模型（见 downloads.json）")
-    (args.out / f"{args.name}.sha256").write_text(
-        f"{digest}  {archive.name}\n", encoding="utf-8")
 
+    lines: list[str] = []
     seven_zip = find_seven_zip()
-    if seven_zip is None:
-        print("    （没找到 7-Zip，只出 zip；装上之后重跑会多一份 .7z）")
-        return 0
-    smaller = args.out / f"{args.name}.7z"
-    size7 = seven_zip_package(package, smaller, seven_zip)
-    saved = size - size7
-    print(f"\n  {smaller}")
-    print(f"    {human(size7)}（比 zip 小 {human(saved)}，"
-          f"-{saved / size * 100:.1f}%；sha256 {sha256_of(smaller)[:16]}…）")
-    with (args.out / f"{args.name}.sha256").open("a", encoding="utf-8") as handle:
-        handle.write(f"{sha256_of(smaller)}  {smaller.name}\n")
+    zip_size: int | None = None
+    if args.with_zip or seven_zip is None:
+        if seven_zip is None:
+            print("    （没找到 7-Zip，只能出 zip）")
+        archive = args.out / f"{args.name}.zip"
+        files, zip_size = zip_package(package, archive)
+        digest = sha256_of(archive)
+        lines.append(f"{digest}  {archive.name}\n")
+        print(f"\n  {archive}")
+        print(f"    {files} 个文件，{human(zip_size)}（sha256 {digest[:16]}…）")
+
+    if seven_zip is not None:
+        target = args.out / f"{args.name}.7z"
+        size7 = seven_zip_package(package, target, seven_zip)
+        digest7 = sha256_of(target)
+        lines.append(f"{digest7}  {target.name}\n")
+        extra = (f"（比 zip 小 {human(zip_size - size7)}，"
+                 f"-{(zip_size - size7) / zip_size * 100:.1f}%）" if zip_size else "")
+        print(f"\n  {target}")
+        print(f"    {human(size7)}{extra}（sha256 {digest7[:16]}…）")
+
+    print(f"    解压后 {human(total_bytes)}；内测者还要下 torch+模型（见 downloads.json）")
+    (args.out / f"{args.name}.sha256").write_text("".join(lines), encoding="utf-8")
     return 0
 
 
