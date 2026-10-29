@@ -18,6 +18,14 @@ Qwen3-ForcedAligner 的时间戳有 **13~17% 是零宽度**（`start == end`）�
 | 《爱情转移》中文 | Qwen3-FA 0.6B | 539 | 70（13%） | **89.4%**（hidden 55） |
 | 《爱情转移》中文 | **TIFA** | 539 | **0** | **99.8%**（hidden 0，\|Δ\|>1s 0） |
 | 《富士山下》粤语（喂 LRC 原文） | TIFA | 538 | **0** | 行首 vs LRC：中位 **-0.15s**、p90 +0.16s，68 行里只有 1 行差 >1s |
+| 《富士山下》粤语（端到端，ASR 出字） | **TIFA** | 540 | **0** | **99.6%**（hidden 2） |
+| The Wellerman 英语（端到端） | **TIFA** | 359 词 | **0** | **99.2%**（hidden 3，续音 31 个 `+`） |
+
+英文那一行顺带验证了两件事：**续音 `+` 是我们自己的 `continuation_marker()` 产出的**，与后端无关
+（31 个 `+`、0 个 `-`）；TIFA 的 G2P 虽然会 lowercase + 去标点，但歌词用的是我们的 ASR 文本
+（`AsrEngine._labels_for`），所以 `There` 的大小写和 `sea` 的干净写法都保住了。
+粤语那两行的差别说明**文本和边界是两件事**：对齐 99.6%，但 ASR 把「拦」听成「難」、
+漏了句尾的「吗」——这是识别的问题，换对齐器治不了。
 
 耗时：一首 4 分钟的歌，TIFA 约 20s（含加载），Qwen FA 约 +19s 加载 / +1.4s 推理。
 **总墙钟时间基本打平**（ASR 才是大头），收益在显存（峰值少约 1.3GB）和质量。
@@ -28,7 +36,7 @@ Qwen3-ForcedAligner 的时间戳有 **13~17% 是零宽度**（`start == end`）�
 |---|---|---|
 | 中文 | `dictionaries/ds-zh-pinyin-lite.txt`（6.5KB） | ✅ 跑通 |
 | 粤语 | `dictionaries/jyutping_dict.txt`（6.9KB） | ✅ 跑通（见下方 OOV） |
-| 英语 | `dictionaries/ds_cmudict-07b.txt`（3.4MB）+ `assets/LstmG2p-Eng/`（4.1MB） | 未单独实测 |
+| 英语 | `dictionaries/ds_cmudict-07b.txt`（3.4MB）+ `assets/LstmG2p-Eng/`（4.1MB）+ **onnxruntime**（`g2pflow[lstm]`） | ✅ 跑通（359 词 / hit 99.2%） |
 | 日语 | `g2pflow[ja]` → MeCab + unidic 词典 | ❌ **暂不支持**，见 §5 |
 
 ## 4. 三个踩过的坑

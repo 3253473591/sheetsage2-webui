@@ -112,7 +112,11 @@ def group_lyric_lines(chars: Sequence[Any], *,
         joinable = bool(lines) and (start - float(lines[-1]["end"])) <= gap \
             and len(lines[-1]["text"]) < max_chars
         if joinable:
-            lines[-1]["text"] += text
+            # 英文按词来，拼行时要补空格；中文一个字一个 token，直接连
+            previous = lines[-1]["text"]
+            spacer = (" " if previous and previous[-1].isascii() and previous[-1].isalnum()
+                      and text[0].isascii() and text[0].isalnum() else "")
+            lines[-1]["text"] = previous + spacer + text
             lines[-1]["end"] = max(float(lines[-1]["end"]), end)
         else:
             lines.append({"text": text, "start": start, "end": end})

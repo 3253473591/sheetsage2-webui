@@ -497,8 +497,8 @@ class AsrEngine:
         joined = "".join(text for _clip, text, _offset in pending)
         language = tifa_language(requested or "zh")
         script = guess_language(joined)
-        if script == "ja" and language == "zh":
-            language = "ja"
+        if script != "zh" and language == "zh":
+            language = script
         if self._tifa is None:
             self._tifa = TifaAligner(self.config.tifa_model, language=language,
                                      precision=self.config.tifa_precision)
@@ -524,6 +524,9 @@ class AsrEngine:
         （罕见：它可能把缩写拆开）时就退回它给的字面。
         """
         units = text.split() if language == "en" else list(text)
+        if language == "en":
+            # 识别结果里带标点（"sea,"），歌词里不该留
+            units = [unit.strip('.,;:!?"\'()[]{}') for unit in units]
         return units if len(units) == len(spans) else []
 
     def transcribe_sections(

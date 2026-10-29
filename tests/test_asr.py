@@ -239,7 +239,7 @@ def test_slice_limit_shrinks_for_tifa():
 
 
 def test_tifa_language_mapping_falls_back_to_chinese():
-    from sheetsage2_webui.tifa_align import MAX_ALIGN_SECONDS, tifa_language
+    from sheetsage2_webui.tifa_align import MAX_ALIGN_SECONDS, guess_language, tifa_language
 
     assert MAX_ALIGN_SECONDS == 50.0
     assert tifa_language("Chinese") == "zh"
@@ -248,6 +248,10 @@ def test_tifa_language_mapping_falls_back_to_chinese():
     assert tifa_language("English") == "en"
     assert tifa_language("Korean") == "zh"      # TIFA 1.0 没有韩语
     assert tifa_language(None) == "zh"
+    # 文字兜底：假名 -> ja，拉丁为主 -> en，其余 -> zh
+    assert guess_language("君が僕の心臓じゃない") == "ja"
+    assert guess_language("The Wellerman came across the sea") == "en"
+    assert guess_language("阳光在身上流转") == "zh"
 
 
 def test_parse_text_grid_skips_silence_and_zero_width():

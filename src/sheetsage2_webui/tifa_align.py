@@ -68,10 +68,15 @@ def guess_language(text: str) -> str:
 
     实测 Qwen3-ASR 对一首日文歌（假名+汉字全对）报的是 `Chinese`——照它走，
     TIFA 会拿中文 G2P 去处理假名，整段 OOV 被丢掉（一个字都出不来）。
-    假名能靠字符集认出来；粤语不行（和普通话一样是汉字，只能靠用户选）。
+    假名 / 拉丁字母能靠字符集认出来；粤语不行（和普通话一样是汉字，只能靠用户选）。
     """
-    if any("\u3040" <= char <= "\u30ff" for char in text or ""):
+    text = text or ""
+    if any("\u3040" <= char <= "\u30ff" for char in text):
         return "ja"
+    latin = sum(1 for char in text if char.isascii() and char.isalpha())
+    hanzi = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    if latin > hanzi:
+        return "en"
     return "zh"
 
 
