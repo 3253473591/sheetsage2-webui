@@ -97,20 +97,58 @@ def guess_language(text: str) -> str:
 
 def parse_text_grid(path: Path) -> list[tuple[str, float, float]]:
     """从 TextGrid 的 `texts` 层取 (文本, 起, 止)，跳过 `SP` 和零宽度。"""
-    text = path.read_text(encoding="utf-8")
-    block = re.search(r'name = "texts"(.*?)(?=\n\titem|\Z)', text, re.S)
-    if block is None:
-        return []
-    spans: list[tuple[str, float, float]] = []
-    for start, end, label in _INTERVAL.findall(block.group(1)):
-        label = label.strip()
-        if not label or label == "SP":
-            continue
-        begin, finish = float(start), float(end)
-        if finish - begin <= 1e-6:
-            continue
-        spans.append((label, begin, finish))
+    spans, _phones = parse_grid_tiers(path)
     return spans
+
+
+def parse_grid_tiers(path: Path) -> tuple[list[tuple[str, float, float]],
+                                          list[tuple[float, float, str]]]:
+    """同时读 `texts`（词）和 `phones`（音素）。音素用来切音节。"""
+    text = path.read_text(encoding="utf-8")
+
+    def tier(name: str) -> list[tuple[float, float, str]]:
+        block = re.search(rf'name = "{name}"(.*?)(?=\n\titem|\Z)', text, re.S)
+        if block is None:
+            return []
+        rows = _INTERVAL.findall(block.group(1))
+        return [(float(a), float(b), c.strip()) for a, b, c in rows if c.strip()]
+
+    words = [(label, start, end) for start, end, label in tier("texts")
+             if label != "SP" and end - start > 1e-6]
+    phones = [(start, end, label) for start, end, label in tier("phones")
+              if label != "SP" and end - start > 1e-6]
+    return words, phones
+
+
+#: ARPAbet 里能当音节核的音素（TIFA 的英文音素就是这一套）。
+#: `ax` 是弱读的 schwa——「captain」的第二个音节就是 `t ax n`，漏了它就会把
+#: 双音节词当成单音节。
+_VOWELS = frozenset({"aa", "ae", "ah", "ao", "aw", "ay", "ax", "eh", "er", "ey",
+                     "ih", "iy", "ow", "oy", "uh", "uw", "ix", "ux", "el", "em", "en"})
+
+
+def syllable_onsets(phones: Sequence[tuple[float, float, str]],
+                    start: float, end: float) -> tuple[float, ...]:
+    """一个英文词内部「第二、三…个音节」的起点时刻。
+
+    用的是最大开头原则的简化版：两个元音之间
+      - 没有辅音 → 分界就在后一个元音；
+      - 一个辅音 → 那个辅音归后一个音节；
+      - 两个以上 → 只有最后一个辅音归后一个音节（captain 的 p|t、metal 的 e|t）。
+    够用来决定「这个音是接着上一个音节唱，还是进下一个音节」。
+    """
+    inside = [(a, b, label) for a, b, label in phones
+              if start - 1e-6 <= a < end - 1e-6]
+    vowel_index = [i for i, (_a, _b, label) in enumerate(inside)
+                   if label.lower().rstrip("012") in _VOWELS]
+    onsets: list[float] = []
+    for previous, current in zip(vowel_index, vowel_index[1:]):
+        consonants = inside[previous + 1:current]
+        if not consonants:
+            onsets.append(inside[current][0])
+        else:
+            onsets.append(consonants[-1][0])
+    return tuple(onsets)
 
 
 class TifaAligner:
@@ -166,8 +204,12 @@ class TifaAligner:
 
     # ------------------------------------------------------------------ 对齐
     def align_many(self, items: Sequence[tuple[Path, str]]
-                   ) -> list[list[tuple[str, float, float]]]:
-        """给多段 (音频, 文本) 一次对齐完，返回每段的 (文本, 起, 止)。"""
+                   ) -> list[list[tuple[str, float, float, tuple[float, ...]]]]:
+        """给多段 (音频, 文本) 一次对齐完。
+
+        每段返回 `(文本, 起, 止, 音节起点)`；第四项只有英文有意义（用来区分
+        「接着上一个音节唱」和「进下一个音节」），中日文是空元组。
+        """
         if not items:
             return []
         self.load()
@@ -175,7 +217,7 @@ class TifaAligner:
         from inference.callbacks import SaveTextGridCallback
         from inference.data import AudioTextDataset
 
-        results: list[list[tuple[str, float, float]]] = [[] for _ in items]
+        results: list[list[tuple[str, float, float, tuple[float, ...]]]] = [[] for _ in items]
         # 文本要写成同名 .txt 放在音频旁边，AudioTextDataset 靠同名查找
         filemap: dict[str, Path] = {}
         owners: dict[str, int] = {}
@@ -207,5 +249,9 @@ class TifaAligner:
             for key, owner_index in owners.items():
                 grid = Path(grid_dir) / f"{key}.TextGrid"
                 if grid.is_file():
-                    results[owner_index] = parse_text_grid(grid)
+                    words, phones = parse_grid_tiers(grid)
+                    results[owner_index] = [
+                        (label, start, end,
+                         syllable_onsets(phones, start, end) if self.language == "en" else ())
+                        for label, start, end in words]
         return results

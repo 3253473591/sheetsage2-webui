@@ -99,9 +99,14 @@ def test_a_filler_can_be_continued_after_a_rest():
     assert export(notes) == ["你", "啦", "-"]
 
 
-def test_the_english_plus_marker_is_normalised():
-    notes = [note(0, 480, 60, "la"), note(480, 480, 62, "+")]
-    assert export(notes, language="English") == ["la", "-"]
+def test_continuation_markers_are_kept_as_is():
+    """`-` 与 `+` 含义不同（延长当前音节 / 进下一个音节），SVP 里两个都保留。
+
+    依据：人工修的《Fall Out Boy - The Phoenix》里 `lighting - +`、`running + -`
+    是混着写的，SynthV 认这两种标记。
+    """
+    notes = [note(0, 480, 60, "la"), note(480, 480, 62, "+"), note(960, 480, 64, "-")]
+    assert export(notes, language="English") == ["la", "+", "-"]
 
 
 def test_the_stats_count_both_kinds():

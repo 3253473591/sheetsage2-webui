@@ -409,9 +409,10 @@ def _note_objects(notes: Iterable[Mapping[str, Any]], *, language: str,
     continued = filled = 0
     for start, end, raw in rows:
         lyric = str(raw.get("lyric") or "").strip()
-        # 转音/延续标记：SVP 里延续就是 "-"，英文的 "+" 也统一成 "-"
-        if lyric == "+":
-            lyric = "-"
+        # 延续标记：`-` 是延长当前音节，`+` 是同一个词的**下一个音节**开始。
+        # SynthV 两个都认——人工修的《The Phoenix》里就是 `lighting - +` / `running + -`
+        # 混着写的。所以这里原样保留，不再把 `+` 压成 `-`。
+        # （旧工程里英文的 `+` 一律表示"延长"，重跑一次歌词即可对齐新含义。）
         if head_alive and (prev_end is None or start - prev_end > CONTINUATION_MAX_GAP):
             head_alive = False          # 链条断了：休止之后是新的开始
         if not lyric:

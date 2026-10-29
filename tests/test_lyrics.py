@@ -35,12 +35,14 @@ def playback(*measures):
 
 
 class Char:
-    """替身：只要有 .text / .start / .end 就行。"""
+    """替身：只要有 .text / .start / .end（可选 .parts）就行。"""
 
-    def __init__(self, text: str, start: float, end: float) -> None:
+    def __init__(self, text: str, start: float, end: float,
+                 parts: tuple[float, ...] = ()) -> None:
         self.text = text
         self.start = start
         self.end = end
+        self.parts = parts
 
 
 def spans(*pairs) -> list[tuple[float, float]]:
@@ -66,11 +68,26 @@ def test_char_spanning_several_notes_becomes_melisma():
     assert fill.assigned == 1 and fill.melisma == 2
 
 
-def test_english_word_uses_plus_for_later_syllables():
+def test_english_word_without_syllable_info_sustains():
+    """没有音节信息时（旧数据 / Qwen 路径）延续就是延长，不能瞎标成下一个音节。"""
     notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9))
     chars = [Char("hello", 0.0, 0.9)]
     fill = assign_lyrics(notes, chars)
-    assert fill.lyrics == ["hello", CONTINUATION, CONTINUATION]
+    assert fill.lyrics == ["hello", MELISMA, MELISMA]
+
+
+def test_english_word_marks_each_new_syllable_with_plus():
+    """有音节起点时：延长当前音节写 `-`，进下一个音节写 `+`。
+
+    对应人工修的《The Phoenix》里的 `lighting - +` / `running + -`。
+    """
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9))
+    fill = assign_lyrics(notes, [Char("lighting", 0.0, 0.9, parts=(0.3, 0.6))])
+    assert fill.lyrics == ["lighting", CONTINUATION, CONTINUATION]
+
+    # 第一个音节跨两个音、然后才换音节：`-` 再 `+`
+    fill = assign_lyrics(notes, [Char("running", 0.0, 0.9, parts=(0.6,))])
+    assert fill.lyrics == ["running", MELISMA, CONTINUATION]
 
 
 def test_a_following_char_is_not_eaten_by_the_previous_melisma():

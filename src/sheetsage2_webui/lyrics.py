@@ -288,6 +288,9 @@ def assign_lyrics(
     taken: set[int] = set()
     #: 音符下标 -> (字, 字的 start, 字的 end)。第二遍补转音时要用。
     heads: dict[int, tuple[str, float, float]] = {}
+    #: 音符下标 -> 这个英文词内部「第 2、3…个音节」的起点（`AlignedChar.parts`）。
+    #: 有它才能区分延续标记 `-`（延长当前音节）和 `+`（进下一个音节）。
+    parts_of: dict[int, tuple[float, ...]] = {}
 
     def available(note: int) -> bool:
         if note in taken:
@@ -349,6 +352,9 @@ def assign_lyrics(
             lyrics[best_note] = text
             taken.add(best_note)
             heads[best_note] = (text, start, max(end, start))
+            parts = tuple(getattr(char, "parts", ()) or ())
+            if parts:
+                parts_of[best_note] = parts
             last_note = max(last_note, best_note)
             fill.assigned += 1
             continue
@@ -373,6 +379,9 @@ def assign_lyrics(
             lyrics[fallback] = text
             taken.add(fallback)
             heads[fallback] = (text, start, max(end, start))
+            parts = tuple(getattr(char, "parts", ()) or ())
+            if parts:
+                parts_of[fallback] = parts
             last_note = max(last_note, fallback)
             fill.assigned += 1
             continue
@@ -404,7 +413,8 @@ def assign_lyrics(
             continue
         limit = (ordered_heads[position + 1][0]
                  if position + 1 < len(ordered_heads) else len(spans))
-        marker = continuation_marker(text)
+        parts = parts_of.get(head, ())
+        cursor = 0
         for note in order:
             if note <= head or note >= limit or note in taken:
                 continue
@@ -412,7 +422,13 @@ def assign_lyrics(
                 break     # 转音必须落在字的时间窗内；容差只用来找"头"，不放大窗口
             if only_empty and lyrics[note].strip():
                 continue
-            lyrics[note] = marker
+            # 有音节信息时：这个音开头新音节 → `+`，否则是延长当前音节 → `-`。
+            # 没有音节信息（中日文、或旧数据）一律写延长标记。
+            new_syllable = False
+            while cursor < len(parts) and parts[cursor] <= spans[note][0] + 0.02:
+                cursor += 1
+                new_syllable = True
+            lyrics[note] = CONTINUATION if new_syllable else MELISMA
             taken.add(note)
             fill.melisma += 1
 

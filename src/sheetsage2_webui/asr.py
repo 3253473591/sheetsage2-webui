@@ -80,9 +80,15 @@ class AlignedChar:
     text: str
     start: float
     end: float
+    #: 英文词内部「第二、三…个音节」的起点时刻。用来决定延续标记是 `-`（延长当前
+    #: 音节）还是 `+`（进下一个音节）。中日文是空的（一个字就是一个音节）。
+    parts: tuple[float, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return dict(text=self.text, start=round(self.start, 3), end=round(self.end, 3))
+        payload = dict(text=self.text, start=round(self.start, 3), end=round(self.end, 3))
+        if self.parts:
+            payload["parts"] = [round(value, 3) for value in self.parts]
+        return payload
 
 
 #: 零长度字插值：一个字最多摊多宽（秒）。空档再大也不把一个字拉成十几秒。
@@ -516,9 +522,12 @@ class AsrEngine:
                 run.warnings.append(f"切片 {offset:.1f}s 起的这段对齐失败（TIFA 没给出边界）")
                 continue
             labels = self._labels_for(text, spans, language)
-            for index, (item_text, start, end) in enumerate(spans):
+            for index, span in enumerate(spans):
+                item_text, start, end = span[0], span[1], span[2]
+                parts = span[3] if len(span) > 3 else ()
                 label = labels[index] if labels else item_text
-                chars.append(AlignedChar(label, offset + start, offset + end))
+                chars.append(AlignedChar(label, offset + start, offset + end,
+                                         tuple(offset + value for value in parts)))
         return chars
 
     @staticmethod

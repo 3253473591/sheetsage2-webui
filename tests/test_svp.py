@@ -318,8 +318,8 @@ def test_build_svp_round_trips_notes_tempo_and_lyrics(out_dir: Path):
     assert [note.start_pos for note in vocal.note_list] == [240, 360, 480]
     assert [note.length for note in vocal.note_list] == [120, 120, 120]
     assert [note.key_number for note in vocal.note_list] == [60, 62, 64]
-    # 延续标记 `+` 统一成 `-`
-    assert [note.lyric for note in vocal.note_list] == ["啦", "-", "-"]
+    # 延续标记原样保留：`-` 是延长当前音节，`+` 是进下一个音节
+    assert [note.lyric for note in vocal.note_list] == ["啦", "-", "+"]
     assert len(back.track_list) == 2                    # 人声 + 乐器
     assert len(back.track_list[1].note_list) == 1
 
