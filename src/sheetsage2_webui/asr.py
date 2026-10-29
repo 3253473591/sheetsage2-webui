@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 import time
@@ -39,6 +40,29 @@ DEFAULT_TOKENS_PER_SECOND = 12.0
 #: 相邻两字之间允许的最大空白（秒）。超过就**报告**（不判定），让人核对。
 #: 慢歌的长句之间本来就有 15s+ 的停顿（实测《相思》19s），所以没法用统一阈值判决。
 MAX_CHAR_GAP_SECONDS = 15.0
+
+#: 切片临时目录的前缀。正常结束会自己删；这条只用来清「上次崩掉」留下的。
+ASR_WORK_PREFIX = "sheetsage-asr-"
+
+#: 超过这个岁数的临时目录一律当垃圾（一次识别几分钟，6 小时足够宽松）。
+ASR_WORK_MAX_AGE_SECONDS = 6 * 3600
+
+
+def _prune_stale_workdirs(max_age: float = ASR_WORK_MAX_AGE_SECONDS) -> None:
+    """清掉上次异常退出留下的切片目录。
+
+    正常路径在 `transcribe_sections` 结尾就删了；这条兜住「进程被杀/异常」的情况，
+    否则 %TEMP% 里会攒出一堆几十 MB 的 `sheetsage-asr-*`（本机的 %TEMP% 被指到了
+    工程根目录，所以看起来像工程里的垃圾）。
+    """
+    root = Path(tempfile.gettempdir())
+    cutoff = time.time() - max_age
+    try:
+        for item in root.glob(f"{ASR_WORK_PREFIX}*"):
+            if item.is_dir() and item.stat().st_mtime < cutoff:
+                shutil.rmtree(item, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _max_char_gap(chars: Sequence["AlignedChar"]) -> tuple[float, int]:
@@ -575,7 +599,9 @@ class AsrEngine:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
-        work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="sheetsage-asr-"))
+        work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix=ASR_WORK_PREFIX))
+        if workdir is None:
+            _prune_stale_workdirs()
         work.mkdir(parents=True, exist_ok=True)
         self._workdir = work
 
@@ -681,4 +707,8 @@ class AsrEngine:
                 f"核对填词结果时留意")
         if not run.chars and (self.config.aligner_model or tifa_mode):
             run.warnings.append("没有拿到任何时间戳")
+        if workdir is None:
+            # 自己建的临时目录自己收：切片 wav 一首歌能到几十 MB，不收会在
+            # %TEMP%（本机被指到了工程根目录）里堆成一片 `sheetsage-asr-*`。
+            shutil.rmtree(work, ignore_errors=True)
         return run
