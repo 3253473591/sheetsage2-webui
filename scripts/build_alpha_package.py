@@ -36,6 +36,9 @@ DEFAULT_PYTHON_RUNTIME = Path.home() / "AppData" / "Roaming" / "uv" / "python" /
 #: 裁剪版静态 ffmpeg（参考项目里那份，实测四条用法全过）。
 DEFAULT_FFMPEG = ROOT / "reference" / "Vocal2Midi" / "ffmpeg.exe"
 
+#: TIFA 对齐权重。代码包里带一份 fp16，省得再从 GitHub Release 下（国内镜像也没有）。
+TIFA_SOURCE = ROOT / "models" / "TIFA-1.0"
+
 #: 目录整体带走。
 COPY_DIRS = ("src", "scripts", "tools", "web", "docs", "tests")
 #: 单个文件带走。
@@ -111,6 +114,50 @@ def copy_tree(source: Path, target: Path, *, label: str,
     log.append((label, count, total))
 
 
+def include_tifa(package: Path, log: list[tuple[str, int, int]]) -> None:
+    """把 TIFA 权重按 fp16 打进包（模型 CC BY-NC-SA 4.0，和代码的许可分开）。
+
+    fp32 151MB，fp16 76MB（实测边界差 ≤10ms），压进 zip 约 74MB。
+    缺权重时只记一条日志，不拦打包。
+    """
+    source = TIFA_SOURCE
+    checkpoint = source / "model.pt"
+    if not checkpoint.is_file():
+        log.append(("models/TIFA-1.0（缺失，跳过）", 0, 0))
+        return
+    target = package / "models" / "TIFA-1.0"
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.rglob("*"):
+        if not item.is_file() or item.name == "model.pt":
+            continue
+        destination = target / item.relative_to(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, destination)
+    import torch
+
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    inner = state.get("state_dict", state) if isinstance(state, dict) else state
+    if isinstance(inner, dict):
+        inner = {key: (value.half() if torch.is_tensor(value) and value.is_floating_point()
+                       else value) for key, value in inner.items()}
+        if isinstance(state, dict) and "state_dict" in state:
+            state["state_dict"] = inner
+        else:
+            state = inner
+    torch.save(state, target / "model.pt")
+    (target / "LICENSE-model.txt").write_text(
+        "TIFA-1.0 权重\n"
+        "==============\n"
+        "来源：https://github.com/openvpi/TIFA （release v1.0.0）\n"
+        "许可：CC BY-NC-SA 4.0（模型文件本身；代码是 MIT）\n"
+        "改动：仅把 fp32 权重转成 fp16 以控制包体，未做训练/微调/蒸馏。\n"
+        "用途：本项目的歌词强制对齐后端。非商用；再分发请保留本文件。\n",
+        encoding="utf-8")
+    files = sum(1 for item in target.rglob("*") if item.is_file())
+    size = sum(item.stat().st_size for item in target.rglob("*") if item.is_file())
+    log.append(("models/TIFA-1.0（fp16 权重）", files, size))
+
+
 def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[str, int, int]]:
     if package.exists():
         shutil.rmtree(package)
@@ -143,17 +190,21 @@ def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[st
             shutil.copy2(source, package / name)
             log.append((name, 1, source.stat().st_size))
 
-    # 4) 内测说明放在最显眼的位置
+    # 4) TIFA 对齐权重（fp16）。放离线包里，别指望国内能下到 GitHub Release。
+    include_tifa(package, log)
+
+    # 5) 内测说明放在最显眼的位置
     readme = ROOT / "README-internal-test.md"
     if readme.is_file():
         shutil.copy2(readme, package / "内测说明.md")
         log.append(("内测说明.md", 1, readme.stat().st_size))
 
-    # 5) 空目录占位，让内测者知道以后东西放哪
+    # 6) 空目录占位，让内测者知道以后东西放哪
     for name in ("models", "output"):
         (package / name).mkdir(exist_ok=True)
         (package / name / "放这里.txt").write_text(
-            "这个目录会由内测包自己填（首次运行 / 跑歌之后）。\n", encoding="utf-8")
+            "其它模型由内测包自己填（首次运行 / 跑歌之后）；TIFA 权重已随包放在 models/TIFA-1.0。\n",
+            encoding="utf-8")
     return log
 
 

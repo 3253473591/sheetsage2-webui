@@ -254,8 +254,10 @@ def language_choices() -> list[dict[str, str]]:
 class AsrConfig:
     asr_model: str | Path
     aligner_model: str | Path | None = None
-    #: 用哪个对齐器出字的时间：`"qwen"`（默认，和 ASR 一次调用）或 `"tifa"`（独立后端）。
-    aligner: str = "qwen"
+    #: 用哪个对齐器出字的时间：`"tifa"`（默认）或 `"qwen"`（和 ASR 一次调用）。
+    #: 选了 tifa 但权重不在时**自动退回 qwen**，只是多一条告警——不能因为缺个可选
+    #: 模型就把整条歌词链路做死。
+    aligner: str = "tifa"
     #: TIFA 权重（`model.pt`）。只在不空、且 `aligner="tifa"` 时用。
     tifa_model: str | Path | None = None
     tifa_precision: str = "16-mixed"
@@ -475,6 +477,16 @@ class AsrEngine:
             raise RuntimeError(f"切片失败：{result.stderr.decode(errors='replace')[-300:]}")
         return target
 
+    def _tifa_ready(self) -> tuple[bool, str]:
+        """TIFA 权重在不在。缺了就退回 Qwen，别让整个歌词阶段失败。"""
+        from .tifa_align import default_model_path
+
+        path = Path(self.config.tifa_model) if self.config.tifa_model else default_model_path()
+        if path.is_file():
+            return True, ""
+        return False, (f"没找到 TIFA 权重（{path}），这次退回 Qwen 对齐器；"
+                       f"要稳定得多，建议把 models/TIFA-1.0 放进来")
+
     def _align_with_tifa(self, pending: Sequence[tuple[Path, str, float]],
                          run: AsrRun, requested: str | None) -> list[AlignedChar]:
         """把攒下来的切片交给 TIFA，一次对齐完，时间换回整首曲的时间轴。"""
@@ -498,9 +510,21 @@ class AsrEngine:
             if not spans:
                 run.warnings.append(f"切片 {offset:.1f}s 起的这段对齐失败（TIFA 没给出边界）")
                 continue
-            for item_text, start, end in spans:
-                chars.append(AlignedChar(item_text, offset + start, offset + end))
+            labels = self._labels_for(text, spans, language)
+            for index, (item_text, start, end) in enumerate(spans):
+                label = labels[index] if labels else item_text
+                chars.append(AlignedChar(label, offset + start, offset + end))
         return chars
+
+    @staticmethod
+    def _labels_for(text: str, spans: Sequence, language: str) -> list[str]:
+        """用**我们自己的**文本当歌词，TIFA 只提供边界。
+
+        TIFA 的 G2P 前置会 `lowercase` + 去标点，英文词会被改成小写；数量对不上
+        （罕见：它可能把缩写拆开）时就退回它给的字面。
+        """
+        units = text.split() if language == "en" else list(text)
+        return units if len(units) == len(spans) else []
 
     def transcribe_sections(
         self,
@@ -537,6 +561,12 @@ class AsrEngine:
         self._workdir = work
 
         tifa_mode = self.config.uses_tifa
+        if tifa_mode:
+            ready, reason = self._tifa_ready()
+            if not ready:
+                # 缺可选模型不能把整条链路做死：退回 Qwen，并让用户在详情里看到原因
+                run.warnings.append(reason)
+                tifa_mode = False
         #: TIFA 要整首一起对齐：先把切片留在盘上，最后一次性过模型
         pending: list[tuple[Path, str, float]] = []
 

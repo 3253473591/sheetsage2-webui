@@ -49,30 +49,30 @@ Qwen3-ForcedAligner 的时间戳有 **13~17% 是零宽度**（`start == end`）�
 
 所以日语场景现在仍走 Qwen 对齐器（`aligner="qwen"`），两个后端都保留即可。
 
-## 6. 体积账（打包门槛）
+## 6. 体积账（已落地：打 inside 代码包）
 
 | 项 | 大小 |
 |---|---|
 | fp32 `model.pt` | 151.2MB |
 | **fp16 `model.pt`** | **75.7MB**（边界差 ≤10ms，可忽略） |
-| + 词典 + 英语 G2P 资产 | 82.8MB |
-| + vendored 源码 | 1.6MB |
-| 现有代码包（alpha3 zip） | 24.9MB |
+| + 词典 + 英语 G2P 资产 | 82.7MB |
+| + vendored 源码 | 1.6MB（压缩后约 0.4MB） |
 
-**fp16 权重 + 现有代码包 = 100.6MB，刚好差 0.6MB**。所以：
+打包时由 `scripts/build_alpha_package.py` 的 `include_tifa()` **在构建期转 fp16**，
+随包放进 `models/TIFA-1.0/`（附 `LICENSE-model.txt`：CC BY-NC-SA 4.0、来源、只改了精度）。
 
-- 推荐把 `models/TIFA-1.0/` 放进**离线模型包**（和 SheetSage2 / Qwen 一样由 bootstrap 管），
-  代码包里只多 1.6MB；
-- 若坚持单包 <100MB，只剩两条路：不装英语 G2P（省 7.5MB，英语走 Qwen），或做 int8
-  （约 38MB，但 torch 的 int8 只能跑 CPU，速度不划算）。
+实测 `alpha4`：**zip 98.9MB / 解压 148.8MB**，在 100MB 预算内（余量 1.1MB）。
+再紧就往回收英语 G2P（`assets/LstmG2p-Eng` + cmudict 共 7.5MB，英语改走 Qwen）。
 
 ## 7. 怎么用
+
+默认就是 `aligner="tifa"`；**权重不在时自动退回 Qwen** 并写一条告警（不让链路死掉）。
 
 ```python
 AsrConfig(asr_model=..., aligner="tifa", tifa_model=models/"TIFA-1.0"/"model.pt")
 ```
 
-`aligner` 默认仍是 `"qwen"`；`AsrConfig.slice_limit` 会在 tifa 模式下把切片压到 50s。
-WebUI 里通过 `job.options["aligner"]` 选择。
+`AsrConfig.slice_limit` 在 tifa 模式下把切片压到 50s；WebUI 通过 `job.options["aligner"]` 选。
 
 复现脚本：`tmp/tifa_pipeline.py`（中文整首）、`tmp/tifa_yue.py`（粤语 + LRC 对表）。
+

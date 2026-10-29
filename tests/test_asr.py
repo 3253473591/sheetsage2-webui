@@ -228,7 +228,7 @@ def test_widen_is_a_no_op_without_vocals():
 # --------------------------------------------------------------------- TIFA 后端
 def test_slice_limit_shrinks_for_tifa():
     """TIFA 上下文约 1 分钟，90s 的默认切片要压到 50s。"""
-    qwen = AsrConfig(asr_model="m", max_slice_seconds=90.0)
+    qwen = AsrConfig(asr_model="m", max_slice_seconds=90.0, aligner="qwen")
     tifa = AsrConfig(asr_model="m", max_slice_seconds=90.0, aligner="tifa")
     assert qwen.slice_limit == 90.0
     assert tifa.slice_limit == 50.0
@@ -281,6 +281,36 @@ def test_vendored_tifa_sources_are_present():
     assert (vendor / "LICENSE").is_file()
     assert (vendor / "inference" / "api.py").is_file()
     assert "MIT License" in (vendor / "LICENSE").read_text(encoding="utf-8")
+
+
+def test_tifa_is_the_default_aligner():
+    from sheetsage2_webui.asr import AsrConfig as Config
+
+    assert Config(asr_model="m").aligner == "tifa"
+
+
+def test_missing_tifa_weights_reports_and_falls_back():
+    """缺权重不该让整条链路失败——返回 (False, 原因)，调用方退回 Qwen。"""
+    from sheetsage2_webui.asr import AsrEngine
+
+    engine = AsrEngine(AsrConfig(asr_model="m", aligner="tifa",
+                                 tifa_model="D:/nope/model.pt"))
+    ready, reason = engine._tifa_ready()
+    assert ready is False
+    assert "TIFA" in reason and "Qwen" in reason
+
+
+def test_english_words_keep_our_text_not_tifa_lowercase():
+    """TIFA 的 G2P 会 lowercase，英文词要用我们自己的写法。"""
+    from sheetsage2_webui.asr import AsrEngine
+
+    spans = [("the", 0.0, 0.3), ("wellerman", 0.3, 0.9)]
+    assert AsrEngine._labels_for("The Wellerman", spans, "en") == ["The", "Wellerman"]
+    # 数量对不上就退回 TIFA 给的字面
+    assert AsrEngine._labels_for("The Wellerman", spans[:1], "en") == []
+    # 中文按字切
+    zh = [("流", 0.0, 0.3), ("转", 0.3, 0.6)]
+    assert AsrEngine._labels_for("流转", zh, "zh") == ["流", "转"]
 
 
 # --------------------------------------------------------------------- 加载参数
