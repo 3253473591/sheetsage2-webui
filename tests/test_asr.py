@@ -15,11 +15,14 @@ if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from sheetsage2_webui.asr import (  # noqa: E402
+    AlignedChar,
     AsrConfig,
     Section,
     asr_load_kwargs,
+    interpolate_degenerate,
     parsed_sections,
     sections_from_lab,
+    widen_to_vocals,
 )
 
 
@@ -128,7 +131,102 @@ def test_section_seconds_property():
     assert Section(2.0, 5.5, "x").seconds == pytest.approx(3.5)
 
 
+# --------------------------------------------------------------------- 零长度字插值
+def chars(*rows) -> list[AlignedChar]:
+    return [AlignedChar(text, start, end) for text, start, end in rows]
+
+
+def test_interpolate_spreads_a_zero_run_across_the_gap():
+    """连续两个零长度字，均分在前一个字的 end 和后一个字的 start 之间。"""
+    rows = chars(("a", 0.0, 1.0), ("b", 1.0, 1.0), ("c", 2.0, 2.0), ("d", 3.0, 4.0))
+    fixed, repaired = interpolate_degenerate(rows)
+    assert repaired == 2
+    assert [(c.start, c.end) for c in fixed] == [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0),
+                                                 (3.0, 4.0)]
+    # 入参不被改写
+    assert (rows[1].start, rows[1].end) == (1.0, 1.0)
+
+
+def test_interpolate_leaves_measured_chars_alone():
+    rows = chars(("a", 0.0, 0.7), ("b", 1.2, 1.9))
+    fixed, repaired = interpolate_degenerate(rows)
+    assert repaired == 0
+    assert [(c.start, c.end) for c in fixed] == [(0.0, 0.7), (1.2, 1.9)]
+
+
+def test_interpolate_caps_one_char_in_a_huge_gap():
+    """35 秒的空档通常是一段间奏，不是一个字拖了 35 秒——锚在左边按上限排。"""
+    rows = chars(("a", 0.0, 1.0), ("b", 1.0, 1.0), ("c", 40.0, 41.0))
+    fixed, _ = interpolate_degenerate(rows)
+    assert fixed[1].start == pytest.approx(1.0)
+    assert fixed[1].end == pytest.approx(1.0 + 1.5)
+
+
+def test_interpolate_stays_monotonic_and_never_overlaps():
+    rows = chars(("a", 0.0, 1.0), *[(str(i), 1.0, 1.0) for i in range(6)],
+                 ("z", 30.0, 31.0))
+    fixed, repaired = interpolate_degenerate(rows, max_char_seconds=0.5)
+    assert repaired == 6
+    for previous, current in zip(fixed, fixed[1:]):
+        assert current.start >= previous.end - 1e-9
+    assert all(current.end > current.start for current in fixed)
+
+
+def test_interpolate_handles_an_all_degenerate_track():
+    rows = chars(("a", 5.0, 5.0), ("b", 5.0, 5.0))
+    fixed, repaired = interpolate_degenerate(rows)
+    assert repaired == 2 and all(c.end > c.start for c in fixed)
+
+
+def test_interpolate_handles_a_run_at_the_very_end():
+    rows = chars(("a", 0.0, 1.0), ("b", 2.0, 2.0))
+    fixed, _ = interpolate_degenerate(rows)
+    assert fixed[1].start == pytest.approx(1.0)
+    assert fixed[1].end == pytest.approx(2.5)          # 没有右边的字就按上限顺排
+
+
+# --------------------------------------------------------------------- 边界让人声
+def test_widen_moves_an_open_boundary_out_to_the_vocal_phrase():
+    """前奏边界切在人声里：往外挪到这一句的起点。"""
+    sections = [Section(23.87, 105.0)]
+    vocals = [(22.49, 23.62), (23.90, 24.20), (104.9, 105.4)]
+    widened = widen_to_vocals(sections, vocals)
+    assert widened[0].start == pytest.approx(22.49)
+    assert widened[0].end == pytest.approx(105.4)
+
+
+def test_widen_keeps_boundaries_between_two_kept_sections():
+    """相邻切片之间的边界切在里面不丢音频，不许动。"""
+    sections = [Section(23.87, 60.0), Section(60.0, 100.0)]
+    vocals = [(22.49, 23.62), (30.0, 59.5), (59.9, 90.0)]
+    widened = widen_to_vocals(sections, vocals)
+    assert widened[0].start == pytest.approx(22.49)     # 只有全曲最前面那侧敞口
+    assert (widened[0].end, widened[1].start) == (60.0, 60.0)
+
+
+def test_widen_respects_the_maximum_extension():
+    sections = [Section(100.0, 120.0)]
+    vocals = [(80.0, 101.0)]
+    widened = widen_to_vocals(sections, vocals, max_extend=12.0)
+    assert widened[0].start == pytest.approx(88.0)
+
+
+def test_widen_splits_the_gap_when_both_sides_reach_it():
+    """两侧都往同一段间奏里挪会撞上：在原来的边界中间对半分。"""
+    sections = [Section(0.0, 50.0), Section(60.0, 100.0)]
+    vocals = [(50.5, 59.5)]
+    widened = widen_to_vocals(sections, vocals)
+    assert widened[0].end == pytest.approx(55.0)
+    assert widened[1].start == pytest.approx(55.0)
+
+
+def test_widen_is_a_no_op_without_vocals():
+    sections = [Section(0.0, 10.0)]
+    assert widen_to_vocals(sections, []) == sections
+
+
 # --------------------------------------------------------------------- 加载参数
+
 def test_load_kwargs_without_offload_puts_everything_on_the_device():
     config = AsrConfig(asr_model="m", aligner_model="a", device="cuda:0")
     kwargs = asr_load_kwargs(config, "bf16")

@@ -25,14 +25,14 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..asr import (AsrConfig, AsrEngine, normalize_language, parsed_sections,
-                   sections_from_lab)
+                   sections_from_lab, widen_to_vocals)
 from ..engine import EngineConfig, SheetSage2Engine
 from ..fsutil import write_text_atomic
-from ..lyrics import DEFAULT_TOLERANCE, fill_project
+from ..lyrics import DEFAULT_TOLERANCE, fill_project, note_spans_seconds
 from ..pipeline import run as pipeline_run
 from ..result import EXPECTED_MIDI, EXPECTED_TEXT, inspect_output_dir
 from ..sections import is_instrumental
-from ..timeline import PPQ
+from ..timeline import PPQ, from_stored_measures
 from .jobs import (PHASE_LABELS, Job, Progress, StageRunner, asr_model_label)
 
 #: 扒谱阶段的小步骤与进度锚点。`识别音乐` 占大头是因为它就是推理本身。
@@ -512,6 +512,7 @@ class RunnerSession:
             "source": source, "source_file": source_file,
             "language": language_label, "language_used": run.language,
             "slices": run.slices, "zero_length_chars": run.zero_length_chars,
+            "repaired_chars": run.repaired_chars,
             # 切片口径：跑过哪些段落、跳过了哪些、切片上限是多少
             "sections": [s.as_dict() for s in sections],
             "skipped_sections": [s.as_dict() for s in skipped],
@@ -538,6 +539,7 @@ class RunnerSession:
             "max_slice_seconds": asr_config.max_slice_seconds,
             "lines": len(lines), "chars": len(run.chars), "slices": run.slices,
             "zero_length_chars": run.zero_length_chars,
+            "repaired_chars": run.repaired_chars,
             "assigned": fill["assigned"], "melisma": fill["melisma"],
             "dropped": fill["dropped"], "absorbed": fill["absorbed"],
             "unmatched_notes": fill["unmatched_notes"],
@@ -610,6 +612,19 @@ def _lyrics_artifacts(job: Job) -> dict[str, Any]:
     }
 
 
+def _vocal_spans(project: Mapping[str, Any]) -> list[tuple[float, float]]:
+    """工程里人声轨的音符跨度（秒）。没有就返回空——切片退回原样。"""
+    track = next((t for t in project.get("tracks") or [] if t.get("id") == "vocal"), None)
+    notes = (track or {}).get("notes") or []
+    if not notes:
+        return []
+    try:
+        timeline = from_stored_measures(project["timeline"]["measures"])
+        return note_spans_seconds(timeline, notes)
+    except (KeyError, TypeError, ValueError):
+        return []
+
+
 def _sections_for(job: Job, project: Mapping[str, Any], *, max_seconds: float,
                   skip_instrumental: bool,
                   progress: Progress | None = None) -> tuple[list[Any], list[Any]]:
@@ -639,6 +654,22 @@ def _sections_for(job: Job, project: Mapping[str, Any], *, max_seconds: float,
                                  "回退到「全部段落」而不是空跑")
                 sections = sections_from_lab(text, max_seconds=max_seconds)
         if sections:
+            # 边界让位给人声：`structure.lab` 的前奏/尾奏边界常常切在句子中间
+            # （实测《爱情转移》前奏判到 23.87s，人声 22.63s 就进来了，第一句前 5 个字
+            # 直接没进识别范围）。只在挨着被跳过段落的那一侧挪，扫掉的音频才不会丢。
+            vocals = _vocal_spans(project)
+            if vocals:
+                widened = widen_to_vocals(sections, vocals)
+                moved = [(round(before.start - after.start, 2),
+                          round(after.end - before.end, 2))
+                         for before, after in zip(sections, widened)
+                         if abs(before.start - after.start) > 1e-6
+                         or abs(before.end - after.end) > 1e-6]
+                if moved and progress is not None:
+                    progress.log(f"切片边界让出 {len(moved)} 处给人声"
+                                 f"（前面补 {sum(m[0] for m in moved):.1f}s / "
+                                 f"后面补 {sum(m[1] for m in moved):.1f}s）")
+                sections = widened
             return sections, skipped
         if progress is not None:
             progress.log("structure.lab 解析不出可用区间，按整首跑")

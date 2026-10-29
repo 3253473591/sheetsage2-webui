@@ -85,6 +85,137 @@ class AlignedChar:
         return dict(text=self.text, start=round(self.start, 3), end=round(self.end, 3))
 
 
+#: 零长度字插值：一个字最多摊多宽（秒）。空档再大也不把一个字拉成十几秒。
+MAX_REPAIR_CHAR_SECONDS = 1.5
+
+#: 切边区间的边界最多为了一段贴边的人声往外挪多少秒（避免为了一个尾音的「啊」
+#: 把整段间奏都拉进识别范围）。
+MAX_VOCAL_EXTEND_SECONDS = 12.0
+
+#: 相邻两个音之间超过这么久，就算人声断了，不并成同一句。
+VOCAL_PHRASE_GAP_SECONDS = 1.5
+
+
+def interpolate_degenerate(chars: Sequence["AlignedChar"], *,
+                           max_char_seconds: float = MAX_REPAIR_CHAR_SECONDS,
+                           ) -> tuple[list["AlignedChar"], int]:
+    """把对齐器给不出时间的字（`start == end`）摊到前后两个字之间的空档里。
+
+    对齐器给零长度 = **它没测到这个字的边界**。原来的做法是把它当一个「瞬间」，
+    填词时再用 ±容差去窗口里找音——等于把「不知道」编码成一个假位置。实测全语料
+    17% 的字是零长度，其中不少会被贪心挂到几秒之后才开始的音上。
+
+    这里改成：连续的一段零长度字，均分在「前一个有长度的字的 end」到「后一个有长度
+    的字的 start」之间。它仍然是**估计**，但比「所有不知道的字都堆在一个时刻」更接近
+    真实唱法，而且保证了单调、不重叠。
+
+    `max_char_seconds` 是单字上限：空档远大于字数时（实测最长 35.7s 只有一个字），
+    锚在左边按上限排，剩下的留作停顿——那种空档多半是间奏，不是这个字拖了 35 秒。
+
+    **只动零长度的字**：有 start/end 的字原样保留（返回的是新列表，不改入参）。
+    返回 `(新列表, 修补的字数)`。
+    """
+    out = [AlignedChar(char.text, char.start, char.end) for char in chars]
+    repaired = 0
+    index = 0
+    while index < len(out):
+        if out[index].end > out[index].start + 1e-9:
+            index += 1
+            continue
+        first = index
+        while index < len(out) and out[index].end <= out[index].start + 1e-9:
+            index += 1
+        count = index - first
+        left = out[first - 1].end if first else None
+        right = out[index].start if index < len(out) else None
+        if left is None and right is None:
+            # 整首都没有一个有长度的字：只能从第一个字的起点顺排
+            left = out[first].start
+            right = left + max_char_seconds * count
+        elif left is None:
+            left = right - max_char_seconds * count
+        elif right is None:
+            right = left + max_char_seconds * count
+        if right <= left:
+            # 前后两个有长度的字本身就重叠/相接（不该出现）：给一段最小的槽位
+            right = left + 0.1 * count
+        step = min((right - left) / count, max_char_seconds)
+        for offset in range(count):
+            char = out[first + offset]
+            char.start = left + step * offset
+            char.end = left + step * (offset + 1)
+        repaired += count
+    return out, repaired
+
+
+def vocal_phrases(vocals: Sequence[tuple[float, float]], *,
+                  max_gap: float = VOCAL_PHRASE_GAP_SECONDS) -> list[tuple[float, float]]:
+    """把音符跨度并成「人声句」：间隔 ≤ `max_gap` 的算同一句。"""
+    phrases: list[tuple[float, float]] = []
+    for start, end in sorted((float(a), float(b)) for a, b in vocals if b > a):
+        if phrases and start - phrases[-1][1] <= max_gap:
+            phrases[-1] = (phrases[-1][0], max(phrases[-1][1], end))
+        else:
+            phrases.append((start, end))
+    return phrases
+
+
+def _phrase_edge(phrases: Sequence[tuple[float, float]], point: float,
+                 direction: int, max_gap: float) -> float | None:
+    """边界 `point` 落在人声里（或贴着人声）时，返回那一句的边缘。"""
+    for start, end in phrases:
+        if start - 1e-6 <= point <= end + 1e-6:
+            return start if direction < 0 else end
+    best: float | None = None
+    for start, end in phrases:
+        gap = point - end if direction < 0 else start - point
+        if -1e-6 <= gap <= max_gap:
+            best = start if direction < 0 else end
+    return best
+
+
+def widen_to_vocals(sections: Sequence["Section"],
+                    vocals: Sequence[tuple[float, float]], *,
+                    max_extend: float = MAX_VOCAL_EXTEND_SECONDS,
+                    max_gap: float = VOCAL_PHRASE_GAP_SECONDS) -> list["Section"]:
+    """切片边界不要切在人声中间。
+
+    典型病例：《爱情转移》`structure.lab` 把 0.01–23.87s 判成前奏，而人声 22.63s
+    就进来了——切片正好切在第一句「徘徊过多少橱窗」里面，前 5 个字直接没机会被识别。
+    尾奏同理（最后一句的拖音被切掉）。
+
+    规则：**只在「敞口」的那一边挪**。两个相邻切片之间的边界由两份切片共同覆盖，
+    切在里面不丢音频，不用动；只有挨着被跳过的器乐段（或全曲首尾）的那一侧，
+    边界切进人声才会真的丢东西。
+
+    往外挪的距离同时受三个约束：人声句的边缘、`max_extend`、以及不与相邻切片重叠。
+    """
+    if not sections or not vocals:
+        return list(sections)
+    phrases = vocal_phrases(vocals, max_gap=max_gap)
+    out = [Section(row.start, row.end, row.label) for row in sections]
+    for index, row in enumerate(out):
+        open_start = index == 0 or sections[index - 1].end < row.start - 1e-6
+        open_end = index == len(out) - 1 or sections[index + 1].start > row.end + 1e-6
+        if open_start:
+            edge = _phrase_edge(phrases, row.start, -1, max_gap)
+            if edge is not None:
+                floor = sections[index - 1].end if index else 0.0
+                row.start = max(edge, row.start - max_extend, floor)
+        if open_end:
+            edge = _phrase_edge(phrases, row.end, 1, max_gap)
+            if edge is not None:
+                ceiling = sections[index + 1].start if index + 1 < len(out) else edge
+                row.end = min(edge, row.end + max_extend, max(row.end, ceiling))
+    # 两侧同时往同一段间奏里挪会撞上：在那里对半分
+    for index in range(len(out) - 1):
+        if out[index].end > out[index + 1].start + 1e-6:
+            middle = (sections[index].end + sections[index + 1].start) / 2
+            out[index].end = middle
+            out[index + 1].start = middle
+    return [row for row in out if row.end > row.start]
+
+
 #: 给界面用的语言选项。**空串 = 自动**（不给 language，让模型自己判），
 #: 其余是 Qwen3-ASR 的规范语言名。加语言只改这一行。
 LANGUAGE_CHOICES: tuple[tuple[str, str], ...] = (
@@ -174,7 +305,8 @@ class AsrRun:
     slices: int = 0
     elapsed_seconds: float = 0.0
     peak_gpu_mib: float = 0.0
-    zero_length_chars: int = 0     # 对齐器给不出时间的字数（start == end）
+    zero_length_chars: int = 0     # 对齐器给不出时间的字数（start == end，插值前）
+    repaired_chars: int = 0        # 其中被「摊到空档里」补了位置的字数
     max_gap_seconds: float = 0.0   # 相邻字之间的最大空白（秒）
     max_gap_at: int = 0            # 最大空白在第几个字之前
     text_coverage: float = 1.0     # 拿到时间戳的字数 / 识别出的文本长度
@@ -189,6 +321,7 @@ class AsrRun:
                     chars=len(self.chars), elapsed_seconds=round(self.elapsed_seconds, 2),
                     peak_gpu_mib=round(self.peak_gpu_mib, 1),
                     zero_length_chars=self.zero_length_chars,
+                    repaired_chars=self.repaired_chars,
                     zero_length_ratio=round(self.zero_length_ratio, 4),
                     max_gap_seconds=round(self.max_gap_seconds, 3),
                     max_gap_at=self.max_gap_at,
@@ -401,12 +534,17 @@ class AsrEngine:
         if torch.cuda.is_available():
             run.peak_gpu_mib = torch.cuda.max_memory_allocated() / 1024**2
         run.zero_length_chars = sum(1 for c in run.chars if c.end <= c.start + 1e-9)
+        if run.zero_length_chars:
+            # 对齐器给不出时间 ≠ 这个字不存在。先按前后空档把它摊开，再交给填词：
+            # 填词拿到的不再是「一堆挤在同一瞬间的字」，而是单调、不重叠、有长度的时间。
+            run.chars, run.repaired_chars = interpolate_degenerate(run.chars)
         if run.zero_length_ratio > 0.1:
             # 实测《光芒》有 20% 的字拿不到时间。这不影响"识别出什么词"，
-            # 但会直接影响填词——这些字只能靠邻近音符的位置去猜。
+            # 但会直接影响填词——这些字没有自己的边界，只能按前后空档估位置。
             run.warnings.append(
                 f"{run.zero_length_chars}/{len(run.chars)} 个字没有可用时间戳"
-                f"（{run.zero_length_ratio:.0%}），填词时这些字只能按附近音符猜位置")
+                f"（{run.zero_length_ratio:.0%}），已按前后空档均分补位置"
+                f"（这类位置是估的，不是测的）")
         # 两种对齐质量信号，都**只报告、不判定**（报告进 lyrics.json / summary）：
         #   1. 唱词中间的最大空白。前奏/间奏/长句之间本来就有空白，没法用统一阈值区分
         #      "正常停顿"和"对齐器漏了音频"——实测《相思》慢歌有 19s 的正常停顿，
