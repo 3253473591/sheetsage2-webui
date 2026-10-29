@@ -1,0 +1,52 @@
+binarizer:
+  g2p:
+    preprocessors:
+      - id: filter-punctuation
+      - id: strip-whitespace
+      - id: lowercase
+    converters:
+      # Chinese (Mandarin): hanzi
+      - id: chinese-pinyin
+        kwargs:
+          dict_path: "dictionaries/ds-zh-pinyin-lite.txt"
+      # Japanese: kanji + kana
+      - id: japanese-mecab
+        kwargs:
+          dict_path: "dictionaries/japanese_dict_full.txt"
+          nbest: 32
+          double_written_sokuon: false
+      # Chinese (Yue): hanzi
+      - id: yue-jyutping
+        kwargs:
+          dict_path: "dictionaries/jyutping_dict.txt"
+      # English words take priority in mixed-language text
+      - id: lstm
+        language: en
+        kwargs:
+          dict_path: "dictionaries/ds_cmudict-07b.txt"
+          model_path: "assets/LstmG2p-Eng"
+          beam_size: 16
+      # Chinese (Mandarin): pinyin
+      - id: dictionary
+        language: zh
+        kwargs:
+          dict_path: "dictionaries/ds-zh-pinyin-lite.txt"
+      # Japanese: romaji
+      - id: dictionary
+        language: ja
+        kwargs:
+          dict_path: "dictionaries/japanese_dict_full.txt"
+      # Chinese (Yue): jyutping
+      - id: dictionary
+        language: yue
+        kwargs:
+          dict_path: "dictionaries/jyutping_dict.txt"
+      # Final fallback
+      - id: passthrough
+  vocabulary:
+    prebuilt_vocab_file: null
+    global_symbols: [AP, SP, EP, GS, sil, br, pau]
+    stop_symbols: [SP, sil, pau]
+    merged_groups:
+      - [AP, br]
+      - [ja/um, zh/um]

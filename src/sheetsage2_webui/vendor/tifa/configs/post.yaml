@@ -1,0 +1,26 @@
+bases:
+  - "configs/supervised.yaml"
+
+training:
+  dataloader:
+    aux_warmup_epochs: 0
+    max_batch_size: 4
+    max_batch_frames: 32000
+    max_val_batch_size: 2
+    max_val_batch_frames: 16000
+    max_concat_size: 8
+    max_concat_frames: 12000
+  optimizer:
+    kwargs:
+      lr: 0.00005
+  lr_scheduler:
+    cls: torch.optim.lr_scheduler.ConstantLR
+  trainer:
+    val_every_n_units: 1000
+    accumulate_grad_batches: 4
+  weight_averaging:
+    ema_enabled: false
+  finetuning:
+    pretraining_enabled: true
+    pretraining_from: "BEST_PRETRAINING_CHECKPOINT"
+    pretraining_include_params: ["*"]

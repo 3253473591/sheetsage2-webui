@@ -1,0 +1,73 @@
+bases:
+  - "configs/base.yaml"
+  - "configs/g2p.yaml"
+
+binarizer:
+  phoneme_timing_data_dir: "data/phones"
+  text_only_data_dir: "data/texts"
+
+model:
+  arch: ForcedAlignmentModel
+  embedding_dim: 256
+  out_dim: 256
+  max_vocab_size: 256
+  backbone:
+    cls: modules.backbones.jebf.JEBFBackbone
+    kwargs:
+      dim: 256
+      num_layers: 8
+      num_heads: 8
+      head_dim: 64
+      attn_type: joint
+      ffn_type: glu
+      qk_norm: true
+      use_rope: true
+
+training:
+  dataloader:
+    aux_ratio: 1.0
+    aux_warmup_epochs: 10
+  semisupervised:
+    enabled: true
+    skip_penalty: 0.5
+    aux_loss_weight: 0.25
+    pseudo_frame_identity_weight: 0.25
+    min_agreement: 0.5
+    min_confidence: 0.10
+    min_determinacy: 0.55
+    min_monotonicity: 0.55
+  augmentation:
+    sequence_edit:
+      enabled: true
+      prob: 0.3
+      p_sub: 0.08
+      p_del: 0.05
+      p_ins: 0.05
+    token_masking:
+      enabled: true
+      prob: 0.2
+      p_mask: 0.5
+      p_insert: 0.05
+      p_chain: 0.2
+      max_chain: 3
+  loss:
+    frame_alignment:
+      weight: 1.0
+      temperature: 0.1
+    span_contrastive:
+      weight: 1.0
+      temperature: 0.1
+      bidirectional: true
+    token_identity:
+      weight: 1.0
+    frame_identity:
+      weight: 1.0
+  validation:
+    skip_penalty: 0.5
+    metrics_ber_tolerance: 5
+    metrics_k_values: [20]
+    metrics_conjunction_k_values: [20]
+    metrics_determinacy_power: 2.0
+    metrics_determinacy_width: 5
+  weight_averaging:
+    ema_enabled: true

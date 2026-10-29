@@ -261,10 +261,14 @@ class AsrProvider:
                 "models": dict(self.choices)}
 
     def config_for(self, job: Job) -> AsrConfig:
-        """按工程选的「模型」换一个权重目录；认不出的标签就用服务端默认。"""
+        """按工程选的「模型 / 对齐器」换一个权重目录；认不出的标签就用服务端默认。"""
         label = str(job.options.get("asr_model") or "")
         path = self.choices.get(label)
-        return self.config if path is None else replace(self.config, asr_model=path)
+        config = self.config if path is None else replace(self.config, asr_model=path)
+        aligner = str(job.options.get("aligner") or "").strip().lower()
+        if aligner and aligner != config.aligner:
+            config = replace(config, aligner=aligner)
+        return config
 
     def get(self, progress: Progress | None = None,
             config: AsrConfig | None = None) -> AsrEngine:
@@ -451,14 +455,14 @@ class RunnerSession:
         asr_config = self.asr.config_for(job)
         skip = str(job.options.get("skip_instrumental") or "vocal") == "vocal"
         sections, skipped = _sections_for(job, project,
-                                          max_seconds=asr_config.max_slice_seconds,
+                                          max_seconds=asr_config.slice_limit,
                                           skip_instrumental=skip, progress=progress)
         if skipped:
             names = "、".join(f"{s.label or '段落'}({s.start:.0f}-{s.end:.0f}s)"
                              for s in skipped)
             progress.log(f"跳过 {len(skipped)} 个不唱的段落：{names}")
         progress.log(f"按 {len(sections)} 个段落跑歌词识别"
-                     f"（切片上限 {asr_config.max_slice_seconds:.0f}s）"
+                     f"（切片上限 {asr_config.slice_limit:.0f}s）"
                      + ("；已按段落跳过前奏/间奏/尾奏" if skipped else ""))
 
         progress.step(*LYRIC_LOAD)
@@ -516,7 +520,8 @@ class RunnerSession:
             # 切片口径：跑过哪些段落、跳过了哪些、切片上限是多少
             "sections": [s.as_dict() for s in sections],
             "skipped_sections": [s.as_dict() for s in skipped],
-            "max_slice_seconds": asr_config.max_slice_seconds,
+            "max_slice_seconds": asr_config.slice_limit,
+            "aligner": "tifa" if asr_config.uses_tifa else "qwen",
             "text_coverage": round(run.text_coverage, 4),
             "elapsed_seconds": round(run.elapsed_seconds, 2),
             "warnings": list(run.warnings),
@@ -536,7 +541,8 @@ class RunnerSession:
             "slices": run.slices, "skipped_instrumental": len(skipped),
             "sections": [s.as_dict() for s in sections],
             "skipped_sections": [s.as_dict() for s in skipped],
-            "max_slice_seconds": asr_config.max_slice_seconds,
+            "max_slice_seconds": asr_config.slice_limit,
+            "aligner": "tifa" if asr_config.uses_tifa else "qwen",
             "lines": len(lines), "chars": len(run.chars), "slices": run.slices,
             "zero_length_chars": run.zero_length_chars,
             "repaired_chars": run.repaired_chars,

@@ -225,6 +225,64 @@ def test_widen_is_a_no_op_without_vocals():
     assert widen_to_vocals(sections, []) == sections
 
 
+# --------------------------------------------------------------------- TIFA 后端
+def test_slice_limit_shrinks_for_tifa():
+    """TIFA 上下文约 1 分钟，90s 的默认切片要压到 50s。"""
+    qwen = AsrConfig(asr_model="m", max_slice_seconds=90.0)
+    tifa = AsrConfig(asr_model="m", max_slice_seconds=90.0, aligner="tifa")
+    assert qwen.slice_limit == 90.0
+    assert tifa.slice_limit == 50.0
+    assert tifa.uses_tifa and not qwen.uses_tifa
+    # 本来就更短的切片不被放大
+    assert AsrConfig(asr_model="m", max_slice_seconds=30.0,
+                     aligner="tifa").slice_limit == 30.0
+
+
+def test_tifa_language_mapping_falls_back_to_chinese():
+    from sheetsage2_webui.tifa_align import MAX_ALIGN_SECONDS, tifa_language
+
+    assert MAX_ALIGN_SECONDS == 50.0
+    assert tifa_language("Chinese") == "zh"
+    assert tifa_language("Japanese") == "ja"
+    assert tifa_language("Cantonese") == "yue"
+    assert tifa_language("English") == "en"
+    assert tifa_language("Korean") == "zh"      # TIFA 1.0 没有韩语
+    assert tifa_language(None) == "zh"
+
+
+def test_parse_text_grid_skips_silence_and_zero_width():
+    from sheetsage2_webui.tifa_align import parse_text_grid
+
+    text = (
+        'File type = "ooTextFile"\n'
+        'item [1]:\n\tclass = "IntervalTier"\n\tname = "texts"\n'
+        '\tintervals: size = 4\n'
+        '\t\tintervals [1]:\n\t\t\txmin = 0.0\n\t\t\txmax = 0.5\n\t\t\ttext = "SP"\n'
+        '\t\tintervals [2]:\n\t\t\txmin = 0.5\n\t\t\txmax = 0.9\n\t\t\ttext = "流"\n'
+        '\t\tintervals [3]:\n\t\t\txmin = 0.9\n\t\t\txmax = 0.9\n\t\t\ttext = "转"\n'
+        '\t\tintervals [4]:\n\t\t\txmin = 0.9\n\t\t\txmax = 1.3\n\t\t\ttext = "等"\n'
+        'item [2]:\n\tclass = "IntervalTier"\n\tname = "phones"\n'
+    )
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".TextGrid", delete=False,
+                                     encoding="utf-8") as handle:
+        handle.write(text)
+        path = Path(handle.name)
+    try:
+        assert parse_text_grid(path) == [("流", 0.5, 0.9), ("等", 0.9, 1.3)]
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_vendored_tifa_sources_are_present():
+    """vendored 的是 MIT 推理子集；模型权重不在这里（另放 models/TIFA-1.0）。"""
+    vendor = PROJECT_ROOT / "src" / "sheetsage2_webui" / "vendor" / "tifa"
+    assert (vendor / "LICENSE").is_file()
+    assert (vendor / "inference" / "api.py").is_file()
+    assert "MIT License" in (vendor / "LICENSE").read_text(encoding="utf-8")
+
+
 # --------------------------------------------------------------------- 加载参数
 
 def test_load_kwargs_without_offload_puts_everything_on_the_device():

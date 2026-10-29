@@ -1,0 +1,65 @@
+bases:
+  - "configs/base.yaml"
+  - "configs/g2p.yaml"
+
+binarizer:
+  text_only_data_dir: "data/texts"
+  features:
+    f0:
+      method: parselmouth
+      f0_min: 65
+      f0_max: 1600
+
+model:
+  arch: ForcedAlignmentSSLModel
+  embedding_dim: 256
+  max_vocab_size: 256
+  backbone:
+    cls: modules.backbones.ebf.EBFEncoderBackbone
+    kwargs:
+      dim: 256
+      num_heads: 8
+      head_dim: 64
+      qk_head_dim: null
+      token_num_layers: 4
+      token_c_kernel_size: 7
+      token_m_kernel_size: 7
+      x_enc_num_layers: 4
+      x_enc_c_kernel_size: 31
+      x_enc_m_kernel_size: 31
+      num_ca_layers: 1  # 2
+      use_rope: true
+      ffn_type: glu
+  reconstructor:
+    cls: modules.backbones.ebf.EBFBackbone
+    kwargs:
+      dim: 256
+      num_layers: 4
+      num_heads: 8
+      head_dim: 64
+      c_kernel_size: 31
+      m_kernel_size: 31
+      use_rope: true
+      ffn_type: glu
+
+training:
+  augmentation:
+    spectrogram_masking:
+      enabled: false
+    colored_noise:
+      enabled: false
+  loss:
+    ctc:
+      weight: 1.0
+    hmm_forward:
+      weight: 1.0
+      mode: separate
+    reconstruction:
+      weight: 10.0
+      loss_type: L1
+      unmasked_weight: 1
+  iterative_ranking:
+    enabled: false
+    rank_size: 4
+    gamma: 0.9
+    update_every_n_epochs: 1

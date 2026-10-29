@@ -254,6 +254,11 @@ def language_choices() -> list[dict[str, str]]:
 class AsrConfig:
     asr_model: str | Path
     aligner_model: str | Path | None = None
+    #: 用哪个对齐器出字的时间：`"qwen"`（默认，和 ASR 一次调用）或 `"tifa"`（独立后端）。
+    aligner: str = "qwen"
+    #: TIFA 权重（`model.pt`）。只在不空、且 `aligner="tifa"` 时用。
+    tifa_model: str | Path | None = None
+    tifa_precision: str = "16-mixed"
     language: str | None = "Chinese"
     device: str = "cuda:0"
     dtype: str = "bfloat16"
@@ -266,6 +271,19 @@ class AsrConfig:
     #: 预算 2GiB -> 3982MiB、18.4s；识别文本逐字一致。见 `scripts/probe_asr_offload.py`。
     max_vram: str | None = None
     max_ram: str = "96GiB"
+
+    @property
+    def uses_tifa(self) -> bool:
+        return str(self.aligner or "qwen").strip().lower() == "tifa"
+
+    @property
+    def slice_limit(self) -> float:
+        """切片上限。TIFA 的上下文约 1 分钟，超过就不保证稳定。"""
+        if self.uses_tifa:
+            from .tifa_align import MAX_ALIGN_SECONDS
+
+            return min(self.max_slice_seconds, MAX_ALIGN_SECONDS)
+        return self.max_slice_seconds
 
 
 def asr_load_kwargs(config: AsrConfig, dtype: Any) -> dict[str, Any]:
@@ -406,6 +424,7 @@ class AsrEngine:
     def __init__(self, config: AsrConfig) -> None:
         self.config = config
         self._model = None
+        self._tifa = None
         self._workdir: Path | None = None
 
     @property
@@ -426,6 +445,9 @@ class AsrEngine:
 
     def release(self) -> None:
         self._model = None
+        if self._tifa is not None:
+            self._tifa.release()
+            self._tifa = None
         import gc
 
         gc.collect()
@@ -437,18 +459,48 @@ class AsrEngine:
             pass
 
     # ------------------------------------------------------------------ 切片
-    def _extract(self, audio: str | Path, section: Section, target: Path) -> Path:
+    def _extract(self, audio: str | Path, section: Section, target: Path, *,
+                 tifa: bool = False) -> Path:
         ffmpeg = find_ffmpeg()
         if not ffmpeg:
             raise RuntimeError("找不到 ffmpeg，无法切片")
         target.parent.mkdir(parents=True, exist_ok=True)
+        # TIFA 的特征是 48k / mel-80（fmax 8k），切到 16k 会先把高频削掉再插值回去
+        rate = 48000 if tifa else 16000
         command = [ffmpeg, "-v", "error", "-y", "-ss", f"{section.start:.3f}",
                    "-to", f"{section.end:.3f}", "-i", str(audio),
-                   "-ac", "1", "-ar", "16000", str(target)]
+                   "-ac", "1", "-ar", str(rate), str(target)]
         result = subprocess.run(command, capture_output=True, timeout=300, check=False)
         if result.returncode:
             raise RuntimeError(f"切片失败：{result.stderr.decode(errors='replace')[-300:]}")
         return target
+
+    def _align_with_tifa(self, pending: Sequence[tuple[Path, str, float]],
+                         run: AsrRun, requested: str | None) -> list[AlignedChar]:
+        """把攒下来的切片交给 TIFA，一次对齐完，时间换回整首曲的时间轴。"""
+        from .tifa_align import TifaAligner, guess_language, tifa_language
+
+        # 用户选的语言优先；但**文字**能推翻它：ASR 会把日文歌判成 Chinese，
+        # 界面上的「自动」也会被 config 的默认值顶成 Chinese。假名一出现就该走 ja。
+        joined = "".join(text for _clip, text, _offset in pending)
+        language = tifa_language(requested or "zh")
+        script = guess_language(joined)
+        if script == "ja" and language == "zh":
+            language = "ja"
+        if self._tifa is None:
+            self._tifa = TifaAligner(self.config.tifa_model, language=language,
+                                     precision=self.config.tifa_precision)
+        else:
+            self._tifa.language = language
+        charsets = self._tifa.align_many([(clip, text) for clip, text, _ in pending])
+        chars: list[AlignedChar] = []
+        for (clip, text, offset), spans in zip(pending, charsets):
+            if not spans:
+                run.warnings.append(f"切片 {offset:.1f}s 起的这段对齐失败（TIFA 没给出边界）")
+                continue
+            for item_text, start, end in spans:
+                chars.append(AlignedChar(item_text, offset + start, offset + end))
+        return chars
 
     def transcribe_sections(
         self,
@@ -484,12 +536,17 @@ class AsrEngine:
         work.mkdir(parents=True, exist_ok=True)
         self._workdir = work
 
+        tifa_mode = self.config.uses_tifa
+        #: TIFA 要整首一起对齐：先把切片留在盘上，最后一次性过模型
+        pending: list[tuple[Path, str, float]] = []
+
         for index, section in enumerate(sections):
             if progress:
                 progress({"stage": "asr", "index": index + 1, "total": len(sections),
                           "start": section.start, "end": section.end})
-            clip = self._extract(audio, section, work / f"slice-{index:03d}.wav")
-            want_timestamps = self.config.aligner_model is not None
+            clip = self._extract(audio, section, work / f"slice-{index:03d}.wav",
+                                 tifa=tifa_mode)
+            want_timestamps = self.config.aligner_model is not None and not tifa_mode
             tokens = int(min(self.config.max_new_tokens_cap,
                              max(64, section.seconds * self.config.tokens_per_second)))
             # 两次尝试（带/不带 max_new_tokens）都要被同一个 except 兜住：
@@ -519,16 +576,28 @@ class AsrEngine:
             if text:
                 run.text += text
             stamps = getattr(result, "time_stamps", None)
-            if stamps:
-                for item in stamps:
-                    run.chars.append(AlignedChar(
-                        text=str(getattr(item, "text", "")),
-                        start=section.start + float(getattr(item, "start_time", 0.0)),
-                        end=section.start + float(getattr(item, "end_time", 0.0)),
-                    ))
-            clip.unlink(missing_ok=True)
+            if tifa_mode:
+                # 时间留到最后统一对齐；先把切片和文本攒着（别删）
+                if text:
+                    pending.append((clip, text, section.start))
+                else:
+                    clip.unlink(missing_ok=True)
+            else:
+                if stamps:
+                    for item in stamps:
+                        run.chars.append(AlignedChar(
+                            text=str(getattr(item, "text", "")),
+                            start=section.start + float(getattr(item, "start_time", 0.0)),
+                            end=section.start + float(getattr(item, "end_time", 0.0)),
+                        ))
+                clip.unlink(missing_ok=True)
             if on_slice is not None:
                 on_slice(run, index + 1, len(sections))
+
+        if tifa_mode and pending:
+            run.chars.extend(self._align_with_tifa(pending, run, wanted_language))
+            for clip, _text, _offset in pending:
+                clip.unlink(missing_ok=True)
 
         run.elapsed_seconds = time.monotonic() - started
         if torch.cuda.is_available():
@@ -561,6 +630,6 @@ class AsrEngine:
                 f"唱词中间有 {run.max_gap_seconds:.1f}s 的空白（第 {gap_at + 1} 个字之前）："
                 f"慢歌的长句停顿是正常的，但这么大的跳变也可能是对齐器漏了一段音频，"
                 f"核对填词结果时留意")
-        if not run.chars and self.config.aligner_model:
+        if not run.chars and (self.config.aligner_model or tifa_mode):
             run.warnings.append("没有拿到任何时间戳")
         return run
