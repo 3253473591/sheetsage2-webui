@@ -561,14 +561,32 @@ class RunnerSession:
         return {"detail": detail}
 
 
+def pick_asr_model(models_root: Path) -> Path:
+    """挑一个本机装了的识别模型：优先 1.7B，没有就退到最小集的 0.6B。
+
+    以前这里写死 `Qwen3-ASR-1.7B`，而 `setup.bat` 的默认档位（最小集）只下 0.6B
+    ——新机器上第一次点「识别歌词」就会因为找不到权重而失败。
+    """
+    preferred = Path(models_root) / "Qwen3-ASR-1.7B"
+    if (preferred / "config.json").is_file():
+        return preferred
+    for candidate in sorted(Path(models_root).glob("Qwen3-ASR-*")):
+        if (candidate / "config.json").is_file():
+            return candidate
+    return preferred
+
+
 def default_asr_config(models_root: Path | None = None) -> AsrConfig:
-    """默认歌词识别配置：本地 1.7B + 对齐器（专有名词更准，见集成调研 §6）。"""
+    """默认歌词识别配置：本机装了的识别模型 + TIFA（缺失时退回 Qwen）。"""
     from ..bootstrap import PROJECT_ROOT
 
     root = Path(models_root) if models_root is not None else PROJECT_ROOT / "models"
+    aligner = root / "Qwen3-ForcedAligner-0.6B"
     return AsrConfig(
-        asr_model=root / "Qwen3-ASR-1.7B",
-        aligner_model=root / "Qwen3-ForcedAligner-0.6B",
+        asr_model=pick_asr_model(root),
+        # 对齐器没装就别传：`from_pretrained` 会因为缺目录直接失败，
+        # 而默认走的是随包的 TIFA，本来也不需要它（日语才用 Qwen 对齐器）。
+        aligner_model=aligner if (aligner / "config.json").is_file() else None,
         language="Chinese",
         device="cuda:0",
     )

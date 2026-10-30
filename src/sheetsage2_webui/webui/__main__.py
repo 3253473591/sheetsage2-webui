@@ -89,6 +89,30 @@ def resolve(path: str) -> str:
     return str(rooted) if rooted.exists() else path
 
 
+def resolve_asr_model(path: str) -> str:
+    """识别模型：请求的那个不在，就退到本机装了的任意一个。
+
+    `setup.bat` 默认下最小集（只有 0.6B），而这边的默认值是 1.7B——
+    新机器上一进歌词阶段就会「模型权重没找到」。
+    """
+    from .runner import pick_asr_model
+
+    resolved = Path(resolve(path))
+    if (resolved / "config.json").is_file():
+        return str(resolved)
+    fallback = pick_asr_model(PROJECT_ROOT / "models")
+    if (fallback / "config.json").is_file():
+        print(f"  没找到 {resolved.name}，改用 {fallback.name}")
+        return str(fallback)
+    return str(resolved)
+
+
+def resolve_aligner(path: str) -> str | None:
+    """对齐器：没装就不传（默认走随包的 TIFA，Qwen 对齐器只有日语才要）。"""
+    resolved = Path(resolve(path))
+    return str(resolved) if (resolved / "config.json").is_file() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     data_root = Path(args.data_root) if args.data_root else data_root_from_env()
@@ -120,7 +144,8 @@ def main(argv: list[str] | None = None) -> int:
             EngineConfig(model_id=args.model, device=args.device, dtype=args.dtype,
                          preset=args.preset, local_files_only=args.local_files_only,
                          weights_dtype=args.engine_weights),
-            AsrConfig(asr_model=resolve(args.asr_model), aligner_model=resolve(args.aligner),
+            AsrConfig(asr_model=resolve_asr_model(args.asr_model),
+                      aligner_model=resolve_aligner(args.aligner),
                       language=args.language, device=args.asr_device,
                       max_vram=args.asr_max_vram, **asr_options),
             free_between_stages=not args.keep_models,

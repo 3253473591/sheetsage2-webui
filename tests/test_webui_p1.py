@@ -295,6 +295,24 @@ def test_preflight_counts_a_minimal_asr_install(tmp_path):
         module.PROJECT_ROOT = original
 
 
+def test_default_asr_config_falls_back_to_the_installed_model(tmp_path):
+    """最小集只有 0.6B：默认配置不能死认 1.7B，也不能硬塞一个没装的 Qwen 对齐器。"""
+    from sheetsage2_webui.webui.runner import default_asr_config, pick_asr_model
+
+    models = tmp_path / "models"
+    (models / "Qwen3-ASR-0.6B").mkdir(parents=True)
+    (models / "Qwen3-ASR-0.6B" / "config.json").write_text("{}", encoding="utf-8")
+
+    assert pick_asr_model(models).name == "Qwen3-ASR-0.6B"
+    config = default_asr_config(models)
+    assert Path(str(config.asr_model)).name == "Qwen3-ASR-0.6B"
+    assert config.aligner_model is None          # 没装就不传，默认走随包的 TIFA
+
+    (models / "Qwen3-ASR-1.7B").mkdir()
+    (models / "Qwen3-ASR-1.7B" / "config.json").write_text("{}", encoding="utf-8")
+    assert pick_asr_model(models).name == "Qwen3-ASR-1.7B"      # 装了 1.7B 还是优先它
+
+
 def test_env_exposes_preflight(tmp_path):
     client, _ = make_client(tmp_path)
     with client:
