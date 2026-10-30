@@ -1486,6 +1486,25 @@ def test_trash_purge_evicts_the_oldest_when_over_the_size_cap(tmp_path):
             "新的"]
 
 
+def test_trash_purge_also_runs_on_a_timer(tmp_path):
+    """不重启、也不再删东西：后台定时器到点就会清掉过期条目。
+
+    没有这条定时的话，「7 天自动清」只在启动和删除时生效——服务连开一周而用户
+    一个工程都没删，过期条目会一直躺在 `.trash/` 里。
+    """
+    client, manager = make_client(tmp_path, fake_runners(), trash_purge_interval=0.05)
+    with client:
+        job = upload(client, name="定时清理.wav", plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        client.delete(f"/api/jobs/{job['id']}")
+        entry = _trash_entry(manager, "定时清理")
+        _age(entry, 8)                              # 已经过期，但没有触发任何删除
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and entry.exists():
+            time.sleep(0.05)
+        assert not entry.exists()
+
+
 def test_rerunning_rebuilds_the_bundle_and_bumps_the_artifact_rev(tmp_path):
     """G3：重跑之后下载到的**一定是新结果**（缓存键带产物版本戳）。"""
     marker = {"tag": "v1"}

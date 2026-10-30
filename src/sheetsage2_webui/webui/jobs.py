@@ -66,9 +66,12 @@ MAX_EVENTS = 4000
 #: 软删除的回收站（数据根下的 `.trash/`，点开头所以 `_load_existing` 不扫它）。
 #: 删除 = 把工程目录 `rename` 进去（同卷原子），用户感知和"删了"一样，但能恢复。
 TRASH_DIRNAME = ".trash"
-#: 回收站保留策略：超过这些就真删（`_purge_trash` 在启动与每次删除时跑）。
+#: 回收站保留策略：超过这些就真删（`_purge_trash` 在启动、每次删除、以及定时三处跑）。
 TRASH_MAX_DAYS = 7.0
 TRASH_MAX_BYTES = 2 * 1024 ** 3
+#: 定时清理的节拍。一小时扫一次目录很便宜；没有这条的话，**七天不删东西也不重启**
+#: 过期条目就一直躺着——「7 天自动清」就成了空话。
+TRASH_PURGE_INTERVAL = 3600.0
 
 #: 取消后的"冷静期"（秒，G14）：这段时间里的「开始」当作手抖连点，直接 409。
 CANCEL_COOLDOWN_SECONDS = 5.0
@@ -825,6 +828,7 @@ class JobManager:
         watchdog_interval: float = 1.0,
         trash_max_days: float = TRASH_MAX_DAYS,
         trash_max_bytes: float = TRASH_MAX_BYTES,
+        trash_purge_interval: float = TRASH_PURGE_INTERVAL,
         use_trash: bool = True,
         probe_upload: bool = False,
     ) -> None:
@@ -855,6 +859,11 @@ class JobManager:
         self.use_trash = bool(use_trash)
         self.trash_max_days = float(trash_max_days)
         self.trash_max_bytes = float(trash_max_bytes)
+        #: 回收站也定时扫（见 `TRASH_PURGE_INTERVAL`）：只靠"启动 + 删除"的话，
+        #: 服务连开一周、用户又没删过东西，过期条目是清不掉的。
+        self.trash_purge_interval = max(0.05, float(trash_purge_interval))
+        self._trash_stop = threading.Event()
+        self._trash_worker: threading.Thread | None = None
         #: 上传后是否做内容体检（G10）。默认关——直接 `JobManager(...)` 的测试不上 ffmpeg；
         #: 产品入口 `create_app` 会显式打开。
         self.probe_upload = bool(probe_upload)
@@ -867,6 +876,9 @@ class JobManager:
         # 命令行跑出来的当"只读产物"收进来）
         self._load_existing()
         self._purge_trash()
+        self._trash_worker = threading.Thread(target=self._purge_loop,
+                                              name="sheetsage-trash", daemon=True)
+        self._trash_worker.start()
 
     # ---------------------------------------------------------------- 启动恢复
     def _load_existing(self) -> None:
@@ -1110,9 +1122,21 @@ class JobManager:
                                                   name="sheetsage-watchdog", daemon=True)
                 self._watchdog.start()
 
+    def _purge_loop(self) -> None:
+        """定时清回收站。清理失败只跳过这一轮，绝不把服务带走。"""
+        while not self._trash_stop.wait(self.trash_purge_interval):
+            try:
+                self._purge_trash()
+            except Exception:      # noqa: BLE001 - 目录被占用/权限问题都不该影响识别
+                continue
+
     def shutdown(self, timeout: float = 5.0) -> None:
         """请求停止；正在跑的阶段不会被粗暴中断。"""
         self._stop.set()
+        self._trash_stop.set()
+        if self._trash_worker is not None:
+            self._trash_worker.join(timeout=timeout)
+            self._trash_worker = None
         for _ in self._threads:
             self._queue.put(None)
         for thread in self._threads:

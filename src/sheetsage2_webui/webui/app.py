@@ -50,7 +50,8 @@ from ..bootstrap import PROJECT_ROOT, find_ffmpeg
 from ..svp import (DEFAULT_PARTS, SVP_PARTS, SVP_VERSION, SvpUnavailable,
                    available_parts, build_svp, cache_key, export_path, load_project)
 from .backup import BackupRejected
-from .jobs import (DEFAULT_PLAN, PHASE_LABELS, PHASES, ImportedProject, Job, JobManager,
+from .jobs import (DEFAULT_PLAN, PHASE_LABELS, PHASES, TRASH_MAX_BYTES, TRASH_MAX_DAYS,
+                   TRASH_PURGE_INTERVAL, ImportedProject, Job, JobManager,
                    StageNotReady, StaleRevision, UploadRejected, asr_model_label,
                    default_options, is_internal, param_choices, safe_name, validate_options)
 from .lanes import build_lanes
@@ -168,6 +169,9 @@ def create_app(
     hard_timeout: float | Mapping[str, float] | None = None,
     watchdog_interval: float = 1.0,
     use_trash: bool = True,
+    trash_max_days: float = TRASH_MAX_DAYS,
+    trash_max_bytes: float = TRASH_MAX_BYTES,
+    trash_purge_interval: float = TRASH_PURGE_INTERVAL,
     probe_upload: bool = True,
     pair_token: str | None = None,
     require_token: bool = False,
@@ -200,6 +204,9 @@ def create_app(
                              lock_params=lock_params, option_defaults=defaults,
                              stall_timeout=stall_timeout, hard_timeout=hard_timeout,
                              watchdog_interval=watchdog_interval, use_trash=use_trash,
+                             trash_max_days=trash_max_days,
+                             trash_max_bytes=trash_max_bytes,
+                             trash_purge_interval=trash_purge_interval,
                              probe_upload=probe_upload)
     static_ready = (STATIC_DIR / "index.html").is_file()
 
