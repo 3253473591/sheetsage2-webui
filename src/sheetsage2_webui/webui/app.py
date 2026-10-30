@@ -739,6 +739,22 @@ def create_app(
         这里回 204 —— 不然日志里天天一行 `404 /favicon.ico`，看着像出错了。"""
         return Response(status_code=204)
 
+    # ------------------------------------------------------------------ 兜底
+    @app.api_route("/api/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE",
+                                                "HEAD", "OPTIONS"],
+                   include_in_schema=False)
+    async def unknown_api(rest: str, request: Request) -> Response:
+        """`/api/*` 下没匹配上的路径，回一个**说得清**的 JSON 404。
+
+        不加这条的话，请求会落到最后挂的 `StaticFiles`——它只接受 GET/HEAD，于是非 GET
+        的请求拿到一个光秃秃的 `405 Method Not Allowed`，看不出是"接口不存在"还是
+        "方法不对"（前端只会显示 "Method Not Allowed"）。实测踩过：删除工程时路径里
+        少了一段，报的就是这个。
+        """
+        return JSONResponse(status_code=404, content={
+            "detail": f"没有这个接口：{request.method} {request.url.path}",
+            "method": request.method, "path": request.url.path})
+
     if static_ready:
         # 必须最后挂：放在 API 路由之后，`/api/*` 才不会被这条兜底吃掉
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

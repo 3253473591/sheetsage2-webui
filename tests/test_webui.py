@@ -440,6 +440,20 @@ def test_env_reports_both_models_and_phases(tmp_path):
     assert body["max_upload_mb"] == 512.0
 
 
+def test_unknown_api_path_returns_a_speakable_404(tmp_path):
+    """`/api/*` 下没匹配上的路径不能落到静态处理器（那个只认 GET，会给个光秃秃的 405）。"""
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        missing = client.delete("/api/jobs/")
+        typo = client.delete("/api/jobz/abc")
+    for response in (missing, typo):
+        assert response.status_code == 404
+        body = response.json()
+        assert "没有这个接口" in body["detail"]
+        assert body["method"] == "DELETE"
+        assert body["path"].startswith("/api/")
+
+
 def test_lyrics_needs_transcribe_first(tmp_path):
     """工作流是 扒谱 → 歌词：没扒谱就点歌词，后端回 409 + "请先完成扒谱"。"""
     client, _ = make_client(tmp_path, fake_runners())
