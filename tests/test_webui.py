@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -1417,6 +1418,72 @@ def test_delete_with_permanent_flag_skips_the_trash(tmp_path):
         assert response.status_code == 200
         assert client.get("/api/trash").json()["entries"] == []
         assert not job_dir(manager, job).exists()
+
+
+# --------------------------------------------------- 回收站的保留策略（7 天 / 2GB）
+def _trash_entry(manager, name: str) -> Path:
+    """按工程名找到它在 `.trash/` 里的目录（条目名带工程名和 id）。"""
+    for entry in manager.trash_root.iterdir():
+        if name in entry.name:
+            return entry
+    raise AssertionError(f"回收站里没有 {name}")
+
+
+def _age(path: Path, days: float) -> None:
+    """把目录的修改时间往前拨——`_purge_trash` 判断过期用的就是它。"""
+    stamp = time.time() - days * 86400.0
+    os.utime(path, (stamp, stamp))
+
+
+def test_trash_purge_keeps_entries_inside_the_age_window(tmp_path):
+    """6 天前删的还在 7 天窗口里，不能被清掉。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        job = upload(client, name="六天前.wav", plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        client.delete(f"/api/jobs/{job['id']}")
+        _age(_trash_entry(manager, "六天前"), 6)
+        manager._purge_trash()                      # 等价于"重启一次服务"
+        assert len(client.get("/api/trash").json()["entries"]) == 1
+
+
+def test_trash_purge_drops_entries_older_than_seven_days(tmp_path):
+    """8 天前删的会被真删——不用等七天，把 mtime 拨回去就行。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        job = upload(client, name="八天前.wav", plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        client.delete(f"/api/jobs/{job['id']}")
+        entry = _trash_entry(manager, "八天前")
+        _age(entry, 8)
+        manager._purge_trash()
+        assert not entry.exists()
+        assert client.get("/api/trash").json()["entries"] == []
+
+
+def test_trash_purge_evicts_the_oldest_when_over_the_size_cap(tmp_path):
+    """总量超上限就砍最旧的——把上限调小即可验，不用真堆 2GB。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        for name in ("旧的.wav", "新的.wav"):
+            job = upload(client, name=name, plan="transcribe").json()
+            wait_for_state(client, job["id"], {"done"})
+            client.delete(f"/api/jobs/{job['id']}")
+        old_entry = _trash_entry(manager, "旧的")
+        new_entry = _trash_entry(manager, "新的")
+        _age(old_entry, 1)
+        _age(new_entry, 0)
+
+        def size_of(path: Path) -> int:
+            return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+        # 上限卡在"只装得下新的那一份"，于是砍掉旧的之后刚好不超
+        manager.trash_max_bytes = size_of(new_entry) + 1
+        manager._purge_trash()
+        assert not old_entry.exists()               # 最旧的先被砍
+        assert new_entry.exists()                   # 剩下的那份还在窗口里
+        assert [row["name"] for row in client.get("/api/trash").json()["entries"]] == [
+            "新的"]
 
 
 def test_rerunning_rebuilds_the_bundle_and_bumps_the_artifact_rev(tmp_path):
