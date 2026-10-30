@@ -179,7 +179,9 @@ export function runChain(id: string): Promise<JobSnapshot> {
  */
 export async function deleteJob(id: string, permanent = false): Promise<void> {
   const query = permanent ? '?permanent=true' : ''
-  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}${query}`,
+  // 注意：`fetchWithTimeout` 自己会拼 BASE，这里**不能**再写一遍
+  // （写了就是 /api/api/jobs/…，会 404/405）
+  const response = await fetchWithTimeout(`/jobs/${encodeURIComponent(id)}${query}`,
                                          { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '删除失败'))
 }
@@ -193,14 +195,14 @@ export async function fetchTrash(): Promise<TrashEntry[]> {
 /** 从回收站恢复一个工程（目录挪回 output/），返回恢复后的快照。 */
 export async function restoreTrash(entryId: string): Promise<JobSnapshot> {
   const response = await fetchWithTimeout(
-    `${BASE}/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST' })
+    `/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST' })
   if (!response.ok) throw new Error(await readError(response, '恢复失败'))
   return (await response.json()) as JobSnapshot
 }
 
 /** 彻底删掉回收站里的一项（不可恢复）。 */
 export async function purgeTrash(entryId: string): Promise<void> {
-  const response = await fetchWithTimeout(`${BASE}/trash/${encodeURIComponent(entryId)}`,
+  const response = await fetchWithTimeout(`/trash/${encodeURIComponent(entryId)}`,
                                          { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '彻底删除失败'))
 }
@@ -279,7 +281,7 @@ export function uploadStem(
 }
 
 export async function deleteStem(id: string, kind: 'vocal' = 'vocal'): Promise<JobSnapshot> {
-  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}/stems/${kind}`,
+  const response = await fetchWithTimeout(`/jobs/${encodeURIComponent(id)}/stems/${kind}`,
                                          { method: 'DELETE' })
   if (!response.ok) throw new Error(await readError(response, '移除失败'))
   return (await response.json()) as JobSnapshot
@@ -307,7 +309,7 @@ export async function setJobOptions(
 ): Promise<JobSnapshot> {
   const body: Record<string, unknown> = { ...values }
   if (expectedRev !== undefined) body.expected_rev = expectedRev
-  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}/options`, {
+  const response = await fetchWithTimeout(`/jobs/${encodeURIComponent(id)}/options`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -335,7 +337,7 @@ export async function setJobOptions(
 
 /** 清掉一个工程的可重算缓存（zip / SVP / 波形 / prev），释放磁盘（G11）。 */
 export async function cleanupJob(id: string): Promise<{ freed: number }> {
-  const response = await fetchWithTimeout(`${BASE}/jobs/${encodeURIComponent(id)}/cleanup`,
+  const response = await fetchWithTimeout(`/jobs/${encodeURIComponent(id)}/cleanup`,
                                          { method: 'POST' })
   if (!response.ok) throw new Error(await readError(response, '清理失败'))
   return (await response.json()) as { freed: number }
