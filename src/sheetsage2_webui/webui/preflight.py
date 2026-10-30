@@ -24,9 +24,10 @@ from ..bootstrap import PROJECT_ROOT, find_ffmpeg
 
 #: 扒谱权重目录（`resolve_model_path` 优先认它）。缺了会自动退到 HuggingFace 仓库 id。
 SHEETSAGE_MODEL_DIR = PROJECT_ROOT / "models" / "SheetSage2"
-#: 歌词识别权重（可选，缺了只影响歌词阶段）。
-ASR_MODEL_DIR = PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B"
-#: 逐字对齐器权重（可选，缺了只影响歌词对齐）。
+#: 识别模型目录的前缀。**不能写死 1.7B**：最小集下的是 0.6B，1.7B 是可选项，
+#: 写死会让只装了最小集的机器误报「歌词权重不完整」。
+ASR_MODEL_GLOB = "Qwen3-ASR-*"
+#: 逐字对齐器权重（Qwen 版，只有日语才需要）。
 ALIGNER_MODEL_DIR = PROJECT_ROOT / "models" / "Qwen3-ForcedAligner-0.6B"
 #: 随包带的 TIFA 对齐器（中/粤/英）；在它就在，不必再下 Qwen 对齐器。
 TIFA_MODEL_DIR = PROJECT_ROOT / "models" / "TIFA-1.0"
@@ -37,6 +38,12 @@ DISK_WARN_BYTES = 2 * 1024 ** 3
 
 def _has_model(directory: Path) -> bool:
     return (directory / "config.json").is_file()
+
+
+def asr_model_dirs() -> list[Path]:
+    """本机实际装了的识别模型（`models/Qwen3-ASR-0.6B` / `-1.7B` …）。"""
+    root = PROJECT_ROOT / "models"
+    return sorted(path for path in root.glob(ASR_MODEL_GLOB) if _has_model(path))
 
 
 def cuda_available() -> bool | None:
@@ -108,16 +115,23 @@ def preflight(data_root: str | Path | None = None) -> list[dict[str, Any]]:
         })
 
     # 4. 歌词权重（可选：缺了只影响歌词识别）。
-    #    对齐器有两种：随包的 TIFA（中/粤/英）和 Qwen3-ForcedAligner（日语才要）。
-    #    所以只要 ASR + 其中任意一个在，就算就绪。
-    if _has_model(ASR_MODEL_DIR) and (_has_model(TIFA_MODEL_DIR)
-                                      or _has_model(ALIGNER_MODEL_DIR)):
+    #    识别模型认 `Qwen3-ASR-*`（最小集 0.6B，1.7B 可选）；对齐器有两种——
+    #    随包的 TIFA（中/粤/英）和 Qwen3-ForcedAligner（日语才要）。
+    asr_models = asr_model_dirs()
+    aligner_ready = _has_model(TIFA_MODEL_DIR) or _has_model(ALIGNER_MODEL_DIR)
+    if asr_models and aligner_ready:
         checks.append({"key": "lyrics_model", "level": "ok", "title": "歌词识别权重就绪"})
     else:
+        missing: list[str] = []
+        if not asr_models:
+            missing.append("识别模型（Qwen3-ASR）")
+        if not aligner_ready:
+            missing.append("逐字对齐器")
         checks.append({
             "key": "lyrics_model", "level": "warn",
-            "title": "歌词识别权重不完整（缺 Qwen3-ASR，或两种对齐器都不在）",
-            "detail": "歌词识别会不可用；只想扒谱可以忽略",
+            "title": "歌词识别权重不完整：" + "、".join(missing),
+            "detail": ("跑一次 setup.bat 把模型下齐（最小集 4.3 GB，对齐器随包带）；"
+                       "只想扒谱可以忽略"),
         })
 
     # 5. 显卡：没卡就 CPU 跑，会很慢，提前说一声。

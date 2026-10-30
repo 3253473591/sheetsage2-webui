@@ -279,6 +279,22 @@ def test_preflight_returns_the_expected_checks(tmp_path):
     assert all(item["level"] in {"ok", "warn", "error", "info"} for item in checks)
 
 
+def test_preflight_counts_a_minimal_asr_install(tmp_path):
+    """最小集只装 0.6B 也算"识别模型就绪"（曾经写死 1.7B，笔记本上误报未安装）。"""
+    from sheetsage2_webui.webui import preflight as module
+
+    models = tmp_path / "models"
+    for name in ("Qwen3-ASR-0.6B", "TIFA-1.0"):
+        (models / name).mkdir(parents=True)
+        (models / name / "config.json").write_text("{}", encoding="utf-8")
+    original = module.PROJECT_ROOT
+    module.PROJECT_ROOT = tmp_path
+    try:
+        assert [path.name for path in module.asr_model_dirs()] == ["Qwen3-ASR-0.6B"]
+    finally:
+        module.PROJECT_ROOT = original
+
+
 def test_env_exposes_preflight(tmp_path):
     client, _ = make_client(tmp_path)
     with client:
