@@ -25,6 +25,8 @@ dist/
 wheels/
 # 本地下载的模型权重（十几 GB）
 models/
+# HuggingFace 的模块/权重缓存（现在钉在工程目录下）
+.cache/
 # 测试音频：都是**商业歌曲**，不能随仓库发布；缺了测试会 skip
 samples/
 # 调研期间从 HF 拉下来做参照的模型仓库文件

@@ -31,6 +31,16 @@ def resolve_model_path(model_id: str) -> str:
         return str(local)
     return str(model_id)
 
+def local_backbone_path() -> Path | None:
+    """本机有没有 MERT 骨架（SheetSage2 是 LoRA 适配器格式时要它）。
+
+    模型代码默认按 `base_model_name_or_path` 的仓库 id 走 `cached_file`，
+    **脱网就炸**；我们把权重下在 `models/MERT-v2-FullSong`，找到就用它。
+    """
+    backbone = PROJECT_ROOT / "models" / "MERT-v2-FullSong"
+    return backbone if (backbone / "model.safetensors").is_file() else None
+
+
 ProgressFn = Callable[[Mapping[str, Any]], None]
 
 
@@ -166,6 +176,14 @@ class SheetSage2Engine:
             synced = sync_remote_code_cache(Path(model_path))
             if synced:
                 self.notes.append(f"补齐 {synced} 个 remote code 文件到模块缓存")
+
+        # SheetSage2 是 LoRA 适配器格式时，要另外把 MERT 骨架读进来（它默认按
+        # `base_model_name_or_path` 的 HF 仓库 id 走 `cached_file`，**脱网就炸**）。
+        # 我们本来就把那份权重下到 `models/MERT-v2-FullSong`，直接告诉它路径。
+        backbone = local_backbone_path()
+        if backbone is not None:
+            kwargs.setdefault("base_model_path", str(backbone))
+            self.notes.append(f"MERT 骨架走本地：{backbone.name}")
 
         try:
             model = AutoModel.from_pretrained(model_path, **kwargs)

@@ -141,11 +141,45 @@ def ensure_utf8_stdio() -> None:
             pass
 
 
+def huggingface_cache_dir() -> Path:
+    """HuggingFace 缓存放哪：**默认落在工程目录下**，不用机器级的 `HF_HOME`。
+
+    为什么：`trust_remote_code` 每次加载 SheetSage2 都会往
+    `<HF_HOME>/modules/transformers_modules/...` 写 .py。机器级 `HF_HOME`（比如
+    `D:\\cache`）有两个坑——多个安装共用同一份缓存时，两个进程同时写同一个文件会
+    报 `PermissionError: [Errno 13]`；换台机器路径也可能不可写。
+    放在工程目录里，内测包就是自包含的。
+    """
+    return PROJECT_ROOT / ".cache" / "huggingface"
+
+
+def ensure_hf_cache() -> None:
+    """把 HF 的缓存钉在工程目录下（`SHEETSAGE_KEEP_HF_HOME=1` 时尊重外部设置）。
+
+    实测踩过：机器级 `HF_HOME=D:\\cache` 被两个安装共用，两个进程同时往
+    `modules/transformers_modules/SheetSage2/modeling_sheetsage2.py` 写就会报
+    `PermissionError: [Errno 13]`（Windows 的共享冲突）。模型权重我们自己下到
+    `models/`，HF 这边只是模块缓存，钉到工程里既不会串，也符合"解压即用"。
+    """
+    if os.environ.get("SHEETSAGE_KEEP_HF_HOME"):
+        return
+    root = huggingface_cache_dir()
+    os.environ["HF_HOME"] = str(root)
+    os.environ["HF_MODULES_CACHE"] = str(root / "modules")
+    try:
+        (root / "modules").mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # 建不出来就算了：让 transformers 自己报它那个更明确的错
+        pass
+
+
 def prepare() -> dict[str, str | None]:
     """幂等地准备好运行环境，返回可直接打印的诊断信息。"""
     ensure_kmp_guard()
     ensure_utf8_stdio()
+    ensure_hf_cache()
     ffmpeg = find_ffmpeg()
     if ffmpeg:
         os.environ["SHEETSAGE_FFMPEG"] = ffmpeg
-    return {"ffmpeg": ffmpeg, "project_root": str(PROJECT_ROOT)}
+    return {"ffmpeg": ffmpeg, "project_root": str(PROJECT_ROOT),
+            "hf_home": os.environ.get("HF_HOME")}
