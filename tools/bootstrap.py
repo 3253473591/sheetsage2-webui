@@ -43,6 +43,20 @@ VENV = ROOT / ".venv"
 VENV_PYTHON = VENV / "Scripts" / "python.exe"
 STATE = ROOT / "bootstrap-state.json"
 BUNDLED_PYTHON = ROOT / "runtime" / "python" / "python.exe"
+#: 「这次先不下模型」的标记。`webui.bat` 看到它就不会直接启动，而是再问一次四个选项。
+MODELS_PENDING = ROOT / "models" / ".models-pending"
+
+
+def mark_models_pending(pending: bool = True) -> None:
+    """记下「模型还没下」。选 4 时写、真正下完时删。"""
+    try:
+        if pending:
+            MODELS_PENDING.parent.mkdir(parents=True, exist_ok=True)
+            MODELS_PENDING.write_text("这次先不下模型，下次启动要再问一次\n", encoding="utf-8")
+        else:
+            MODELS_PENDING.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 ALL_STEPS = ("check", "venv", "torch", "pip", "models", "selfcheck")
 
@@ -224,7 +238,9 @@ def step_models(manifest: dict, *, mode: str, with_17b: bool, with_ja: bool,
     models = manifest["models"]
     repositories = models["repositories"]
     if mode == "skip":
-        say("    --models skip：跳过")
+        say("    这次先不下模型（下次启动还会再问）")
+        if not dry_run:
+            mark_models_pending()
         return []
 
     repos = chosen_repos(manifest, mode, with_17b, with_ja)
@@ -259,6 +275,7 @@ def step_models(manifest: dict, *, mode: str, with_17b: bool, with_ja: bool,
         done_before += info["bytes"]
         results.append(result)
     say(f"    模型下完：累计 {human_bytes(min(done_before, plan))}/{human_bytes(plan)}")
+    mark_models_pending(False)
     return results
 
 
@@ -348,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
         steps = ["check"]
 
     mode = args.models
+    with_17b = args.with_17b
+    with_ja = args.with_ja
     if mode is None:
         if "models" not in steps:
             mode = "skip"
@@ -355,14 +374,20 @@ def main(argv: list[str] | None = None) -> int:
             mode = "minimal"                        # 非交互/预演：默认最小集
         else:
             say()
-            say("  模型档位（1.7B 识别模型是**可选项**）：")
-            say("    1  最小集：SheetSage2 + MERT + 0.6B 识别  约 4.3 GB  —— 默认")
-            say("       （中文/粤语/英语的逐字对齐用包里自带的 TIFA，不用再下对齐器）")
-            say("    2  全量：再加 1.7B 识别模型（专有名词更准）        +4.5 GB")
-            say("    3  先不下模型（只想看界面）")
-            say("  要唱**日语**歌的话，另外加 --with-ja 下 Qwen 对齐器（+1.7 GB）")
-            answer = input("  选一个 1/2/3（回车 = 1）: ").strip() or "1"
-            mode = {"1": "minimal", "2": "full", "3": "skip"}.get(answer, "minimal")
+            say("  这次要下载哪一套？（说明见 README）")
+            say("    1  默认（中/粤/英）                  约 4.3 GB  —— 默认")
+            say("    2  日语特供                                +1.7 GB")
+            say("    3  提高歌词识别精度（适合大显存）          +4.5 GB")
+            say("    4  暂不下载（下次启动还会再问）")
+            answer = input("  选一个 1/2/3/4（回车 = 1）: ").strip() or "1"
+            if answer == "2":
+                mode, with_ja = "minimal", True
+            elif answer == "3":
+                mode, with_17b = "minimal", True
+            elif answer == "4":
+                mode = "skip"
+            else:
+                mode = "minimal"
 
     say()
     say("  SheetSage2 Studio · 内测包首次运行")
@@ -381,8 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     if "pip" in steps:
         step_pip(manifest, dry_run=args.dry_run)
     if "models" in steps:
-        model_results = step_models(manifest, mode=mode, with_17b=args.with_17b,
-                                    with_ja=args.with_ja, dry_run=args.dry_run)
+        model_results = step_models(manifest, mode=mode, with_17b=with_17b,
+                                    with_ja=with_ja, dry_run=args.dry_run)
     if "selfcheck" in steps:
         report["selfcheck"] = step_selfcheck(manifest, model_results, dry_run=args.dry_run)
 

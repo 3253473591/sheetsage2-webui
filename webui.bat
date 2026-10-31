@@ -22,6 +22,10 @@ rem    set SHEETSAGE_NO_BROWSER=1    do not open a browser
 rem
 rem  First run: .venv does not exist yet, so we hand over to
 rem  tools\bootstrap.py, which uses the bundled Python.
+rem
+rem  Models pending: if the tester picked "download later" last time,
+rem  bootstrap drops models\.models-pending. We see it here and ask
+rem  again instead of launching with no weights.
 rem ============================================================
 chcp 65001 >nul 2>nul
 setlocal
@@ -30,20 +34,30 @@ cd /d "%~dp0"
 set "PY=.venv\Scripts\python.exe"
 set "RUNTIME=runtime\python\python.exe"
 
-if exist "%PY%" goto launch
+if exist "%PY%" goto models_check
 
 echo.
 echo   First run - preparing the environment.
-echo   Downloads torch about 1.8 GB, plus the models, minimal set
-echo   about 4.3 GB (the TIFA aligner is bundled, no extra download).
-echo   The 1.7B ASR model is optional; so is the Qwen aligner, only
-echo   needed for Japanese songs (setup.bat --with-ja).
+echo   Downloads torch about 1.8 GB, then asks which model set to
+echo   fetch. The smallest one is about 4.3 GB and already covers
+echo   Chinese, Cantonese and English; Japanese and a bigger ASR
+echo   model are optional extras.
 echo   It is resumable: if it stops, run webui.bat again.
 echo.
 
 if not exist "%RUNTIME%" goto broken
 
 "%RUNTIME%" "tools\bootstrap.py"
+if errorlevel 1 goto setup_failed
+goto launch
+
+:models_check
+if not exist "models\.models-pending" goto launch
+echo.
+echo   Models were not downloaded last time - asking again.
+echo.
+if not exist "%RUNTIME%" goto broken
+"%RUNTIME%" "tools\bootstrap.py" --steps models
 if errorlevel 1 goto setup_failed
 
 :launch
