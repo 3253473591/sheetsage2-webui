@@ -236,6 +236,51 @@ export function useStudio() {
     }, 1500)
   }
 
+  // ------------------------------------------------------- 运行中的兜底轮询
+  // SSE 是主通道，但它会**静默死掉**：笔记本合盖、切换网络、代理重启之后
+  // EventSource 不一定报错，界面就一直停在旧进度上，用户只能刷新。
+  // 所以只要有阶段在跑，就再开一条 3 秒一次的轮询兜底——流量很小（一个快照
+  // 几十 KB），但"进度不动"这种投诉不会再有。
+  let pollHandle: number | null = null
+
+  function stopPolling(): void {
+    if (pollHandle !== null) {
+      window.clearInterval(pollHandle)
+      pollHandle = null
+    }
+  }
+
+  function startPolling(): void {
+    if (pollHandle !== null) return
+    pollHandle = window.setInterval(async () => {
+      const job = active.value
+      if (!job) {
+        stopPolling()
+        return
+      }
+      if (TERMINAL_STATES.has(job.state) && !job.cancel_requested) {
+        stopPolling()
+        return
+      }
+      try {
+        upsert(await api.getJob(job.id))
+      } catch {
+        /* 拉不到就下一轮再试 */
+      }
+    }, 3000)
+  }
+
+  /** 页面回到前台 / 网络恢复：SSE 可能已经死了，拉一次快照并补开事件流。 */
+  function revive(): void {
+    const job = active.value
+    if (!job) return
+    void refreshArtifacts()
+    if (!TERMINAL_STATES.has(job.state)) {
+      startPolling()
+      if (!unsubscribe) openStream(job.id)
+    }
+  }
+
   // ---------------------------------------------------------------- 数据
   async function refreshArtifacts(): Promise<void> {
     const id = activeId.value
@@ -325,7 +370,10 @@ export function useStudio() {
     if (known) {
       // 立刻用已有数据渲染，再拉一次最新快照（可能已经跑完了）
       void refreshArtifacts()
-      if (!TERMINAL_STATES.has(known.state)) openStream(id)
+      if (!TERMINAL_STATES.has(known.state)) {
+        openStream(id)
+        startPolling()
+      }
       return
     }
     await refreshArtifacts()
@@ -434,6 +482,7 @@ export function useStudio() {
       }))
       await loadPeaks(job.id)
       if (!unsubscribe && !TERMINAL_STATES.has(job.state)) openStream(job.id)
+      startPolling()
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     } finally {
@@ -576,11 +625,23 @@ export function useStudio() {
     }
   }
 
+  // 合盖 / 换网 / 代理重启之后 SSE 会静默死掉：一回前台就补拉快照、补开事件流。
+  const onVisible = (): void => {
+    if (!document.hidden) revive()
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('online', revive)
+  }
+
   onUnmounted(() => {
     disposed = true
     detach()
     stopHealthWatch()
     stopCancelWatch()
+    stopPolling()
+    window.removeEventListener('visibilitychange', onVisible)
+    window.removeEventListener('online', revive)
   })
 
   /** 回到"没有选中工程"的状态：主区显示拖拽提示，后台任务照跑。 */
