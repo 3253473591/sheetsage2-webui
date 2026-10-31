@@ -217,7 +217,7 @@ class EngineProvider:
                     progress.log("扒谱参数变了，按新参数重新加载模型")
             if self._engine is None:
                 if progress is not None:
-                    progress.set(0.01, "首次运行：正在把模型加载进显存（约 30s）")
+                    progress.set(0.01, "加载模型")
                 engine = SheetSage2Engine(config)
                 engine.load()
                 self._engine = engine
@@ -288,7 +288,7 @@ class AsrProvider:
                     progress.log("换了识别模型，重新加载")
             if self._engine is None:
                 if progress is not None:
-                    progress.set(0.06, f"加载 {Path(str(config.asr_model)).name}（约 20s）")
+                    progress.set(0.06, f"加载 {Path(str(config.asr_model)).name}")
                 engine = AsrEngine(config)
                 engine.load()
                 self._engine = engine

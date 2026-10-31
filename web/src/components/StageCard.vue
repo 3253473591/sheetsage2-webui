@@ -117,12 +117,13 @@ const etaText = computed(() => {
     </div>
     <pre v-if="showErrorDetail && stage.error_detail" class="sg-error-detail">{{ stage.error_detail }}</pre>
 
-    <div v-if="check" class="sg-check" :class="{ bad: !check.ok }" :title="check.problems.join('\n')">
-      自检 {{ check.checked }}/{{ check.total }}
-      <template v-if="!check.ok && check.missing.length">
+    <!-- 自检只在**没过**的时候占一行：通过就别再挂一个"自检 21/21 · 通过"，
+         那种标签等于把界面当说明书。 -->
+    <div v-if="check && !check.ok" class="sg-check bad" :title="check.problems.join('\n')">
+      自检未通过
+      <template v-if="check.missing.length">
         · 缺 {{ check.missing.slice(0, 3).join('、') }}{{ check.missing.length > 3 ? ' 等' : '' }}
       </template>
-      <template v-else-if="check.ok">通过</template>
     </div>
 
     <div class="params" :class="{ collapsed: !showParams }">

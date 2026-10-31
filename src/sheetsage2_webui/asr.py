@@ -530,6 +530,16 @@ class AsrEngine:
                            f"装一下 `g2pflow[lstm]` 和 lightning 就能用")
         return True, ""
 
+    @staticmethod
+    def _pick_align_mode(text: str) -> str:
+        """第一次拿到文字时定语种：日语走 Qwen 时间戳，其余走 TIFA。
+
+        ASR 经常把日文歌判成 Chinese，所以**看字**（假名）而不是看它报的语言。
+        """
+        from .tifa_align import guess_language
+
+        return "ja" if guess_language(text) == "ja" else "tifa"
+
     def _qwen_aligner_ready(self) -> bool:
         """Qwen 对齐器权重在不在。它只有日语要用，所以默认档位下通常没有。"""
         model = self.config.aligner_model
@@ -560,17 +570,24 @@ class AsrEngine:
         return chars
 
     def _align_with_tifa(self, pending: Sequence[tuple[Path, str, float]],
-                         run: AsrRun, requested: str | None) -> list[AlignedChar]:
-        """把攒下来的切片交给 TIFA，一次对齐完，时间换回整首曲的时间轴。"""
+                         run: AsrRun, requested: str | None,
+                         language: str | None = None) -> list[AlignedChar]:
+        """把这一段（现在是逐段调用）交给 TIFA，时间换回整首曲的时间轴。
+
+        `language` 由调用方**整首曲定一次**再传进来：逐段各判一次的话，一句英文
+        副歌就可能把整段当成 en，标签口径会抖。
+        """
         from .tifa_align import TifaAligner, guess_language, tifa_language
 
         # 用户选的语言优先；但**文字**能推翻它：ASR 会把日文歌判成 Chinese，
         # 界面上的「自动」也会被 config 的默认值顶成 Chinese。假名一出现就该走 ja。
+        # 逐段调用时 `language` 由外面整首定一次传进来（见 `transcribe_sections`）。
         joined = "".join(text for _clip, text, _offset in pending)
-        language = tifa_language(requested or "zh")
-        script = guess_language(joined)
-        if script != "zh" and language == "zh":
-            language = script
+        if language is None:
+            language = tifa_language(requested or "zh")
+            script = guess_language(joined)
+            if script != "zh" and language == "zh":
+                language = script
         if self._tifa is None:
             self._tifa = TifaAligner(self.config.tifa_model, language=language,
                                      precision=self.config.tifa_precision)
@@ -658,8 +675,11 @@ class AsrEngine:
                     "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
             tifa_mode = False
             run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
-        #: TIFA 要整首一起对齐：先把切片留在盘上，最后一次性过模型
-        pending: list[tuple[Path, str, float]] = []
+        #: 逐段对齐：`unknown` → 还没遇到带文字的切片；`tifa` 边走边出；
+        #: `ja` 等最后用 Qwen 时间戳（TIFA 没有日语 G2P）。
+        mode = "unknown"
+        #: 整首曲定一次的 TIFA 语种（见下面的 sticky_lang）
+        sticky_lang: str | None = None
         #: 每个切片的 Qwen 时间戳（只有装了对齐器才要得到）。留着当日语兜底。
         stamped: list[tuple[float, Any]] = []
 
@@ -701,11 +721,34 @@ class AsrEngine:
                 run.text += text
             stamps = getattr(result, "time_stamps", None)
             if tifa_mode:
-                # 时间留到最后统一对齐；先把切片和文本攒着（别删）
                 if text:
-                    pending.append((clip, text, section.start))
                     if stamps:
                         stamped.append((section.start, stamps))
+                    # **边识别边对齐**：TIFA 本来就是"一段之内"的对齐，逐段跑结果和
+                    # 攒齐再跑一样，但界面可以在每段结束后就显示这一段的歌词。
+                    if mode == "unknown":
+                        mode = self._pick_align_mode(text)   # 首次出现文字时定语种
+                    if mode == "ja":
+                        # 日语：TIFA 没有 G2P，等最后用 Qwen 时间戳一次性拼
+                        if not self._qwen_aligner_ready():
+                            raise JaAlignerMissing(
+                                "识别出来是**日语**，但没装日语对齐器（随包的 TIFA 不支持日语）。"
+                                "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
+                        if not run.warnings or "日语：" not in "".join(run.warnings):
+                            run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
+                    else:
+                        if sticky_lang is None:
+                            # 整首曲定一次语种，避免"一句英文把整段判成 en"
+                            from .tifa_align import guess_language, tifa_language
+
+                            sticky_lang = tifa_language(wanted_language or "zh")
+                            script = guess_language(text)
+                            if script != "zh" and sticky_lang == "zh":
+                                sticky_lang = script
+                        run.chars.extend(
+                            self._align_with_tifa([(clip, text, section.start)],
+                                                  run, wanted_language, sticky_lang))
+                    clip.unlink(missing_ok=True)
                 else:
                     clip.unlink(missing_ok=True)
             else:
@@ -714,23 +757,9 @@ class AsrEngine:
             if on_slice is not None:
                 on_slice(run, index + 1, len(sections))
 
-        if tifa_mode and pending:
-            from .tifa_align import guess_language
-
-            # ASR 经常把日文歌判成 Chinese，所以**看字**而不是看它报的语言。
-            if guess_language(run.text) == "ja":
-                if not self._qwen_aligner_ready():
-                    for clip, _text, _offset in pending:
-                        clip.unlink(missing_ok=True)
-                    raise JaAlignerMissing(
-                        "识别出来是**日语**，但没装日语对齐器（随包的 TIFA 不支持日语）。"
-                        "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
-                run.chars.extend(self._chars_from_stamped(stamped))
-                run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
-            else:
-                run.chars.extend(self._align_with_tifa(pending, run, wanted_language))
-            for clip, _text, _offset in pending:
-                clip.unlink(missing_ok=True)
+        if tifa_mode and mode == "ja" and stamped:
+            # 日语走 Qwen 时间戳：前面每段都没往 run.chars 里放东西，这里一次补齐
+            run.chars = self._chars_from_stamped(stamped)
 
         run.elapsed_seconds = time.monotonic() - started
         if torch.cuda.is_available():
