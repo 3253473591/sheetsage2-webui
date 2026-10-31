@@ -37,7 +37,18 @@ DISK_WARN_BYTES = 2 * 1024 ** 3
 
 
 def _has_model(directory: Path) -> bool:
+    """HuggingFace 那种权重目录：认 `config.json`。"""
     return (directory / "config.json").is_file()
+
+
+def _has_tifa() -> bool:
+    """随包的 TIFA 不是 HF 布局：它是 `config.yaml` + `model.pt`，**没有 config.json**。
+
+    以前这里用 `_has_model()` 判断，于是"对齐器随包带"的机器被一律判成没装，
+    横幅天天喊「逐字对齐器缺了」——实测内测者被误导过。
+    """
+    return ((TIFA_MODEL_DIR / "model.pt").is_file()
+            and (TIFA_MODEL_DIR / "config.yaml").is_file())
 
 
 def asr_model_dirs() -> list[Path]:
@@ -116,21 +127,30 @@ def preflight(data_root: str | Path | None = None) -> list[dict[str, Any]]:
 
     # 4. 歌词权重（可选：缺了只影响歌词识别）。
     #    识别模型认 `Qwen3-ASR-*`（最小集 0.6B，1.7B 可选）；对齐器有两种——
-    #    随包的 TIFA（中/粤/英）和 Qwen3-ForcedAligner（日语才要）。
+    #    随包的 TIFA（中/粤/英，`_has_tifa`）和 Qwen3-ForcedAligner（日语才要）。
     asr_models = asr_model_dirs()
-    aligner_ready = _has_model(TIFA_MODEL_DIR) or _has_model(ALIGNER_MODEL_DIR)
-    if asr_models and aligner_ready:
+    tifa = _has_tifa()
+    qwen_aligner = _has_model(ALIGNER_MODEL_DIR)
+    if asr_models and (tifa or qwen_aligner):
         checks.append({"key": "lyrics_model", "level": "ok", "title": "歌词识别权重就绪"})
-    else:
-        missing: list[str] = []
-        if not asr_models:
-            missing.append("识别模型（Qwen3-ASR）")
-        if not aligner_ready:
-            missing.append("逐字对齐器")
+    elif not asr_models and not (tifa or qwen_aligner):
         checks.append({
             "key": "lyrics_model", "level": "warn",
-            "title": "歌词识别权重不完整：" + "、".join(missing),
-            "detail": ("跑一次 01_install.bat 把模型下齐（最小集 4.3 GB，对齐器随包带）；"
+            "title": "歌词识别权重不完整：识别模型和逐字对齐器都没有",
+            "detail": "双击 01_install.bat 选 1 把模型下齐（对齐器随包带）；只想扒谱可以忽略",
+        })
+    elif not asr_models:
+        checks.append({
+            "key": "lyrics_model", "level": "warn",
+            "title": "歌词识别权重不完整：识别模型（Qwen3-ASR）没下",
+            "detail": "双击 01_install.bat 选 1（或 3 要更高精度）下模型；只想扒谱可以忽略",
+        })
+    else:
+        # 识别模型在、但随包的 TIFA 不见了：这是包解压不完整，不是"还没下模型"。
+        checks.append({
+            "key": "lyrics_model", "level": "warn",
+            "title": "歌词识别权重不完整：随包的逐字对齐器不见了",
+            "detail": ("TIFA 是随包带的，缺了说明解压不完整——重新解压一份；"
                        "只想扒谱可以忽略"),
         })
 

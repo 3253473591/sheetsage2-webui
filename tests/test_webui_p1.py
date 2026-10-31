@@ -313,6 +313,38 @@ def test_default_asr_config_falls_back_to_the_installed_model(tmp_path):
     assert pick_asr_model(models).name == "Qwen3-ASR-1.7B"      # 装了 1.7B 还是优先它
 
 
+def test_preflight_accepts_the_bundled_tifa_layout(tmp_path, monkeypatch):
+    """随包 TIFA 是 `config.yaml` + `model.pt`（**没有 config.json**），不能判成没装。
+
+    真出过这个 bug：内测者按 1 装完，横幅还一直喊「逐字对齐器缺了，跑一次
+    01_install.bat 把模型下齐」，其实对齐器就在包里。
+    """
+    from sheetsage2_webui.webui import preflight as module
+
+    models = tmp_path / "models"
+    asr = models / "Qwen3-ASR-0.6B"
+    asr.mkdir(parents=True)
+    (asr / "config.json").write_text("{}", encoding="utf-8")
+    tifa = models / "TIFA-1.0"
+    tifa.mkdir()
+    (tifa / "model.pt").write_text("x", encoding="utf-8")
+    (tifa / "config.yaml").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(module, "SHEETSAGE_MODEL_DIR", models / "SheetSage2")
+    monkeypatch.setattr(module, "TIFA_MODEL_DIR", tifa)
+    monkeypatch.setattr(module, "ALIGNER_MODEL_DIR", models / "Qwen3-ForcedAligner-0.6B")
+
+    checks = {item["key"]: item for item in module.preflight(tmp_path / "data")}
+    assert checks["lyrics_model"]["level"] == "ok", checks["lyrics_model"]
+
+    # 把随包的对齐器拿掉之后，提示要说「解压不完整」，不能说「还没下模型」
+    (tifa / "model.pt").unlink()
+    checks = {item["key"]: item for item in module.preflight(tmp_path / "data")}
+    assert checks["lyrics_model"]["level"] == "warn"
+    assert "解压" in checks["lyrics_model"]["detail"]
+
+
 def test_env_exposes_preflight(tmp_path):
     client, _ = make_client(tmp_path)
     with client:
