@@ -93,6 +93,29 @@ function resetScroll() {
   scrollEl().scrollTop = 0
 }
 /**
+ * 把 A3–E6 这条带子对位到视口时，scrollTop 应该是多少（和原型 centerOnBaseRange 同源）。
+ * 行号 = 108 - pitch，所以 E6 的顶边在 (108-88) 行处；带子比视口矮时才居中留白。
+ */
+function baseRangeScrollTop() {
+  const rh = window.__PR__.state.view.rowHeight
+  const vh = window.__PR__.state.view.viewport.h
+  const slack = Math.max(0, vh - window.__PR__.api.baseRange().keys * rh) / 2
+  return Math.max(0, (108 - 88) * rh - slack)
+}
+
+/**
+ * 音符**体内**的横坐标：从左边起 1/4 处。
+ *
+ * 不能写死 `+4`。手柄宽度现在随音符宽度收（见原型 handleWidth），横向 100% 时
+ * 一个 1/8 音符才 5px 宽，`+4` 会正好落在手柄里，于是"想拖动"变成"拉边"。
+ */
+function bodyX(n) {
+  const x0 = window.__PR__.api.tickToX(n.tick)
+  const x1 = window.__PR__.api.tickToX(n.tick + n.dur)
+  return x0 + (x1 - x0) * 0.25
+}
+
+/**
  * 视口坐标 → 该点下方的时间。
  *
  * 不能拿内容坐标直接去比：滚动之后，同一个视口点对应的内容坐标是**会变**的。
@@ -103,6 +126,10 @@ function tickAtClient(clientX) {
   const r = window.__PR__.els.canvas.getBoundingClientRect()
   return window.__PR__.api.xToTick(clientX - r.left)
 }
+
+// 固定一个视口：100% 时 rowHeight = 750/25 = 30px，pxPerSec = 1200/60 = 20px/s。
+// 都是整数，后面所有期望值都能手算核对。
+window.__PR__.api.setViewport(1200, 750)
 
 const mouse = (type, x, y, init = {}) =>
   new window.MouseEvent(type, {
@@ -193,7 +220,7 @@ const pxPerGrid = (PR.api.tickToSec(grid)) * PR.state.view.pxPerSec
 resetScroll()
 const target = noteById(t0ids[3])
 const orig = { tick: target.tick, pitch: target.pitch }
-const start = { x: PR.api.tickToX(target.tick) + 4, y: pitchY(target.pitch) + 6 }
+const start = { x: bodyX(target), y: pitchY(target.pitch) + 6 }
 
 const undoBefore = PR.marks.undo.length
 press(start.x, start.y)
@@ -213,19 +240,20 @@ section('5. 拖动不足半格：吸附回原位（不抖）')
 resetScroll()
 const t5 = noteById(t0ids[5])
 const o5 = t5.tick
-const p5 = { x: PR.api.tickToX(t5.tick) + 4, y: pitchY(t5.pitch) + 6 }
-const px = 5   // 5px ≈ 80 tick < 半个网格(120)
+const p5 = { x: bodyX(t5), y: pitchY(t5.pitch) + 6 }
+// 位移取"0.3 格"——不足半格，吸附必须把它吸回原位。
+const tiny = pxPerGrid * 0.3
 press(p5.x, p5.y)
-move(p5.x + px, p5.y)
-release(p5.x + px, p5.y)
+move(p5.x + tiny, p5.y)
+release(p5.x + tiny, p5.y)
 ok('吸附开启时不动', near(t5.tick, o5, 1e-6), `${o5} -> ${t5.tick}`)
 
 // Alt = 临时关吸附。注意是**按下之后**才按住 Alt 的——DAW 里这是最常见的动作，
 // 所以原型的吸附判定必须每次 move 重读 altKey，不能冻结在 mousedown。
 press(p5.x, p5.y)
-move(p5.x + px, p5.y, { altKey: true })
-release(p5.x + px, p5.y)
-const expected = o5 + Math.round(PR.api.secToTick(px / PR.state.view.pxPerSec))
+move(p5.x + tiny, p5.y, { altKey: true })
+release(p5.x + tiny, p5.y)
+const expected = o5 + Math.round(PR.api.secToTick(tiny / PR.state.view.pxPerSec))
 ok('拖动中途按住 Alt 也能绕过吸附', near(t5.tick, expected, 1e-6),
   `期望 ${expected}，实际 ${t5.tick}`)
 
@@ -313,13 +341,13 @@ PR.api.undo()
 ok('撤销恢复被删音符', !!noteById(id20) && PR.state.notes.length === n0)
 
 const rightTarget = PR.state.notes.find((n) => n.id === id20)
-toCanvas('contextmenu', PR.api.tickToX(rightTarget.tick) + 4, pitchY(rightTarget.pitch) + 6)
+toCanvas('contextmenu', bodyX(rightTarget), pitchY(rightTarget.pitch) + 6)
 ok('右键删除音符', !noteById(id20))
 PR.api.undo()
 
 const eraseTarget = PR.state.notes.find((n) => n.id === id20)
 PR.api.setTool('erase')
-toCanvas('mousedown', PR.api.tickToX(eraseTarget.tick) + 4, pitchY(eraseTarget.pitch) + 6)
+toCanvas('mousedown', bodyX(eraseTarget), pitchY(eraseTarget.pitch) + 6)
 ok('橡皮单击删除', !noteById(id20))
 PR.api.undo()
 PR.api.setTool('select')
@@ -344,7 +372,7 @@ ok('框选到多个音符', PR.state.selection.size >= 4, `选中 ${PR.state.sel
 const selIds = [...PR.state.selection]
 const beforeTicks = selIds.map((id) => noteById(id).tick)
 const anchorNote = noteById(selIds[0])
-const ax = PR.api.tickToX(anchorNote.tick) + 4
+const ax = bodyX(anchorNote)
 const ay = pitchY(anchorNote.pitch) + 6
 press(ax, ay)
 move(ax + pxPerGrid * 2, ay)
@@ -443,6 +471,141 @@ PR.api.renderAll()
 PR.api.undo()   // 触发一次重放，选区里的幽灵 id 应当被清掉
 ok('选区不会残留已不存在的 id',
   [...PR.state.selection].every((id) => PR.state.notes.some((n) => n.id === id)))
+
+// ---------------------------------------------------------------------------
+section('17. 视图基准：纵向 100% = A3~E6 满屏')
+// ---------------------------------------------------------------------------
+PR.state.view.vZoom = 100
+PR.api.setViewport(1200, 750)
+resetScroll()
+const vp = () => PR.state.view.viewport
+const base = PR.api.baseRange()
+
+ok('基准音域是 A3..E6', base.low === 57 && base.high === 88,
+  `${PR.api.pitchName(base.low)}..${PR.api.pitchName(base.high)}`)
+ok('音名换算对得上（A3=57, E6=88）',
+  PR.api.pitchName(57) === 'A3' && PR.api.pitchName(88) === 'E6',
+  `${PR.api.pitchName(57)} / ${PR.api.pitchName(88)}`)
+ok('A3..E6 是 32 个键（偶数，没有正中那一行）', base.keys === 32 && 88 - 57 + 1 === 32)
+ok('100% 时 32 行正好等于视口高',
+  near(PR.state.view.rowHeight * base.keys, vp().h, 1e-9),
+  `${PR.state.view.rowHeight} × ${base.keys} vs ${vp().h}`)
+
+PR.api.centerOnBaseRange()
+ok('对位后的 scrollTop 与公式一致',
+  near(scrollEl().scrollTop, baseRangeScrollTop(), 1e-6),
+  `${scrollEl().scrollTop} vs ${baseRangeScrollTop()}`)
+ok('视口顶部正好是 E6',
+  PR.api.yToPitch(scrollEl().scrollTop) === 88,
+  `顶部音高 ${PR.api.pitchName(PR.api.yToPitch(scrollEl().scrollTop))}`)
+ok('视口底部正好是 A3',
+  PR.api.yToPitch(scrollEl().scrollTop + vp().h - 1) === 57,
+  `底部音高 ${PR.api.pitchName(PR.api.yToPitch(scrollEl().scrollTop + vp().h - 1))}`)
+ok('可见恰好 32 行（没有多露半行）',
+  PR.api.yToPitch(scrollEl().scrollTop) - PR.api.yToPitch(scrollEl().scrollTop + vp().h - 1) + 1 === 32,
+  `${PR.api.yToPitch(scrollEl().scrollTop) - PR.api.yToPitch(scrollEl().scrollTop + vp().h - 1) + 1}`)
+ok('C4 已不在正中（32 键偶数，旧规则不再适用）',
+  Math.abs(PR.api.pitchToY(60) + PR.state.view.rowHeight / 2 - scrollEl().scrollTop - vp().h / 2) > 1,
+  `C4 中线距顶 ${PR.api.pitchToY(60) + PR.state.view.rowHeight / 2 - scrollEl().scrollTop}`)
+
+// 纵向缩小时带子比视口矮，应当居中留白而不是贴顶
+PR.state.view.vZoom = 50
+PR.api.setViewport(1200, 750)
+PR.api.centerOnBaseRange()
+ok('缩到 50% 时带子在视口里居中（上下留白相等）',
+  near(scrollEl().scrollTop, baseRangeScrollTop(), 1e-6)
+  && scrollEl().scrollTop > 0,
+  `${scrollEl().scrollTop}`)
+PR.state.view.vZoom = 100
+PR.api.setViewport(1200, 750)
+
+// ---------------------------------------------------------------------------
+section('18. 视图基准：横向 100% = 一分钟满屏')
+// ---------------------------------------------------------------------------
+PR.state.view.hZoom = 100
+PR.api.setViewport(1200, 750)
+ok('100% 时 60 秒正好等于视口宽',
+  near(PR.state.view.pxPerSec * 60, vp().w, 1e-9),
+  `${PR.state.view.pxPerSec} × 60 vs ${vp().w}`)
+// 视口变宽，同样 100% 下 pxPerSec 必须跟着变——证明基准是相对视口的，不是写死像素
+PR.api.setViewport(2400, 750)
+ok('视口翻倍 → 100% 的 pxPerSec 也翻倍（基准相对视口）',
+  near(PR.state.view.pxPerSec, 40, 1e-9), `${PR.state.view.pxPerSec}`)
+PR.api.setViewport(1200, 750)
+
+// ---------------------------------------------------------------------------
+section('19. 缩放范围：横向 50~500%，纵向 50~200%')
+// ---------------------------------------------------------------------------
+PR.state.view.hZoom = 100
+PR.api.zoomX(100, RECT.left + 600)          // 猛放大
+ok('横向上限 500%', near(PR.state.view.hZoom, 500, 1e-9), `${PR.state.view.hZoom}`)
+PR.api.zoomX(0.0001, RECT.left + 600)       // 猛缩小
+ok('横向下限 50%', near(PR.state.view.hZoom, 50, 1e-9), `${PR.state.view.hZoom}`)
+PR.state.view.vZoom = 100
+PR.api.zoomY(100, RECT.top + 400)
+ok('纵向上限 200%', near(PR.state.view.vZoom, 200, 1e-9), `${PR.state.view.vZoom}`)
+PR.api.zoomY(0.0001, RECT.top + 400)
+ok('纵向下限 50%', near(PR.state.view.vZoom, 50, 1e-9), `${PR.state.view.vZoom}`)
+ok('缩放后 pxPerSec / rowHeight 都是有限正数',
+  Number.isFinite(PR.state.view.pxPerSec) && PR.state.view.pxPerSec > 0
+  && Number.isFinite(PR.state.view.rowHeight) && PR.state.view.rowHeight > 0)
+
+// ---------------------------------------------------------------------------
+section('20. 网格细分线随吸附粒度变化')
+// ---------------------------------------------------------------------------
+// 细分线有 4px 的最小间距门槛，先把横向放大到 500% 让 1/16、1/32 都画得出来
+PR.state.view.hZoom = 500
+PR.state.view.vZoom = 100
+PR.api.setViewport(1200, 750)
+PR.api.renderAll()
+
+PR.api.setSnap(8)
+const sub8 = PR.api.subLineCount()
+const base8 = PR.api.gridLineCount() - sub8
+
+PR.api.setSnap(16)
+const sub16 = PR.api.subLineCount()
+
+PR.api.setSnap(32)
+const sub32 = PR.api.subLineCount()
+
+PR.api.setSnap(4)
+const sub4 = PR.api.subLineCount()
+
+PR.api.setSnap(0)
+const sub0 = PR.api.subLineCount()
+const base0 = PR.api.gridLineCount() - sub0
+
+/**
+ * 每拍之间插几根细分线 = den/4 - 1。
+ *
+ * 不是"翻倍"：1/8 每拍插 1 根（半拍处），1/16 插 3 根，1/32 插 7 根。
+ * 我在原型注释里一开始就写错了这条，是测试把它逼出来的。
+ */
+const beatsInProject = Math.round(
+  PR.api.secToTick(PR.api.totalSec()) / (PR.state.ppq * 4 / PR.state.timeSig.den),
+)
+const expectSub = (den) => beatsInProject * (den / 4 - 1)
+
+ok('1/8：每拍插 1 根', sub8 === expectSub(8), `${sub8}，期望 ${expectSub(8)}`)
+ok('1/16：每拍插 3 根', sub16 === expectSub(16), `${sub16}，期望 ${expectSub(16)}`)
+ok('1/32：每拍插 7 根', sub32 === expectSub(32), `${sub32}，期望 ${expectSub(32)}`)
+ok('1/4 的细分与拍线重合 → 不出细分线', sub4 === 0, `${sub4}`)
+ok('吸附关闭 → 不出细分线', sub0 === 0, `${sub0}`)
+ok('细分线变化不影响小节/拍线的数量', base8 === base0, `${base8} vs ${base0}`)
+
+// 放大/缩小到细分线太密时应当自动隐藏，不能糊成一片
+const sub32far = sub32
+PR.state.view.hZoom = 50
+PR.api.renderAll()
+PR.api.setSnap(32)
+const sub32near = PR.api.subLineCount()
+ok('横向缩到 50% 时过密的细分线自动隐藏',
+  sub32far > 0 && sub32near === 0, `500%: ${sub32far} 条, 50%: ${sub32near} 条`)
+
+PR.state.view.hZoom = 100
+PR.api.setSnap(8)
+PR.api.renderAll()
 
 // ---------------------------------------------------------------------------
 console.log(`\n${'='.repeat(56)}`)

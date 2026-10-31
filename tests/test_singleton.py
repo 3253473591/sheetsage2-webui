@@ -1,7 +1,7 @@
 """单实例锁（G1）：同一个数据目录只许一个服务。
 
 **不真起服务**：只测 `InstanceLock` 本身（加锁、名片、释放、残留锁）。
-真正的双击验证在 `webui.bat` 上手工做一次即可——那是 shell 行为，不适合放进 pytest。
+真正的双击验证在 `00_start.bat` 上手工做一次即可——那是 shell 行为，不适合放进 pytest。
 """
 
 from __future__ import annotations

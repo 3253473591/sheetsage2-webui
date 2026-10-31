@@ -564,7 +564,7 @@ class RunnerSession:
 def pick_asr_model(models_root: Path) -> Path:
     """挑一个本机装了的识别模型：优先 1.7B，没有就退到最小集的 0.6B。
 
-    以前这里写死 `Qwen3-ASR-1.7B`，而 `setup.bat` 的默认档位（最小集）只下 0.6B
+    以前这里写死 `Qwen3-ASR-1.7B`，而 `01_install.bat` 的默认档位（最小集）只下 0.6B
     ——新机器上第一次点「识别歌词」就会因为找不到权重而失败。
     """
     preferred = Path(models_root) / "Qwen3-ASR-1.7B"

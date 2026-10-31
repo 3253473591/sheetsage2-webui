@@ -344,10 +344,18 @@ def asr_load_kwargs(config: AsrConfig, dtype: Any) -> dict[str, Any]:
     return kwargs
 
 
+class JaAlignerMissing(RuntimeError):
+    """日文歌，但没装日语对齐器（随包的 TIFA 1.0 没有日语 G2P）。
+
+    这**不是**"少了可选件就降级"的那类问题：硬用 TIFA 只会产出一套没有时间的歌词，
+    用户还以为自己成功了。所以直接停，并把补救办法写进错误里（`errors.py` 会翻成
+    `E_JA_ALIGNER`，前端显示成一张带操作建议的错误卡）。
+    """
+
+
 @dataclass
 class AsrRun:
     """一次歌词识别的结果与开销。"""
-
     text: str = ""
     chars: list[AlignedChar] = field(default_factory=list)
     language: str | None = None
@@ -522,6 +530,35 @@ class AsrEngine:
                            f"装一下 `g2pflow[lstm]` 和 lightning 就能用")
         return True, ""
 
+    def _qwen_aligner_ready(self) -> bool:
+        """Qwen 对齐器权重在不在。它只有日语要用，所以默认档位下通常没有。"""
+        model = self.config.aligner_model
+        if not model:
+            return False
+        path = Path(model)
+        if path.exists():
+            return (path / "config.json").is_file() if path.is_dir() else True
+        # 不是本地路径就当作 HuggingFace 仓库 id，交给 transformers 自己判断
+        return not path.is_absolute() and "/" not in str(model) and "\\" not in str(model)
+
+    @staticmethod
+    def _chars_from_stamps(stamps: Any, offset: float) -> list[AlignedChar]:
+        """Qwen 的 `time_stamps` -> 整首曲时间轴上的字。"""
+        chars: list[AlignedChar] = []
+        for item in stamps or ():
+            chars.append(AlignedChar(
+                text=str(getattr(item, "text", "")),
+                start=offset + float(getattr(item, "start_time", 0.0)),
+                end=offset + float(getattr(item, "end_time", 0.0)),
+            ))
+        return chars
+
+    def _chars_from_stamped(self, stamped: Sequence[tuple[float, Any]]) -> list[AlignedChar]:
+        chars: list[AlignedChar] = []
+        for offset, stamps in stamped:
+            chars.extend(self._chars_from_stamps(stamps, offset))
+        return chars
+
     def _align_with_tifa(self, pending: Sequence[tuple[Path, str, float]],
                          run: AsrRun, requested: str | None) -> list[AlignedChar]:
         """把攒下来的切片交给 TIFA，一次对齐完，时间换回整首曲的时间轴。"""
@@ -612,8 +649,19 @@ class AsrEngine:
                 # 缺可选模型不能把整条链路做死：退回 Qwen，并让用户在详情里看到原因
                 run.warnings.append(reason)
                 tifa_mode = False
+        # **日语专用**：TIFA 1.0 没有日语的离线 G2P，日文歌只能走 Qwen 对齐器。
+        # 显式指定了日语就提前判，省得白跑一遍识别；没装对齐器直接停，别产出半套歌词。
+        if tifa_mode and wanted_language == "Japanese":
+            if not self._qwen_aligner_ready():
+                raise JaAlignerMissing(
+                    "这首歌指定为日语，但没装日语对齐器（随包的 TIFA 不支持日语）。"
+                    "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
+            tifa_mode = False
+            run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
         #: TIFA 要整首一起对齐：先把切片留在盘上，最后一次性过模型
         pending: list[tuple[Path, str, float]] = []
+        #: 每个切片的 Qwen 时间戳（只有装了对齐器才要得到）。留着当日语兜底。
+        stamped: list[tuple[float, Any]] = []
 
         for index, section in enumerate(sections):
             if progress:
@@ -621,7 +669,8 @@ class AsrEngine:
                           "start": section.start, "end": section.end})
             clip = self._extract(audio, section, work / f"slice-{index:03d}.wav",
                                  tifa=tifa_mode)
-            want_timestamps = self.config.aligner_model is not None and not tifa_mode
+            # 装了对齐器就一并要时间戳：日文歌是识别完才知道语种，事后再补来不及。
+            want_timestamps = self.config.aligner_model is not None
             tokens = int(min(self.config.max_new_tokens_cap,
                              max(64, section.seconds * self.config.tokens_per_second)))
             # 两次尝试（带/不带 max_new_tokens）都要被同一个 except 兜住：
@@ -655,22 +704,31 @@ class AsrEngine:
                 # 时间留到最后统一对齐；先把切片和文本攒着（别删）
                 if text:
                     pending.append((clip, text, section.start))
+                    if stamps:
+                        stamped.append((section.start, stamps))
                 else:
                     clip.unlink(missing_ok=True)
             else:
-                if stamps:
-                    for item in stamps:
-                        run.chars.append(AlignedChar(
-                            text=str(getattr(item, "text", "")),
-                            start=section.start + float(getattr(item, "start_time", 0.0)),
-                            end=section.start + float(getattr(item, "end_time", 0.0)),
-                        ))
+                run.chars.extend(self._chars_from_stamps(stamps, section.start))
                 clip.unlink(missing_ok=True)
             if on_slice is not None:
                 on_slice(run, index + 1, len(sections))
 
         if tifa_mode and pending:
-            run.chars.extend(self._align_with_tifa(pending, run, wanted_language))
+            from .tifa_align import guess_language
+
+            # ASR 经常把日文歌判成 Chinese，所以**看字**而不是看它报的语言。
+            if guess_language(run.text) == "ja":
+                if not self._qwen_aligner_ready():
+                    for clip, _text, _offset in pending:
+                        clip.unlink(missing_ok=True)
+                    raise JaAlignerMissing(
+                        "识别出来是**日语**，但没装日语对齐器（随包的 TIFA 不支持日语）。"
+                        "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
+                run.chars.extend(self._chars_from_stamped(stamped))
+                run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
+            else:
+                run.chars.extend(self._align_with_tifa(pending, run, wanted_language))
             for clip, _text, _offset in pending:
                 clip.unlink(missing_ok=True)
 

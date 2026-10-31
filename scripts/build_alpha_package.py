@@ -8,7 +8,7 @@ r"""打内测包：把「解压就能跑」需要的东西拼成一个目录，�
 | `runtime/ffmpeg/bin/ffmpeg.exe` | 裁剪版静态 ffmpeg 7.1.1（2.2 MB，无 DLL）—— `bootstrap.find_ffmpeg()` 第一优先 |
 | `src/` `scripts/` `tools/` `web/` | 应用代码 + 前端源码（前端还有已构建的 static，所以同好不需要 Node） |
 | `downloads.json` | torch / 模型的直链与 sha256（`tools/bootstrap.py` 照着下） |
-| `webui.bat` / `setup.bat` | 双击入口（首次运行自动引导） |
+| `00_start.bat` / `01_install.bat` / `02_models.bat` | 三个双击入口：启动 / 安装 / 补模型 |
 | `NOTICE` + `runtime/ffmpeg/LICENSE-ffmpeg.txt` | 许可（SheetSage2 权重 CC BY-NC 4.0；ffmpeg 的构建配置） |
 
 **不放进包的**：`.venv/`（同好自己建）、`models/`（6~10.4 GB，首次运行再下）、
@@ -50,7 +50,8 @@ SEVEN_ZIP_CANDIDATES = (Path(r"D:\7-Zip\7z.exe"),
 COPY_DIRS = ("src", "scripts", "tools", "web", "docs", "tests")
 #: 单个文件带走。
 COPY_FILES = ("pyproject.toml", "downloads.json", "NOTICE", "README.md",
-              "README-internal-test.md", "webui.bat", "setup.bat", ".gitignore")
+              "README-internal-test.md", "00_start.bat", "01_install.bat",
+              "02_models.bat", ".gitignore")
 #: 目录里不要的东西。
 EXCLUDE_NAMES = {"__pycache__", ".pytest_cache", "node_modules", "dist", ".smoke",
                  ".venv", "models", "output", "tmp", "wheels", "runtime"}

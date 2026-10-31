@@ -21,10 +21,10 @@
 ### 方式一：内测包（推荐，不用装 Python / ffmpeg）
 
 1. 解压到**不含中文的路径**，留出 20 GB 空间；
-2. 双击 **`webui.bat`**（首次会自动建环境、下依赖与模型，可断点续传）；
+2. 双击 **`00_start.bat`**（首次会自动建环境、下依赖与模型，可断点续传）；
 3. 浏览器会自动打开 <http://127.0.0.1:8000>，把音频拖进去就行。
 
-首次运行要联网下 **torch 约 1.8 GB + 模型最小集约 4.3 GB**（1.7B 歌词模型可选，+4.5 GB，随时 `setup.bat --with-1.7b` 补；日语歌才需要的 Qwen 对齐器 `--with-ja`）。逐字对齐用的 TIFA 只有 40M，已经随包带，中/粤/英不用另外下对齐器。只下过一次，之后离线可用；下载/安装没跑完就再双击一次，已完成的部分会跳过。详见 [`README-internal-test.md`](README-internal-test.md)。
+首次运行要联网下 **torch 约 1.8 GB + 模型最小集约 4.3 GB**（1.7B 歌词模型可选，+4.5 GB，随时双击 `02_models.bat` 选 3 补；日语歌才需要的 Qwen 对齐器 `--with-ja`）。逐字对齐用的 TIFA 只有 40M，已经随包带，中/粤/英不用另外下对齐器。只下过一次，之后离线可用；下载/安装没跑完就再双击一次，已完成的部分会跳过。详见 [`README-internal-test.md`](README-internal-test.md)。
 
 ### 方式二：从源码（已经会 Python 的人）
 
@@ -34,7 +34,7 @@ uv venv --python 3.12 .venv
 uv pip install --python .\.venv\Scripts\python.exe -e ".[web,svp]" "transformers==4.57.6" qwen-asr
 cd web; npm install; npm run build; cd ..
 
-# 之后每次：双击 webui.bat，或者
+# 之后每次：双击 00_start.bat，或者
 .\.venv\Scripts\python.exe -m sheetsage2_webui.webui
 ```
 
@@ -64,9 +64,9 @@ cd web; npm install; npm run build; cd ..
 
 | 现象 | 说明 |
 |---|---|
-| 双击 `webui.bat` 好像没反应 | 只会允许一个服务在跑；第二个会直接打开已经在运行的那个页面 |
+| 双击 `00_start.bat` 好像没反应 | 只会允许一个服务在跑；第二个会直接打开已经在运行的那个页面 |
 | 8000 端口被占用 | 会自动换端口，并在窗口里写明"被谁占了" |
-| 界面显示「服务已停止」 | 后台窗口被关掉或崩了；重新双击 `webui.bat`，再刷新页面 |
+| 界面显示「服务已停止」 | 后台窗口被关掉或崩了；重新双击 `00_start.bat`，再刷新页面 |
 | 报错了看不懂 | 横条上的中文是**人话 + 下一步**，技术原文折叠在「详情」；点顶栏「诊断包」，把压缩包发给任意 AI 就能让它帮你看 |
 | 误点了删除 | 进「回收站」，7 天内可一键恢复 |
 | 换电脑 / 重装系统 | 顶栏「备份」导出全部工程（含原音频），新机器上「导入备份」 |

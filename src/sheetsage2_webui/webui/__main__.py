@@ -92,7 +92,7 @@ def resolve(path: str) -> str:
 def resolve_asr_model(path: str) -> str:
     """识别模型：请求的那个不在，就退到本机装了的任意一个。
 
-    `setup.bat` 默认下最小集（只有 0.6B），而这边的默认值是 1.7B——
+    `01_install.bat` 默认下最小集（只有 0.6B），而这边的默认值是 1.7B——
     新机器上一进歌词阶段就会「模型权重没找到」。
     """
     from .runner import pick_asr_model

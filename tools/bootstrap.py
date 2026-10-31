@@ -1,6 +1,6 @@
 """内测包首次运行引导：把一台干净机器变成能跑的机器。
 
-内测者的体验应该是：**解压 → 双击 `webui.bat` → 看着进度 → 浏览器打开**，全程不敲命令。
+内测者的体验应该是：**解压 → 双击 `00_start.bat` → 看着进度 → 浏览器打开**，全程不敲命令。
 所以这个脚本自己带下载器（只用标准库，包里那份便携 Python 就能跑），并把每一步都做成
 **幂等**的：已存在就跳过，跑到一半断了重跑能续上。
 
@@ -43,7 +43,7 @@ VENV = ROOT / ".venv"
 VENV_PYTHON = VENV / "Scripts" / "python.exe"
 STATE = ROOT / "bootstrap-state.json"
 BUNDLED_PYTHON = ROOT / "runtime" / "python" / "python.exe"
-#: 「这次先不下模型」的标记。`webui.bat` 看到它就不会直接启动，而是再问一次四个选项。
+#: 「这次先不下模型」的标记。`00_start.bat` 看到它就不会直接启动，而是再问一次四个选项。
 MODELS_PENDING = ROOT / "models" / ".models-pending"
 
 
@@ -197,8 +197,8 @@ def step_pip(manifest: dict, *, dry_run: bool) -> None:
         return
     if not dry_run and not venv_imports("torch"):
         # 先装 torch 再装依赖是有顺序的：反过来 pip 会去 PyPI 拖 CPU 版 torch（2.5 GB，没 CUDA）
-        raise SystemExit("    [x] 还没装 torch。先跑 `setup.bat`（会先下 torch 再装依赖），"
-                         "或者 `setup.bat --steps torch,pip`。")
+        raise SystemExit("    [x] 还没装 torch。先跑 `01_install.bat`（会先下 torch 再装依赖），"
+                         "或者 `01_install.bat --steps torch,pip`。")
     say("    正在装依赖（pip 的输出会一直滚，几分钟很正常）…")
     run([VENV_PYTHON, "-m", "pip", "install", "-e", ".[web,svp]",
          *manifest["pypi"]["packages"],
@@ -248,11 +248,11 @@ def step_models(manifest: dict, *, mode: str, with_17b: bool, with_ja: bool,
     if mode == "minimal":
         if "asr_1.7b" in optional and not with_17b:
             size = repositories[optional["asr_1.7b"]]["bytes"]
-            say(f"    （1.7B 识别模型是可选项，{human_bytes(size)}，加 --with-1.7b）")
+            say(f"    （1.7B 识别模型是可选项，{human_bytes(size)}，在 02_models.bat 里选 3）")
         if "ja_aligner" in optional and not with_ja:
             size = repositories[optional["ja_aligner"]]["bytes"]
             say(f"    （中文/粤语/英语用随包的 TIFA 对齐器，不用额外下；"
-                f"要唱日语再加 --with-ja，{human_bytes(size)}）")
+                f"要唱日语在 02_models.bat 里选 2，{human_bytes(size)}）")
 
     plan = sum(repositories[repo]["bytes"] for repo in repos)
     say(f"    档位 {mode}：{len(repos)} 个仓库，合计 {human_bytes(plan)}"
@@ -335,7 +335,7 @@ def step_selfcheck(manifest: dict, model_results: list[dict], *,
         say(f"    {repo:<30} {flag}")
 
     say()
-    say("  下一步：双击 webui.bat 启动（或再跑一次 setup.bat 补下载）")
+    say("  下一步：双击 00_start.bat 启动；以后想补模型就双击 02_models.bat")
     return report
 
 

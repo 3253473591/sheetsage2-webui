@@ -390,23 +390,29 @@ def test_batch_files_never_flash_and_quit(tmp_path: Path):
     """
     import subprocess
 
-    for name in ("webui.bat", "setup.bat"):
+    names = ("00_start.bat", "01_install.bat", "02_models.bat")
+    for name in names:
         shutil.copy(PROJECT_ROOT / name, tmp_path / name)
 
-    for name in ("webui.bat", "setup.bat"):
+    # 空目录（没有 .venv / 没有 runtime）时每个入口都要**说人话**：
+    # 启动器指路去安装器，安装器说包不完整，补模型脚本也指路去安装器。
+    expect = {"00_start.bat": "01_install",
+              "01_install.bat": "runtime",
+              "02_models.bat": "01_install"}
+    for name in names:
         done = subprocess.run(["cmd", "/c", name], cwd=tmp_path, input="\n",
                               capture_output=True, text=True, timeout=120)
         output = (done.stdout or "") + (done.stderr or "")
         assert "unexpected" not in output.lower(), f"{name} 有批处理语法错误：\n{output}"
-        # 空目录（没有 .venv / 没有 runtime）时要**说人话**，而不是直接退出
-        assert "runtime" in output.lower() or "incomplete" in output.lower(), \
+        needle = expect[name]
+        assert needle in output.lower() or "incomplete" in output.lower(), \
             f"{name} 没有给出可读的原因：\n{output}"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason=".bat 只在 Windows 上跑")
 def test_webui_bat_has_no_parentheses_inside_blocks():
     """守卫规则：`if ... (` 块里不能出现没转义的括号（那正是闪退的根因）。"""
-    text = (PROJECT_ROOT / "webui.bat").read_text(encoding="utf-8")
+    text = (PROJECT_ROOT / "00_start.bat").read_text(encoding="utf-8")
     in_block = False
     for line in text.splitlines():
         stripped = line.strip()

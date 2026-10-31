@@ -169,6 +169,8 @@
   .beat-lines { position: absolute; inset: 0; pointer-events: none; }
   .beat-line { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.055); }
   .beat-line.bar { background: rgba(255,255,255,0.17); }
+  /* 吸附分辨率的细分线。三级层次：小节 > 拍 > 细分；最弱一级只在够宽时才画。 */
+  .beat-line.sub { background: rgba(255,255,255,0.028); }
 
   .notes-layer { position: absolute; inset: 0; pointer-events: none; }
 
@@ -298,10 +300,16 @@
   <span class="grow"></span>
   <span id="hint" style="color:var(--text-dim)"></span>
   <span class="sep"></span>
-  <button id="zin" class="icon" title="横向放大 (Ctrl+滚轮)">＋</button>
-  <button id="zout" class="icon" title="横向缩小 (Ctrl+滚轮)">－</button>
-  <button id="vzin" class="icon" title="纵向放大 (Shift+滚轮)">⇕＋</button>
-  <button id="vzout" class="icon" title="纵向缩小 (Shift+滚轮)">⇕－</button>
+  <span style="color:var(--text-dim)">横向</span>
+  <button id="zout" class="icon" title="横向缩小 (Ctrl+滚轮)，下限 50%">－</button>
+  <span id="zoomH" style="color:#c9c9d0; font-variant-numeric:tabular-nums; min-width:34px; text-align:right;">100%</span>
+  <button id="zin" class="icon" title="横向放大 (Ctrl+滚轮)，上限 500%">＋</button>
+  <span class="sep"></span>
+  <span style="color:var(--text-dim)">纵向</span>
+  <button id="vzout" class="icon" title="纵向缩小 (Ctrl+Shift+滚轮)，下限 50%">－</button>
+  <span id="zoomV" style="color:#c9c9d0; font-variant-numeric:tabular-nums; min-width:34px; text-align:right;">100%</span>
+  <button id="vzin" class="icon" title="纵向放大 (Ctrl+Shift+滚轮)，上限 200%">＋</button>
+  <span class="sep"></span>
   <button id="follow" class="on" title="播放时自动跟随播放头">跟随</button>
   <button id="inspect" title="看 tick 域数据（写回契约）">{ } 数据</button>
   <button id="helpbtn" class="icon" title="快捷键">?</button>
@@ -349,7 +357,9 @@
   <div><b>多选</b> 空白拖=框选 · <kbd>Shift</kbd>+点=加减选 · 拖任一选中音符=整组移动</div>
   <div><b>删除</b> <kbd>Delete</kbd> 或右键点音符</div>
   <div><b>撤销</b> <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></div>
-  <div><b>缩放</b> <kbd>Ctrl</kbd>+滚轮=横向 · <kbd>Shift</kbd>+滚轮=纵向 · <kbd>Alt</kbd>+滚轮过音符=力度</div>
+  <div><b>缩放</b> <kbd>Ctrl</kbd>+滚轮=横向 50~500% · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+滚轮=纵向 50~200% · <kbd>Alt</kbd>+滚轮过音符=力度</div>
+  <div><b>基准</b> 横向 100% = 一分钟铺满视口 · 纵向 100% = A3~E6 铺满视口（32 键）</div>
+  <div><b>网格</b> 换吸附值（1/1~1/32）时竖向细分线一起变；吸附关闭只留拍线</div>
   <div><b>吸附</b> 按住 <kbd>Alt</kbd> 拖动 = 临时关掉吸附</div>
   <div><b>播放</b> <kbd>空格</kbd> 播放/暂停 · 标尺上点击拖动=定位 · 拖入音频=跟着真音频对时</div>
 </div>
@@ -396,7 +406,33 @@ const state = {
   notes: [],
   selection: new Set(),
 
-  view: { pxPerSec: 60, rowHeight: 14 },
+  /**
+   * 视图：**相对视口的百分比**，不是固定像素。
+   *
+   * 100% 纵向 = A3–E6 这条音域正好铺满视口高度（32 个键，Web 上视觉最舒服的密度）。
+   * 100% 横向 = 一分钟正好铺满视口宽度。
+   *
+   * 注意：A3–E6 是 **32 个键、偶数**，所以没有"正中那一行"这回事——早先按 C3–C5
+   * 定的那条"C4 在正中央"对新区间不成立，现在改成"把整条带子居中/铺满"。
+   * （C3–C5 是 25 键、奇数，正中才恰好是 C4=60。）
+   *
+   * `pxPerSec` / `rowHeight` 是**派生量**（getter）：所有调用点照旧读它们，
+   * 但换算的唯一真源是下面这两个百分比 + 视口尺寸。
+   */
+  view: {
+    hZoom: 100,    // 50..500
+    vZoom: 100,    // 50..200
+    /** 由 measure() 从容器量出来；量不到时（jsdom）保留兜底值。 */
+    viewport: { w: 1200, h: 760 },
+    get pxPerSec() {
+      const w = this.viewport.w > 0 ? this.viewport.w : 1200;
+      return w / BASE_SPAN_SEC * (this.hZoom / 100);
+    },
+    get rowHeight() {
+      const h = this.viewport.h > 0 ? this.viewport.h : 760;
+      return h / BASE_SPAN_KEYS * (this.vZoom / 100);
+    },
+  },
 
   snapDen: 8,        // 1/8 音符；0 = 关
   tool: 'select',    // select | pencil | erase
@@ -404,6 +440,24 @@ const state = {
   playheadSec: 0,
   scaleRoot: 0,      // 调式根音（半音，0=C），高亮用
 };
+
+/**
+ * 缩放基准。这三组常量就是"100%"的**定义**：
+ * 纵向 A3(57)–E6(88) 共 32 键，横向 60 秒。
+ */
+const BASE_PITCH_LOW = 57;                                   // A3
+const BASE_PITCH_HIGH = 88;                                  // E6
+const BASE_SPAN_KEYS = BASE_PITCH_HIGH - BASE_PITCH_LOW + 1; // 32
+const BASE_SPAN_SEC = 60;
+const H_ZOOM_RANGE = [50, 500];
+const V_ZOOM_RANGE = [50, 200];
+
+/** 从容器量视口。量到 0（jsdom / 未布局）就保留旧值，免得把缩放算成 0。 */
+function measure() {
+  const w = els.scroll.clientWidth;
+  const h = els.scroll.clientHeight;
+  if (w > 0 && h > 0) state.view.viewport = { w, h };
+}
 
 let nextId = 1;
 const marks = { undo: [], redo: [] };
@@ -624,6 +678,7 @@ function trackColor(trackId) {
 
 /** 几何重建：只在缩放/数据跨度变化时做，滚动和拖拽走不到这里。 */
 function rebuildGeometry() {
+  measure();
   const w = canvasWidth();
   const h = canvasHeight();
   els.grid.style.setProperty('--canvas-w', w + 'px');
@@ -631,9 +686,15 @@ function rebuildGeometry() {
   renderKeyboard();
   renderGridRows();
   renderRuler();
-  renderBeatLines();
+  renderGridLines();
+  renderZoomReadout();
   els.canvas.style.width = w + 'px';
   els.canvas.style.height = h + 'px';
+}
+
+function renderZoomReadout() {
+  document.getElementById('zoomH').textContent = `${Math.round(state.view.hZoom)}%`;
+  document.getElementById('zoomV').textContent = `${Math.round(state.view.vZoom)}%`;
 }
 
 function renderKeyboard() {
@@ -685,16 +746,50 @@ function renderRuler() {
   els.rulerInner.innerHTML = html;
 }
 
-function renderBeatLines() {
+/**
+ * 竖向网格线：**三级层次，细分跟着吸附走**。
+ *
+ * 这是"改吸附值，网格细线要一起变"的实现处：换 1/8 → 1/16，每拍之间的细分线
+ * 就从 1 根变成 3 根（1/32 是 7 根，即 den/4 - 1 根）。三条规则：
+ *   1. 细分粒度 = 当前吸附粒度（吸附关闭时不出细分线，只留拍/小节）；
+ *   2. 细分比拍粗时（1/2、1/1）没有意义，不出——拍线已经覆盖它了；
+ *   3. 细分线间距小于 4px 就不画，否则放大倍数不够时会糊成一片灰。
+ */
+function renderGridLines() {
   const bar = barTicks();
   const beat = beatTicks();
   const totalTicks = secToTick(totalSec());
   let html = '';
+
+  // 最弱一级：吸附细分
+  const sub = state.snapDen > 0 ? state.ppq * 4 / state.snapDen : 0;
+  const subPx = sub > 0 ? tickToX(sub) : 0;
+  if (sub > 0 && sub < beat && subPx >= 4) {
+    for (let t = sub; t <= totalTicks; t += sub) {
+      // 整拍和整小节的位置留给下面两级，避免同一根线画两遍
+      if (Math.abs(t % beat) < 1e-6) continue;
+      html += `<div class="beat-line sub" style="left:${tickToX(t)}px"></div>`;
+    }
+  }
+
+  // 拍线 / 小节线
   for (let t = 0; t <= totalTicks; t += beat) {
-    const isBar = Math.abs(t % bar) < 1;
+    const isBar = Math.abs(t % bar) < 1e-6;
     html += `<div class="beat-line ${isBar ? 'bar' : ''}" style="left:${tickToX(t)}px"></div>`;
   }
+
   els.beatLines.innerHTML = html;
+}
+
+/**
+ * 右边缘拉伸手柄的宽度。
+ *
+ * 固定 6px 只在音符够宽时成立。横向 100% 时 pxPerSec 只有 20，一个 1/8 音符
+ * 才 5px 宽——6px 手柄会把整个音符吃掉，于是"点哪儿都是拉边"，压根拖不动。
+ * 所以按音符宽度收：上限仍是 6px（够宽时手感不变），下限 2px 保证还点得到。
+ */
+function handleWidth(noteWidth) {
+  return Math.min(6, Math.max(2, noteWidth * 0.4));
 }
 
 /** 音符只渲染**当前轨**；其它轨画成细幽灵线，用来对位。 */
@@ -710,7 +805,8 @@ function renderNotes() {
       const opacity = (0.34 + 0.66 * clamp(n.vel, 0, 1)).toFixed(3);
       html += `<div class="note${sel}" data-id="${n.id}" style="left:${x.toFixed(1)}px;top:${pitchToY(n.pitch) + 1}px;`
         + `width:${w.toFixed(1)}px;height:${Math.max(4, h - 2)}px;background:${trackColor(n.track)};opacity:${opacity}">`
-        + `<span class="note-lyric">${esc(n.lyric)}</span><i class="handle"></i></div>`;
+        + `<span class="note-lyric">${esc(n.lyric)}</span>`
+        + `<i class="handle" style="width:${handleWidth(w).toFixed(1)}px"></i></div>`;
     } else {
       const t = state.tracks.find((k) => k.id === n.track);
       html += `<div class="note ghost" data-ghost="${n.id}" style="left:${x.toFixed(1)}px;`
@@ -820,7 +916,8 @@ function hitNote(x, y) {
     const nw = Math.max(3, tickToX(n.tick + n.dur) - nx);
     const ny = pitchToY(n.pitch) + 1;
     if (x >= nx && x <= nx + nw && y >= ny && y <= ny + Math.max(4, h - 2)) {
-      return { note: n, zone: (x >= nx + nw - 6) ? 'right' : 'body' };
+      const zone = x >= nx + nw - handleWidth(nw) ? 'right' : 'body';
+      return { note: n, zone };
     }
   }
   return null;
@@ -868,7 +965,9 @@ function onMouseDown(evt) {
       anchorId: hit.note.id, ids, anchors,
       startX: x, startY: y,
       startTick: xToTick(x), startPitch: yToPitch(y),
-      before: snapshot(ids), moved: false, bypassSnap,
+      // 注意：这里**不存** altKey。吸附是否绕过由每次 mousemove 的 evt.altKey 决定，
+      // 好让"先拖起来、再按住 Alt"能生效。
+      before: snapshot(ids), moved: false,
     };
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
@@ -887,8 +986,7 @@ function onMouseDown(evt) {
       mode: 'resize', anchorId: note.id, ids: [note.id],
       anchors: new Map([[note.id, { tick, dur: note.dur, pitch }]]),
       startX: x, startY: y, startTick: tick, startPitch: pitch,
-      before, created: true, bypassSnap,
-      structuralBefore: before,
+      before, created: true,
     };
     renderAll();
     window.addEventListener('mousemove', onMouseMove);
@@ -1060,29 +1158,33 @@ function onContextMenu(evt) {
 
 /* =====================================================================
    9. 横向/纵向缩放（锚在鼠标下，DAW 手感的关键）
+   ---------------------------------------------------------------------
+   缩放量本身是**百分比**（横向 50..500，纵向 50..200），派生出的 pxPerSec /
+   rowHeight 由 getter 算。于是"100% = 一分钟满屏 / A3–E6 满屏"永远成立，
+   窗口改大小之后 100% 的含义也不变。
    ===================================================================== */
 function zoomX(factor, clientX) {
   const rect = els.canvas.getBoundingClientRect();
   const localX = clientX - rect.left;
   const secAt = localX / state.view.pxPerSec;
-  const next = clamp(state.view.pxPerSec * factor, 8, 600);
-  if (next === state.view.pxPerSec) return;
-  state.view.pxPerSec = next;
+  const next = clamp(state.view.hZoom * factor, H_ZOOM_RANGE[0], H_ZOOM_RANGE[1]);
+  if (Math.abs(next - state.view.hZoom) < 1e-9) return;
+  state.view.hZoom = next;
   rebuildGeometry();
   renderAll();
-  els.scroll.scrollLeft += secAt * next - localX;
+  els.scroll.scrollLeft += secAt * state.view.pxPerSec - localX;
 }
 
 function zoomY(factor, clientY) {
   const rect = els.canvas.getBoundingClientRect();
   const localY = clientY - rect.top;
   const pitchAt = localY / state.view.rowHeight;
-  const next = clamp(state.view.rowHeight * factor, 7, 30);
-  if (next === state.view.rowHeight) return;
-  state.view.rowHeight = next;
+  const next = clamp(state.view.vZoom * factor, V_ZOOM_RANGE[0], V_ZOOM_RANGE[1]);
+  if (Math.abs(next - state.view.vZoom) < 1e-9) return;
+  state.view.vZoom = next;
   rebuildGeometry();
   renderAll();
-  els.scroll.scrollTop += pitchAt * next - localY;
+  els.scroll.scrollTop += pitchAt * state.view.rowHeight - localY;
 }
 
 /* =====================================================================
@@ -1209,10 +1311,13 @@ els.ruler.addEventListener('mousedown', (e) => {
   window.addEventListener('mouseup', up);
 });
 
-// 滚轮：Ctrl=横向缩放，Shift=纵向缩放，Alt=力度，其它=滚动
+// 滚轮：Ctrl=横向缩放，Ctrl+Shift=纵向缩放，Alt=力度，其它=滚动
+// 顺序要紧：Ctrl+Shift 时两个修饰键都为真，必须先判组合键，否则纵向永远走不到。
 els.scroll.addEventListener('wheel', (e) => {
-  if (e.ctrlKey) { e.preventDefault(); zoomX(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX); return; }
-  if (e.shiftKey) { e.preventDefault(); zoomY(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientY); return; }
+  const step = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  if (e.ctrlKey && e.shiftKey) { e.preventDefault(); zoomY(step, e.clientY); return; }
+  if (e.ctrlKey) { e.preventDefault(); zoomX(step, e.clientX); return; }
+  if (e.shiftKey) { e.preventDefault(); zoomY(step, e.clientY); return; }
   if (e.altKey) {
     e.preventDefault();
     const { x, y } = localPoint(e);
@@ -1233,7 +1338,10 @@ function setTool(t) { state.tool = t; syncButtons(); say(`工具：${{select:'�
 
 document.getElementById('snap').onchange = (e) => {
   state.snapDen = Number(e.target.value);
-  say(state.snapDen ? `网格 1/${state.snapDen}` : '吸附已关');
+  // 网格细线跟着吸附粒度走：换 1/8 → 1/16，每拍之间的细分线从 1 根变成 3 根。
+  renderGridLines();
+  renderStatus();
+  say(state.snapDen ? `网格 1/${state.snapDen}` : '吸附已关（只留拍线）');
 };
 
 document.getElementById('quantize').onclick = () => {
@@ -1251,14 +1359,17 @@ document.getElementById('quantize').onclick = () => {
   say(`量化 ${ids.length} 个音符`);
 };
 
+const viewCenterX = () => els.canvas.getBoundingClientRect().left + (els.scroll.clientWidth || 1200) / 2;
+const viewCenterY = () => els.canvas.getBoundingClientRect().top + (els.scroll.clientHeight || 760) / 2;
+
 document.getElementById('undo').onclick = undo;
 document.getElementById('redo').onclick = redo;
 document.getElementById('play').onclick = () => (playing ? pause() : play());
 document.getElementById('stop').onclick = stop;
-document.getElementById('zin').onclick = () => zoomX(1.25, els.canvas.getBoundingClientRect().left + els.scroll.clientWidth / 2);
-document.getElementById('zout').onclick = () => zoomX(1 / 1.25, els.canvas.getBoundingClientRect().left + els.scroll.clientWidth / 2);
-document.getElementById('vzin').onclick = () => zoomY(1.2, els.canvas.getBoundingClientRect().top + els.scroll.clientHeight / 2);
-document.getElementById('vzout').onclick = () => zoomY(1 / 1.2, els.canvas.getBoundingClientRect().top + els.scroll.clientHeight / 2);
+document.getElementById('zin').onclick = () => zoomX(1.25, viewCenterX());
+document.getElementById('zout').onclick = () => zoomX(1 / 1.25, viewCenterX());
+document.getElementById('vzin').onclick = () => zoomY(1.25, viewCenterY());
+document.getElementById('vzout').onclick = () => zoomY(1 / 1.25, viewCenterY());
 document.getElementById('follow').onclick = (e) => {
   state.follow = !state.follow;
   e.currentTarget.classList.toggle('on', state.follow);
@@ -1325,18 +1436,63 @@ window.addEventListener('drop', (e) => {
 state.notes = makeDemoNotes();
 rebuildGeometry();
 renderAll();
-// 视线落到 C4 附近，和原型的 scrollToCenterNotes 一致
-els.scroll.scrollTop = pitchToY(64) - 160;
+centerOnBaseRange();
+
+/**
+ * 把 A3–E6 这条带子摆到视口里（100% 时正好铺满）。
+ *
+ * 渲染坐标行号 = 108 - pitch（见 pitchToY），所以 E6 那一行的顶边在 (108-88) 行。
+ * 要让整条带子居中：滚动量 = E6 顶边 - (视口高 - 带子高)/2。
+ * vZoom=100 时带子高正好等于视口高，后半项为 0，于是可见的就恰好是 E6..A3。
+ *
+ * 早先这里是 centerOnC4（C3–C5 是 25 键奇数、正中恰好 C4）。换 A3–E6 后是 32 键
+ * 偶数、没有正中行，所以改成"对整条带子居中"，语义更稳，换音域也不用重推公式。
+ */
+function centerOnBaseRange() {
+  const rh = state.view.rowHeight;
+  const band = BASE_SPAN_KEYS * rh;
+  const slack = Math.max(0, state.view.viewport.h - band) / 2;
+  els.scroll.scrollTop = Math.max(0, pitchToY(BASE_PITCH_HIGH) - slack);
+}
+
+// 窗口改大小：100% 的含义跟着视口走，所以要重量、重建、再重新对位。
+window.addEventListener('resize', () => {
+  const expected = (() => {
+    const rh = state.view.rowHeight;
+    const slack = Math.max(0, state.view.viewport.h - BASE_SPAN_KEYS * rh) / 2;
+    return Math.max(0, pitchToY(BASE_PITCH_HIGH) - slack);
+  })();
+  const wasAnchored = Math.abs(els.scroll.scrollTop - expected) < state.view.rowHeight * 2;
+  rebuildGeometry();
+  renderAll();
+  if (wasAnchored) centerOnBaseRange();
+});
+
+/**
+ * 首帧再量一次。
+ *
+ * 脚本在 </body> 前跑，flex 布局未必已经定下来，`clientWidth` 可能是 0 而退回兜底尺寸。
+ * 等一帧再量，保证"100% = A3–E6 满屏 / 一分钟满屏"在打开时就成立。
+ */
+requestAnimationFrame(() => {
+  rebuildGeometry();
+  renderAll();
+  centerOnBaseRange();
+});
 
 /* --- 给 jsdom 冒烟测试用的门面。浏览器里用不到，但让"拖拽"可被无头验证。 --- */
 window.__PR__ = {
   state,
   api: {
     tickToSec, secToTick, tickToX, xToTick, secToX, canvasWidth, barTicks,
-    gridTicks, snapTick, totalSec, pitchName, yToPitch, hitNote,
+    gridTicks, snapTick, totalSec, pitchName, yToPitch, hitNote, rowH, pitchToY,
     undo, redo, deleteNotes, snapshotList, pushStructural, setTool, zoomX, zoomY,
-    localPoint, renderAll, makeDemoNotes, currentTrackNotes,
-    setSnap: (den) => { state.snapDen = den; },
+    localPoint, renderAll, makeDemoNotes, currentTrackNotes, centerOnBaseRange, measure,
+    baseRange: () => ({ low: BASE_PITCH_LOW, high: BASE_PITCH_HIGH, keys: BASE_SPAN_KEYS }),
+    setSnap: (den) => { state.snapDen = den; renderGridLines(); },
+    setViewport: (w, h) => { state.view.viewport = { w, h }; rebuildGeometry(); },
+    gridLineCount: () => els.beatLines.querySelectorAll('.beat-line').length,
+    subLineCount: () => els.beatLines.querySelectorAll('.beat-line.sub').length,
     quantize: () => document.getElementById('quantize').click(),
     play: () => play(), pause: () => pause(), stop: () => stop(),
     isPlaying: () => playing,

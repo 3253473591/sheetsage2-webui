@@ -70,7 +70,11 @@ CATALOG: dict[str, tuple[str, str]] = {
     ),
     "E_MODEL_MISSING": (
         "模型权重没找到",
-        "先跑一次 setup.bat 把模型下齐，再重启服务",
+        "双击 01_install.bat 把模型下齐，再重启服务",
+    ),
+    "E_JA_ALIGNER": (
+        "日文歌要用日语对齐器，但这台机器上还没装",
+        "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」",
     ),
     "E_DEVICE": (
         "显卡/设备不可用",
@@ -178,6 +182,8 @@ def describe(exc: BaseException, *, phase: str | None = None) -> StudioError:
             return _catalog("E_AUDIO_UNREADABLE", detail, text)
 
     # ---------------------------------------------------------- 歌词
+    if name == "JaAlignerMissing":
+        return _catalog("E_JA_ALIGNER", detail, text)
     if "没有拿到任何逐字时间戳" in text or ("噪" in text and "人声" in text):
         return _catalog("E_ASR_EMPTY", detail, text)
 

@@ -34,7 +34,8 @@ DIST = ROOT / "dist"
 
 #: 包里必须有的东西（相对包根）。
 REQUIRED = (
-    "webui.bat", "setup.bat", "downloads.json", "NOTICE", "pyproject.toml",
+    "00_start.bat", "01_install.bat", "02_models.bat", "downloads.json", "NOTICE",
+    "pyproject.toml",
     "README-internal-test.md", "内测说明.md",
     "runtime/python/python.exe",
     "runtime/ffmpeg/bin/ffmpeg.exe",

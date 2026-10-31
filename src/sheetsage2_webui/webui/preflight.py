@@ -91,7 +91,7 @@ def preflight(data_root: str | Path | None = None) -> list[dict[str, Any]]:
         checks.append({
             "key": "ffmpeg", "level": "error",
             "title": "缺 ffmpeg：扒谱、波形、SVP 导出都会用不了",
-            "detail": "跑一次 setup.bat，或把 ffmpeg 加到 PATH 后重启服务",
+            "detail": "跑一次 01_install.bat，或把 ffmpeg 加到 PATH 后重启服务",
         })
 
     # 2. 数据目录可写：这个最致命，先测。
@@ -130,7 +130,7 @@ def preflight(data_root: str | Path | None = None) -> list[dict[str, Any]]:
         checks.append({
             "key": "lyrics_model", "level": "warn",
             "title": "歌词识别权重不完整：" + "、".join(missing),
-            "detail": ("跑一次 setup.bat 把模型下齐（最小集 4.3 GB，对齐器随包带）；"
+            "detail": ("跑一次 01_install.bat 把模型下齐（最小集 4.3 GB，对齐器随包带）；"
                        "只想扒谱可以忽略"),
         })
 

@@ -1,4 +1,4 @@
-"""启动器的实体（`webui.bat` 只留 ASCII，所有中文都在这里）。
+"""启动器的实体（`00_start.bat` 只留 ASCII，所有中文都在这里）。
 
 为什么这么分：**cmd.exe 处理不了「UTF-8 的 .bat」**——`chcp 65001` 之后它仍按字节偏移重读
 批处理文件，多字节字符会把行切断，尾巴被当成命令执行（实测报
@@ -6,8 +6,8 @@
 所以 .bat 里一个非 ASCII 字符都不能有，中文交给 Python 打印
 （Python 在 Windows 控制台上走 `WriteConsoleW`，任何代码页都不会乱码）。
 
-    webui.bat              -> python scripts/launch.py
-    webui.bat 8010 2       -> python scripts/launch.py 8010 2
+    00_start.bat              -> python scripts/launch.py
+    00_start.bat 8010 2       -> python scripts/launch.py 8010 2
 
 做四件事：自检环境 → 端口可用性检查（**避开被别人占掉的端口**）→ 选模式 → 起服务 + 开浏览器。
 """
@@ -27,7 +27,7 @@ PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 STATIC = ROOT / "src" / "sheetsage2_webui" / "webui" / "static" / "index.html"
 DEFAULT_PORT = 8000
 
-#: 单实例锁的实现放在包里（`webui.bat` 只是壳，逻辑都在 Python 里）。
+#: 单实例锁的实现放在包里（`00_start.bat` 只是壳，逻辑都在 Python 里）。
 #:
 #: 这里**按文件路径加载**，不走 `import sheetsage2_webui.webui.singleton`：包的
 #: `__init__` 会导入 torch 与模型层（那是给服务用的），启动器只需要一个文件锁，
@@ -114,7 +114,7 @@ def pick_port(preferred: int) -> tuple[int, list[str]]:
     fallback = probe.getsockname()[1]
     probe.close()
     notes.append(f"端口 {preferred} {reason}，自动改用 {fallback}")
-    notes.append(f"想固定端口就用：webui.bat {fallback}")
+    notes.append(f"想固定端口就用：00_start.bat {fallback}")
     return fallback, notes
 
 

@@ -17,6 +17,8 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from sheetsage2_webui.asr import (  # noqa: E402
     AlignedChar,
     AsrConfig,
+    AsrEngine,
+    JaAlignerMissing,
     Section,
     asr_load_kwargs,
     interpolate_degenerate,
@@ -347,3 +349,37 @@ def test_load_kwargs_without_an_aligner_stays_clean():
 
     offloaded = asr_load_kwargs(AsrConfig(asr_model="m", max_vram="2GiB"), "bf16")
     assert offloaded["max_memory"] == {0: "2GiB", "cpu": "96GiB"}     # 默认给内存留 96GiB
+
+
+# ------------------------------------------------- 日语：没有对齐器就停下来
+def test_qwen_aligner_ready_needs_config_json(tmp_path):
+    engine = AsrEngine.__new__(AsrEngine)          # 不 load，只测这一个判断
+    engine.config = AsrConfig(asr_model=tmp_path, aligner_model=tmp_path / "missing")
+    assert engine._qwen_aligner_ready() is False
+
+    (tmp_path / "yes").mkdir()
+    (tmp_path / "yes" / "config.json").write_text("{}", encoding="utf-8")
+    engine.config.aligner_model = tmp_path / "yes"
+    assert engine._qwen_aligner_ready() is True
+
+    engine.config.aligner_model = None
+    assert engine._qwen_aligner_ready() is False
+
+
+def test_chars_from_stamps_are_moved_onto_the_song_timeline():
+    class Stamp:
+        def __init__(self, text, start, end):
+            self.text, self.start_time, self.end_time = text, start, end
+
+    chars = AsrEngine._chars_from_stamps([Stamp("こ", 0.2, 0.8)], 30.0)
+    assert [(c.text, round(c.start, 2), round(c.end, 2)) for c in chars] == [
+        ("こ", 30.2, 30.8)]
+
+
+def test_ja_without_the_aligner_maps_to_an_actionable_error():
+    """日语 + 没装对齐器：给一张说清"去 02_models.bat 选 2"的错误卡。"""
+    from sheetsage2_webui.webui.errors import describe
+
+    error = describe(JaAlignerMissing("识别出来是日语，但没装日语对齐器"))
+    assert error.code == "E_JA_ALIGNER"
+    assert "02_models" in error.action
