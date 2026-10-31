@@ -17,6 +17,9 @@ dependencies = [
     "scipy",
     "pretty_midi",
     "mido",
+    # SheetSage2 自己的推理代码要用（它的 requirements.txt 里有；实测漏了会
+    # ModuleNotFoundError: No module named 'mir_eval'，扒谱直接失败）。
+    "mir_eval",
     "soundfile",
     # --- TIFA 对齐后端（默认）的运行时依赖 -------------------------------------
     # 模型只有 40M，重的是上游宿主那一套（lightning/omegaconf/…）；

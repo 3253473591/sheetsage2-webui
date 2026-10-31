@@ -351,8 +351,26 @@ def step_selfcheck(manifest: dict, model_results: list[dict], *,
 
 
 # --------------------------------------------------------------------- 主流程
+#: 给 `00_start.bat` 用的中文提示。**中文只能从这里出**：.bat 必须保持纯 ASCII
+#: （cmd.exe 按字节偏移重读批处理，UTF-8 中文会把行切断）。
+MESSAGES = {
+    "need-install": (
+        "  还没装运行环境。\n"
+        "  请先双击 01_install.bat：它会装好环境，然后问你下载哪一套模型\n"
+        "  （只想先看看界面，就在那里选 4，什么都不下）。"
+    ),
+    "models-pending": (
+        "  模型还没下（上次选了「暂不下载」）。\n"
+        "  要真正扒谱 / 识别歌词，请双击 01_install.bat 或 02_models.bat 选一套；\n"
+        "  只想看界面就按任意键继续。"
+    ),
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SheetSage2 内测包首次运行引导")
+    parser.add_argument("--message", choices=tuple(MESSAGES), default=None,
+                        help="只打印一条提示就退出（.bat 用，中文不放 bat 里）")
     parser.add_argument("--steps", default=",".join(ALL_STEPS),
                         help=f"只跑这几步，逗号分隔（默认全部）：{','.join(ALL_STEPS)}")
     parser.add_argument("--models", default=None, choices=("minimal", "full", "skip"),
@@ -367,6 +385,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     use_utf8_stdio()
+    if args.message:
+        say()
+        say(MESSAGES[args.message])
+        say()
+        return 0
     manifest = load_manifest()
     steps = [item.strip() for item in args.steps.split(",") if item.strip()]
     unknown = [item for item in steps if item not in ALL_STEPS]

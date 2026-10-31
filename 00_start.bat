@@ -3,15 +3,15 @@ rem ============================================================
 rem  SheetSage2 Studio - start here
 rem
 rem  THREE ENTRIES:
-rem    00_start.bat    launch. NEVER downloads anything.
+rem    00_start.bat    launch. NEVER downloads anything on its own.
 rem    01_install.bat  first setup: env + torch + models, asks 1-4.
 rem    02_models.bat   add models later (Japanese / higher accuracy).
 rem
 rem  TWO RULES for this file:
 rem   1. Keep it ASCII. cmd.exe re-reads a .bat by byte offset,
 rem      so UTF-8 Chinese (even in rem/echo) splits lines and the
-rem      tail is executed as a command. All Chinese output comes
-rem      from scripts\launch.py / tools\bootstrap.py.
+rem      tail is executed as a command. ALL Chinese output comes
+rem      from tools\bootstrap.py (--message) / scripts\launch.py.
 rem   2. NO PARENTHESES in echoed text, and prefer `goto` labels
 rem      over `if ... ( ... )` blocks. A stray ")" inside a block
 rem      ends it early and cmd dies with
@@ -30,27 +30,40 @@ setlocal
 cd /d "%~dp0"
 
 set "PY=.venv\Scripts\python.exe"
+set "RUNTIME=runtime\python\python.exe"
 
 if not exist "%PY%" goto need_install
-
-rem Tester picked "not now" in 01_install.bat: say so, then launch anyway
-rem so the interface is reachable. No downloads happen here, ever.
 if not exist "models\.models-pending" goto launch
 
-echo.
-echo   [!] Models are not downloaded yet.
-echo       To actually use the studio, run 01_install.bat once.
-echo       If you only want to look at the interface, press any key to
-echo       continue - recognition will not work without models.
-echo.
+if not exist "%RUNTIME%" goto launch
+"%RUNTIME%" "tools\bootstrap.py" --message models-pending
 pause >nul
 goto launch
 
 :need_install
+if not exist "%RUNTIME%" goto broken
+"%RUNTIME%" "tools\bootstrap.py" --message need-install
 echo.
-echo   [!] Environment not ready - run 01_install.bat first.
-echo       It asks which model set to download. Pick 4 there if you
-echo       only want to look at the interface for now.
+echo   Install now?  Y = run 01_install.bat   N = quit
+choice /c YN /n /m "  [Y/N] "
+if errorlevel 2 exit /b 1
+echo.
+"%RUNTIME%" "tools\bootstrap.py"
+if errorlevel 1 goto install_failed
+goto launch
+
+:install_failed
+echo.
+echo   [x] Install did not finish - run 01_install.bat to retry.
+echo       Already downloaded files are kept.
+echo.
+pause
+exit /b 1
+
+:broken
+echo.
+echo   [x] runtime\python\python.exe not found.
+echo       The package looks incomplete - unzip it again, keep all folders.
 echo.
 pause
 exit /b 1
