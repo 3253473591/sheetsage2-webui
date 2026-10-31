@@ -184,10 +184,15 @@ def step_torch(manifest: dict, *, dry_run: bool) -> None:
         local.append(download(item["url"], WHEELS / item["name"], sha256=item["sha256"],
                               size=item.get("bytes"), label=item["name"], progress=True))
     say("    装进 .venv（pip 自己会打进度）…")
-    run([VENV_PYTHON, "-m", "pip", "install", *local,
-         "--index-url", manifest["pypi"]["index_url"],
-         "--extra-index-url", manifest["pypi"]["extra_index_url"]],
-        dry_run=dry_run)
+    code = run([VENV_PYTHON, "-m", "pip", "install", *local,
+                "--index-url", manifest["pypi"]["index_url"],
+                "--extra-index-url", manifest["pypi"]["extra_index_url"],
+                "--no-cache-dir"],
+               dry_run=dry_run)
+    if code and not dry_run:
+        raise SystemExit(
+            "    [x] torch 装失败。常见原因：网络断了 / pip 缓存里有个坏文件（已加 --no-cache-dir）。"
+            "重跑 01_install.bat 即可，已下好的轮子还在 wheels\\ 里。")
 
 
 def step_pip(manifest: dict, *, dry_run: bool) -> None:
@@ -200,11 +205,17 @@ def step_pip(manifest: dict, *, dry_run: bool) -> None:
         raise SystemExit("    [x] 还没装 torch。先跑 `01_install.bat`（会先下 torch 再装依赖），"
                          "或者 `01_install.bat --steps torch,pip`。")
     say("    正在装依赖（pip 的输出会一直滚，几分钟很正常）…")
-    run([VENV_PYTHON, "-m", "pip", "install", "-e", ".[web,svp]",
-         *manifest["pypi"]["packages"],
-         "--index-url", manifest["pypi"]["index_url"],
-         "--extra-index-url", manifest["pypi"]["extra_index_url"]],
-        dry_run=dry_run)
+    code = run([VENV_PYTHON, "-m", "pip", "install", "-e", ".[web,svp]",
+                *manifest["pypi"]["packages"],
+                "--index-url", manifest["pypi"]["index_url"],
+                "--no-cache-dir"],
+               dry_run=dry_run)
+    if code and not dry_run:
+        # **必须响亮地失败**：这里吞掉返回码的话，环境是半成品，用户却在最后才发现
+        # "No module named 'sheetsage2_webui'"——实测踩过。
+        raise SystemExit(
+            "    [x] 依赖装失败（pip 返回 {code}）。看着上面的报错：多半是网络断在中途，"
+            "重跑 01_install.bat 即可；一直失败就把整段输出发我。".format(code=code))
 
 
 def chosen_repos(manifest: dict, mode: str, with_17b: bool,
