@@ -50,8 +50,7 @@ SEVEN_ZIP_CANDIDATES = (Path(r"D:\7-Zip\7z.exe"),
 COPY_DIRS = ("src", "scripts", "tools", "web", "docs", "tests")
 #: 单个文件带走。
 COPY_FILES = ("pyproject.toml", "downloads.json", "NOTICE", "README.md",
-              "README-internal-test.md", "00_start.bat", "01_install.bat",
-              "02_models.bat", ".gitignore")
+              "00_start.bat", "01_install.bat", "02_models.bat", ".gitignore")
 #: 目录里不要的东西。
 EXCLUDE_NAMES = {"__pycache__", ".pytest_cache", "node_modules", "dist", ".smoke",
                  ".venv", "models", "output", "tmp", "wheels", "runtime"}
@@ -222,11 +221,6 @@ def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[st
     # 4) TIFA 对齐权重（fp16）。放离线包里，别指望国内能下到 GitHub Release。
     include_tifa(package, log)
 
-    # 5) 公测说明放在最显眼的位置
-    readme = ROOT / "README-internal-test.md"
-    if readme.is_file():
-        shutil.copy2(readme, package / "公测说明.md")
-        log.append(("公测说明.md", 1, readme.stat().st_size))
 
     # 6) 空目录占位，让内测者知道以后东西放哪
     for name in ("models", "output"):
