@@ -222,11 +222,11 @@ def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[st
     # 4) TIFA 对齐权重（fp16）。放离线包里，别指望国内能下到 GitHub Release。
     include_tifa(package, log)
 
-    # 5) 内测说明放在最显眼的位置
+    # 5) 公测说明放在最显眼的位置
     readme = ROOT / "README-internal-test.md"
     if readme.is_file():
-        shutil.copy2(readme, package / "内测说明.md")
-        log.append(("内测说明.md", 1, readme.stat().st_size))
+        shutil.copy2(readme, package / "公测说明.md")
+        log.append(("公测说明.md", 1, readme.stat().st_size))
 
     # 6) 空目录占位，让内测者知道以后东西放哪
     for name in ("models", "output"):

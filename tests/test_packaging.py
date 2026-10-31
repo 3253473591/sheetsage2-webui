@@ -127,7 +127,7 @@ def test_the_bundled_ffmpeg_is_where_the_packager_puts_it():
 # --------------------------------------------------------------------- 清单
 def test_downloads_manifest_is_complete():
     manifest = json.loads((PROJECT_ROOT / "downloads.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "alpha4"
+    assert manifest["version"] == "V2.0-beta1"
 
     # 随包的两样必须在
     assert manifest["bundled"]["python"]["path"] == "runtime/python"

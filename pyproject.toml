@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sheetsage2-webui"
-version = "0.1.0"
+version = "2.0.0b1"
 description = "SheetSage2 推理集成（调研阶段：稳定调用 + 结果验证）"
 requires-python = ">=3.10"
 dependencies = [

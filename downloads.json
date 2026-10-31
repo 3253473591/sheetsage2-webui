@@ -1,5 +1,5 @@
 {
-  "version": "alpha4",
+  "version": "V2.0-beta1",
   "note": "内测包清单：随包带 Python + ffmpeg，torch 与模型首次运行时按这里下载。",
   "bundled": {
     "python": {
