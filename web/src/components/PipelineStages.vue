@@ -47,6 +47,9 @@ function lockedFor(key: 'transcribe' | 'lyrics'): boolean {
 function lockNoteFor(key: 'transcribe' | 'lyrics'): string {
   if (props.env?.params_locked) return '4G 特供模式：参数已由服务端锁定'
   const label = key === 'lyrics' ? '歌词识别' : '扒谱'
+  if (props.job.cancel_requested) {
+    return '正在停止：推理不会被打断，等当前这一段跑完就停（一般十几秒到一分钟）'
+  }
   return `${label}正在跑，等它结束再改（改参数会让这一趟的结果作废）`
 }
 
@@ -58,6 +61,10 @@ const note2 = computed(() => lockNoteFor('lyrics'))
 // ----------------------------------------------------------------- 状态
 const pill1 = computed(() => {
   const run = stage('transcribe')
+  // 已经点过停止但还在收尾：明确说"正在停止"，否则看起来像卡死
+  if (run?.state === 'running' && props.job.cancel_requested) {
+    return { text: '正在停止…', tone: 'idle' as const }
+  }
   if (run?.state === 'running') return { text: `运行中 ${Math.round(run.progress * 100)}%`, tone: 'run' as const }
   if (run?.state === 'failed') return { text: '失败', tone: 'bad' as const }
   if (run?.state === 'done') return { text: '已完成', tone: 'ok' as const }
@@ -67,6 +74,9 @@ const pill1 = computed(() => {
 
 const pill2 = computed(() => {
   const run = stage('lyrics')
+  if (run?.state === 'running' && props.job.cancel_requested) {
+    return { text: '正在停止…', tone: 'idle' as const }
+  }
   if (run?.state === 'running') return { text: `识别中 ${Math.round(run.progress * 100)}%`, tone: 'run' as const }
   if (run?.state === 'failed') return { text: '失败', tone: 'bad' as const }
   if (run?.state === 'done') return { text: '已完成', tone: 'ok' as const }

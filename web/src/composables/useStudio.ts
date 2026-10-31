@@ -204,6 +204,38 @@ export function useStudio() {
     }
   }
 
+  // ------------------------------------------------------- 取消之后的收尾轮询
+  // 取消是协作式的：点的瞬间后端只是置了个标记，得等当前这一段跑完才真停，
+  // `phase_cancelled` 事件也要等那一刻才发。实测用户会以为"卡在 58% 了"。
+  // 所以点完停止就自己拉快照几秒钟一次，直到阶段落终态——不依赖 SSE 时序。
+  let cancelWatch: number | null = null
+  let cancelWatchDeadline = 0
+
+  function stopCancelWatch(): void {
+    if (cancelWatch !== null) {
+      window.clearInterval(cancelWatch)
+      cancelWatch = null
+    }
+  }
+
+  function watchCancellation(id: string): void {
+    stopCancelWatch()
+    cancelWatchDeadline = Date.now() + 180_000
+    cancelWatch = window.setInterval(async () => {
+      const current = jobs.value.find((job) => job.id === id)
+      if (!current || Date.now() > cancelWatchDeadline
+          || ['done', 'failed', 'cancelled'].includes(current.state)) {
+        stopCancelWatch()
+        return
+      }
+      try {
+        upsert(await api.getJob(id))
+      } catch {
+        /* 拉不到就下一轮再试 */
+      }
+    }, 1500)
+  }
+
   // ---------------------------------------------------------------- 数据
   async function refreshArtifacts(): Promise<void> {
     const id = activeId.value
@@ -384,6 +416,7 @@ export function useStudio() {
     if (!job) return
     try {
       upsert(await api.cancelJob(job.id))
+      watchCancellation(job.id)          // 等它真停下，别让界面停在 58%
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     }
@@ -547,6 +580,7 @@ export function useStudio() {
     disposed = true
     detach()
     stopHealthWatch()
+    stopCancelWatch()
   })
 
   /** 回到"没有选中工程"的状态：主区显示拖拽提示，后台任务照跑。 */
