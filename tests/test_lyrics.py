@@ -90,6 +90,91 @@ def test_english_word_marks_each_new_syllable_with_plus():
     assert fill.lyrics == ["running", MELISMA, CONTINUATION]
 
 
+# --------------------------------------------------------------- 英文词-音 DP 对齐
+# 对照 samples/对齐/英文/ 的人工谱归纳的规律（词头 = 词开始后第一个音、延音不越过
+# 下一个词、ASR 重复词跳过、漂移区按序列结构拉回）。全拉丁字母的词走 DP 路径。
+
+def test_english_word_heads_the_first_note_at_or_after_its_start():
+    """词头 = 第一个 onset ≥ 词开始的音，不是"重叠最多"的音。
+
+    TIFA 的词起点略早于音符起点（实测 112/228 同刻、83 个晚 0.1s）：按"重叠最多"
+    挑会把 'bubble' 推到下一个音上、前面留一个占位音节（实测旧算法因此错 137/341）。
+    """
+    notes = spans((7.91, 8.11), (8.11, 8.31), (8.31, 8.51), (8.51, 8.71))
+    chars = [Char("a", 7.92, 8.0), Char("bubble", 8.0, 8.54, parts=(8.28,)),
+             Char("up", 8.54, 8.69)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["a", "bubble", CONTINUATION, "up"]
+
+
+def test_english_one_word_per_note_chain_is_not_displaced():
+    """一词一音的连续链不被挤位（Poison 开头 "I'm not a bubble up to"）。"""
+    notes = spans((7.51, 7.71), (7.71, 7.91), (7.91, 8.11),
+                  (8.11, 8.31), (8.31, 8.51), (8.51, 8.71))
+    chars = [Char("I'm", 7.51, 7.67), Char("not", 7.67, 7.92),
+             Char("a", 7.92, 8.0), Char("bubble", 8.0, 8.54, parts=(8.28,)),
+             Char("up", 8.54, 8.69)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["I'm", "not", "a", "bubble", CONTINUATION, "up"]
+
+
+def test_duplicate_asr_word_is_skipped_and_reported():
+    """ASR 重复的词没有合法词头（它的词头区间被下一个词的开始封死）→ 跳过并登记。
+
+    实测 Poison "Cause I know I know you're poison"——重复的 "I know" 不许把
+    you're/poison 往后挤。
+    """
+    notes = spans((38.11, 38.31), (38.31, 38.71), (38.71, 38.91),
+                  (38.91, 39.31), (39.31, 39.71))
+    chars = [Char("I", 38.11, 38.27), Char("know", 38.27, 38.51),
+             Char("i", 38.51, 38.65), Char("know", 38.65, 38.68),
+             Char("you're", 38.68, 38.82), Char("poison", 38.82, 39.65, parts=(39.25,))]
+    fill = assign_lyrics(notes, chars)
+    words = [lyric for lyric in fill.lyrics if lyric.strip() not in ("", MELISMA, CONTINUATION)]
+    assert words == ["I", "know", "you're", "poison"]
+    assert set(fill.absorbed_chars) >= {"i", "know"}
+    assert fill.warnings
+
+
+def test_inflated_word_does_not_push_the_rest_of_the_phrase_late():
+    """TIFA 把 'you' 拉长到 1.4s、后面三个词整体晚 1.1s：按序列结构拉回连续的音。
+
+    实测 Poison "you want me baby that's"——旧算法整句推迟 3 个音。
+    """
+    notes = spans((55.11, 55.31), (55.31, 55.51), (55.51, 55.71),
+                  (55.71, 55.91), (56.11, 56.31), (56.51, 56.71))
+    chars = [Char("you", 55.05, 56.45), Char("want", 56.45, 56.70),
+             Char("me", 56.70, 56.89), Char("baby", 56.89, 57.68, parts=(57.1,)),
+             Char("that's", 57.68, 58.05)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["you", "want", "me", "baby", MELISMA, "that's"]
+
+
+def test_english_head_cannot_drift_far_before_the_word():
+    """词头不许比词的开始早 1.5s 以上：延音段形状代价不能把词拽到几秒前的音上。
+
+    实测 Poison 'any' 曾被拽早 3.2s（它前面有一段没有词的音阶走句）。
+    第二个音在 'ah' 的时间窗之外，留给导出侧当延音（svp.py 会补 `-`）。
+    """
+    notes = spans((10.0, 10.2), (10.2, 10.4), (12.0, 12.2))
+    chars = [Char("ah", 10.0, 10.15), Char("boom", 11.9, 12.15)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["ah", "", "boom"]
+
+
+def test_latin_melisma_stops_before_the_next_word_start():
+    """人工规则：延音不得越过下一个词的开始（实测 0 反例）。
+
+    老贪心路径（only_empty / 混合内容）里英文词头也吃这条边界。
+    """
+    notes = spans((0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8))
+    chars = [Char("la", 0.0, 0.65), Char("dee", 0.45, 0.7)]
+    fill = assign_lyrics(notes, chars, existing=[""] * 4, only_empty=True)
+    # dee 的头落在包含它的 note2 上；note1 是 la 的延音（onset 0.2 < 0.45 ✓）
+    assert fill.lyrics[:2] == ["la", MELISMA]
+    assert fill.lyrics[2] == "dee"
+
+
 def test_a_following_char_is_not_eaten_by_the_previous_melisma():
     """真实 bug：处理第一个字时贪心把下一个音标成 `-`，结果下一个字被吃掉。
 

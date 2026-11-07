@@ -9,16 +9,22 @@
 
 1. 一个字的范围是 `[s, e]`（零长度的退化字当成"发生在一瞬间"，给对称窗口）。它挂到一个
    **起点落在窗口里**的音；窗口里有多个音时，空的优先，再比"字是不是真的唱在它上面"。
-2. 一个字唱了几个音：第一个音挂字，后面的音写转音标记（中文/日文 `-`，英文 `+`）。
+2. 一个字唱了几个音：第一个音挂字，后面的音写转音标记（中文/日文 `-`，英文 `+`；
+   英文按 TIFA 的音节起点区分「延着当前音节」和「进下一个音节」）。
 3. 有多出来的字没有音位可放时，**记进 `absorbed_chars`**，不丢也不悄悄覆盖——
    根因是那段旋律的音比字少（模型没扒出那么细），需要人工核对。
 4. 没分到字的音保留空串并在报告里标出来。
+5. **全英文的歌不走逐字贪心，走词-音整体 DP 对齐**（`_align_latin_words`）：词头 =
+   词开始后第一个音、延音不越过下一个词的开始、ASR 重复词自动跳过、TIFA 时间漂移
+   的句子按序列结构拉回。规律全部对照 `samples/对齐/英文/` 的人工谱归纳——
+   人工/自动对比脚本在 `tmp/score_fill.py`（词头命中 70% → 95%，转音标记 44% → 80%）。
 
 时间轴统一用**秒**做匹配（容差是秒，更直观），再用 `timeline` 把结果写回音符。
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -29,6 +35,52 @@ DEFAULT_TOLERANCE = 0.20
 
 MELISMA = "-"
 CONTINUATION = "+"
+
+# --------------------------------------------------------------------- 英文词-音对齐
+# 英文的词头/转音不是逐字贪心能做对的（对照 samples/对齐/英文/ 的人工谱归纳）：
+#
+# 1. **词头 = 词开始之后第一个空音**，不是"重叠最多的音"。TIFA 的词起点略早于音符起点
+#    （实测 112/228 落在同一时刻、83 个晚 0.1s——音符在网格上，词时间在网格前一点），
+#    按"重叠最多"挑会把词推到下一个音上，前面那个音变成占位音节。
+# 2. **TIFA 的词时间会局部漂移**：一个词被 Viterbi 拉长到盖住后面几个词的音符
+#    （实测 'you' 1.4s、'choice' 1.55s），后面的词整体晚 1~2s。人工修谱是按
+#    "词序列对音符序列"听的，所以英文走同一条路：词-音整体 DP 对齐
+#    （`_align_latin_words`），时间只在可信窗内说话，其余交给序列结构。
+# 3. **延音不得越过下一个词的开始**（人工谱 0 反例）。
+# 4. 音节边界判定容差：TIFA 的音节起点和音符起点各有 ±0.1s（八分音符网格）的抖动，
+#    0.02s 的判据会把 "untrue" 的第二个音节判到没有音符可挂。
+
+#: 词起点与音符起点差在这个值内 → TIFA 时间可信，按距离精确挑音。
+HEAD_TRUST_SECONDS = 0.35
+#: 词头不许比词的开始早这么多（人工谱实测词头落在 [−0.1, +0.2]s；但 TIFA 漂移区的
+#: 词要靠结构往回拉，实测拉回最多 ~1.2s）。没有这条下界，延音段形状代价会把词拽到
+#: 几秒前的音上（实测 'any' 被拽早 3.2s、'my' 被拽早 2.3s）；卡到 0.35s 又会把漂移区
+#: 的词钉死在错误位置上（实测 'disassociate' 拉不回、整段跳词）。
+HEAD_EARLY_LIMIT = 1.5
+#: 差距超过这个值 → 这个词跟这段音符基本无关（多半是长休止里的幻觉词），
+#: 才允许"跳过"。实测漂移区的词偏 1~2.2s，都要落进序列里，不许跳。
+HEAD_ABANDON_SECONDS = 3.0
+#: 可信窗之外、放弃线之内：距离代价按平台算（漂移区里距离没有信息量），
+#: 只留一点残余斜率让同区域内仍然挑更近的音。
+HEAD_RESIDUAL_WEIGHT = 0.05
+#: 跳过一个词的记账代价。只在「没有合法词头」或「最近的合法位置超过放弃线」时
+#: 才会走到，不与赋值代价竞争（否则长漂移区里 DP 会发现"整段跳过更便宜"，
+#: 输出直接没词——实测踩过）。
+SKIP_COST = 0.45
+#: 词的延音段比「音节数−1」多出几个音的代价（每个，封顶 2 个）：
+#: 单音节词占着一串音 = 前面的词时间漂了，把后面的词拉回来。
+#: 封顶压在 2：更长的罚项会把"前一段没有词的音阶走句"硬塞给下一个词
+#: （实测 'any' 被拽早 3.2s——走句的音没人认领，超额罚项逼着它去认领）。
+RUN_EXCESS_COST = 0.4
+RUN_EXCESS_CAP = 2
+#: 延音段比「音节数−1」少几个音的代价（每个，封顶 2 个）：
+#: 双音节词一个延音都没有 = 它的第二个音节被下一个词抢了音位。
+RUN_DEFICIT_COST = 0.3
+RUN_DEFICIT_CAP = 2
+#: 第一个词之前的音（前奏尾音）每个的代价，防止首词飘走。
+LEAD_ORPHAN_COST = 0.1
+#: 音节起点判到音符上的容差（秒）。见上面第 4 条。
+SYLLABLE_EPSILON = 0.1
 
 
 @dataclass
@@ -74,6 +126,198 @@ def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> floa
 def _build_order(spans: Sequence[tuple[float, float]]) -> list[int]:
     """音符按起点排序后的下标序列。"""
     return sorted(range(len(spans)), key=lambda index: spans[index][0])
+
+
+# --------------------------------------------------------------------- 英文词-音对齐
+def _head_distance_cost(distance: float, *, trusted: bool) -> float:
+    """词起点与音符起点的距离代价。
+
+    可信窗内按真实距离算；之外进**平台区**——TIFA 的词时间在漂移区里本身就是错的，
+    距离没有信息量，让位给延音段形状（结构）代价，只留一点残余斜率让同区域内仍然
+    挑更近的音。窗口膨胀的词（见 `_is_inflated`）时间整体不可信，直接按平台算。
+    超过放弃线（`HEAD_ABANDON_SECONDS`）恢复线性陡增：那么远的音八成跟这个词无关。
+    """
+    if not trusted:
+        return HEAD_TRUST_SECONDS
+    if distance <= HEAD_TRUST_SECONDS:
+        return distance
+    if distance <= HEAD_ABANDON_SECONDS:
+        return (HEAD_TRUST_SECONDS
+                + HEAD_RESIDUAL_WEIGHT * (distance - HEAD_TRUST_SECONDS))
+    base = (HEAD_TRUST_SECONDS
+            + HEAD_RESIDUAL_WEIGHT * (HEAD_ABANDON_SECONDS - HEAD_TRUST_SECONDS))
+    return base + (distance - HEAD_ABANDON_SECONDS)
+
+
+def _syllable_count(text: str, parts: Sequence[float]) -> int:
+    """词的音节数：1 + TIFA 给出的第二、三…音节起点数。"""
+    return 1 + len(tuple(parts))
+
+
+def _is_inflated(start: float, end: float, syllables: int) -> bool:
+    """词窗口是不是被对齐器**拉长**了（Viterbi 把一个词摊到后面几个词的音频上）。
+
+    实测漂移区的词：'you' 1.4s / 'choice' 1.55s / 'i' 0.51s——都是单音节词占着
+    几倍于一个音节的窗口。窗口超过「音节数 × 0.35s」就当不可信。
+    """
+    return (end - start) > syllables * HEAD_TRUST_SECONDS
+
+
+class _RunShape:
+    """延音段形状代价：长度偏离「音节数 − 1」（ideal）的罚项。
+
+    多出（excess）= 前面的词时间漂了、把后面词的音吞了（漂移检测的主力）；
+    少了（deficit）= 它的某个音节没抢到音位（下一个词起太早）。
+    """
+
+    def __init__(self, excess: float, deficit: float,
+                 excess_cap: int, deficit_cap: int) -> None:
+        self.excess = excess
+        self.deficit = deficit
+        self.excess_cap = excess_cap
+        self.deficit_cap = deficit_cap
+
+    def total(self, run_length: int, ideal: int) -> float:
+        over = max(0, run_length - ideal)
+        under = max(0, ideal - run_length)
+        return (min(over, self.excess_cap) * self.excess
+                + min(under, self.deficit_cap) * self.deficit)
+
+
+
+def _align_latin_words(order: Sequence[int], spans: Sequence[tuple[float, float]],
+                       chars: Sequence[Any]) -> tuple[dict[int, int], list[int]]:
+    """英文：词序列 → 音符序列的整体对齐（DP）。
+
+    逐字贪心对英文有两类系统性错误（对照 `samples/对齐/英文/` 的人工谱）：
+    词头按"重叠最多"挑会晚一个音；TIFA 词时间漂移会让整句推迟、延音吞掉下一个词的
+    头。人工修谱的做法是**按词序列对音符序列**听，这里把同一件事形式化成最小代价对齐：
+
+    - 每个词占一个**词头音**，词头严格递增；
+    - 词头的候选上界 = 两个约束的交集：
+        1. onset ≥ 自己开始的音不能留给前一个词当延音（人工规则：延音都在下一个词
+           开始之前，实测 0 反例）——词头 ≤ 第一个 onset ≥ 自己开始的音；
+        2. onset ≥ 下一个词开始的音不能当自己的头——词头 < 第一个 onset ≥ 下一词
+           开始的音。ASR 重复的词因此**自动没有合法词头**（候选区间为空 → 跳过）。
+    - 词头与下一个词头之间的音 = 前一个词的延音段，长度偏离「音节数−1」要罚
+      （见 `_RunShape`）。
+    - 词头距离代价可信窗内线性、窗外汇入平台（见 `_head_distance_cost`）。
+
+    返回 `(词头表 {字符下标: 音符下标}, 跳过的字符下标列表)`。
+    """
+    words: list[tuple[int, str, float, float, int, bool]] = []
+    for index, char in enumerate(chars):
+        text = str(getattr(char, "text", "") or "").strip()
+        if not text:
+            continue
+        start = float(getattr(char, "start", 0.0))
+        end = float(getattr(char, "end", start))
+        syllables = _syllable_count(text, getattr(char, "parts", ()) or ())
+        words.append((index, text, start, end, syllables,
+                      _is_inflated(start, end, syllables)))
+    if not words:
+        return {}, []
+
+    note_count = len(order)
+    onsets = [spans[note][0] for note in order]
+    # 按词开始时间排序处理（正常输入本来就有序；这里只是防御）
+    sequence = sorted(range(len(words)), key=lambda k: (words[k][2], k))
+
+    def first_ge(t: float) -> int:
+        """第一个 onset >= t 的音符位置（onsets 升序）。"""
+        return bisect.bisect_left(onsets, t - 1e-9)
+
+    INF = float("inf")
+    #: f[u]：处理完当前词、下一个空闲音符位置是 u 的最小代价。
+    f = [LEAD_ORPHAN_COST * u for u in range(note_count + 1)]
+    #: 每个词在状态 u 的决策：(前一状态 u，是否占头)。回溯用。
+    choices: list[dict[int, tuple[int, bool]]] = []
+
+    for step, word_key in enumerate(sequence):
+        _idx, _text, start, _end, _syllables, inflated = words[word_key]
+        trusted = not inflated
+        # 延音段的属主是**前一个**词，形状按它的音节数算；
+        # 第一个词之前没有词，前面的音是前奏，按 LEAD 线性算。
+        if step:
+            ideal = words[sequence[step - 1]][4] - 1
+            shape = _RunShape(RUN_EXCESS_COST, RUN_DEFICIT_COST,
+                              RUN_EXCESS_CAP, RUN_DEFICIT_CAP)
+        else:
+            ideal = 0
+            shape = _RunShape(LEAD_ORPHAN_COST, 0.0, note_count, 0)
+        # 下一个词真正更晚才开始时才约束词头上界（零长度字对儿同时刻，不互相约束）
+        if step + 1 < len(sequence) and words[sequence[step + 1]][2] > start + 1e-6:
+            hi = min(first_ge(start), first_ge(words[sequence[step + 1]][2]) - 1)
+        else:
+            hi = first_ge(start)
+        hi = min(hi, note_count - 1)
+
+        # 词头 position 的转移：min over u ∈ [0, position] of
+        #   f[u] + shape(position − u) + 距离代价。
+        # shape 只在 mid = position − u ∈ [0, ideal + CAPX] 内变化，之外饱和成常数
+        # → 用前缀最小值兜住更长的延音段。
+        reach = min(ideal + shape.excess_cap, note_count - 1)
+        prefix = []                            # prefix[u] = min(f[0..u])
+        prefix_arg = []                        # 以及取到最小值的那个 u（回溯要用）
+        running = INF
+        running_u = -1
+        for u, value in enumerate(f):
+            if value < running:
+                running, running_u = value, u
+            prefix.append(running)
+            prefix_arg.append(running_u)
+        nf = [INF] * (note_count + 1)
+        pick: dict[int, tuple[int, bool]] = {}
+        # 词头合法区间 [lo, hi]：lo 挡"拽到几秒前"（见 HEAD_EARLY_LIMIT），hi 挡
+        # "占下一个词的头"。
+        lo = first_ge(start - HEAD_EARLY_LIMIT)
+        for position in range(note_count):
+            best_cost = INF
+            best_u = -1
+            for mid in range(0, min(position, reach) + 1):
+                u = position - mid
+                value = f[u] + shape.total(mid, ideal)
+                if value < best_cost:
+                    best_cost, best_u = value, u
+            tail = position - reach - 1
+            if tail >= 0:                      # 延音段长到超出封顶：形状是常数，
+                value = prefix[tail] + shape.total(reach + 1, ideal)
+                if value < best_cost:          # 前驱是前缀最小值所在的 u，不是 tail
+                    best_cost, best_u = value, prefix_arg[tail]
+            if best_u >= 0 and lo <= position <= hi:
+                distance = abs(onsets[position] - start)
+                total = best_cost + _head_distance_cost(distance, trusted=trusted)
+                if total < nf[position + 1]:
+                    nf[position + 1] = total
+                    pick[position + 1] = (best_u, True)
+            # 跳过：只允许「这个词没有合法词头」（[lo, hi] 与当前状态不相交，ASR 重复词
+            # 就是被这条拦下的）或「最近的合法位置远得离谱」（长休止里的幻觉词）。
+            # 不给"跳过更便宜"这个选项——否则长漂移区里 DP 会发现整段跳过更划算，
+            # 输出直接没词（实测踩过）。
+            if max(lo, position) > hi:
+                skip_allowed = True
+            else:
+                closest = min(max(first_ge(start), max(lo, position)), hi)
+                skip_allowed = abs(onsets[closest] - start) > HEAD_ABANDON_SECONDS
+            if skip_allowed and f[position] + SKIP_COST < nf[position]:
+                nf[position] = f[position] + SKIP_COST
+                pick[position] = (position, False)
+        f = nf
+        choices.append(pick)
+
+    # 回溯
+    state = min(range(note_count + 1), key=lambda u: f[u])
+    heads: dict[int, int] = {}
+    skipped: list[int] = []
+    for step in range(len(sequence) - 1, -1, -1):
+        previous, assigned = choices[step].get(state, (state, False))
+        if assigned:
+            heads[words[sequence[step]][0]] = order[state - 1]
+        else:
+            skipped.append(words[sequence[step]][0])
+        state = previous
+    skipped.reverse()
+    return heads, skipped
 
 
 # --------------------------------------------------------------------- 切分模式
@@ -300,12 +544,45 @@ def assign_lyrics(
     last_note = -1
 
     # ---------------- 第一遍：只决定每个字挂在哪个音上 ----------------
-    for char in chars:
+    # 全英文（拉丁字母）的词走整体 DP 对齐（`_align_latin_words`）：词头落点、
+    # TIFA 时间漂移、ASR 重复词都在那里解决。中文/日文/混合内容走原来的逐字贪心。
+    dp_heads: dict[int, int] | None = None
+    dp_skipped: set[int] = set()
+    if not only_empty:
+        texts = [str(getattr(char, "text", "") or "").strip() for char in chars]
+        if any(texts) and all(_is_latin(text) for text in texts if text):
+            dp_heads, skipped_words = _align_latin_words(order, spans, chars)
+            dp_skipped = set(skipped_words)
+
+    for char_index, char in enumerate(chars):
         text = str(getattr(char, "text", "") or "").strip()
         if not text:
             continue
         start = float(getattr(char, "start", 0.0))
         end = float(getattr(char, "end", start))
+
+        if dp_heads is not None:
+            head = dp_heads.get(char_index)
+            if head is not None:
+                lyrics[head] = text
+                taken.add(head)
+                heads[head] = (text, start, max(end, start))
+                parts = tuple(getattr(char, "parts", ()) or ())
+                if parts:
+                    parts_of[head] = parts
+                fill.reasons["dp_head"] = fill.reasons.get("dp_head", 0) + 1
+                fill.assigned += 1
+            else:
+                # DP 跳过的词 = 没有合法词头的词（ASR 重复 / 多出的词）。
+                # 与 absorbed 一个语义：登记出来让人核对，不悄悄丢。
+                fill.reasons["dp_skip"] = fill.reasons.get("dp_skip", 0) + 1
+                if char_index in dp_skipped:
+                    fill.absorbed_chars.append(text)
+                    fill.warnings.append(
+                        f"词「{text}」({start:.2f}s) 没有可挂的音位"
+                        f"（多半是识别重复/多出的词）")
+                fill.assigned += 1
+            continue
 
         # 对齐器对约 16% 的字给出零长度时间戳（start == end），意思是"这个字没对齐上"。
         # 此时 `[start − 容差, end)` 会退化成空窗口，把它们全漏掉（实测《光芒》53/324）。
@@ -414,18 +691,29 @@ def assign_lyrics(
         limit = (ordered_heads[position + 1][0]
                  if position + 1 < len(ordered_heads) else len(spans))
         parts = parts_of.get(head, ())
+        # 人工规则：延音不得越过下一个词的开始（实测 0 反例）。DP 路径的词头已经被
+        # 这个约束卡过；这里防的是老贪心路径（中日文/混合内容里的英文词）TIFA 的
+        # end 拖得太长、把下一个词的头音吞成延音的情况——只对英文词生效。
+        next_word_start = (ordered_heads[position + 1][1][1]
+                           if position + 1 < len(ordered_heads)
+                           and _is_latin(ordered_heads[position + 1][1][0]) else None)
         cursor = 0
         for note in order:
             if note <= head or note >= limit or note in taken:
                 continue
             if spans[note][0] >= end:
                 break     # 转音必须落在字的时间窗内；容差只用来找"头"，不放大窗口
+            if (next_word_start is not None
+                    and spans[note][0] >= next_word_start):
+                break     # 已经唱到下一个词了：这个音留给它，不当延音
             if only_empty and lyrics[note].strip():
                 continue
             # 有音节信息时：这个音开头新音节 → `+`，否则是延长当前音节 → `-`。
             # 没有音节信息（中日文、或旧数据）一律写延长标记。
+            # 容差是音节起点/音符起点各自的抖动（八分音符网格 ±0.1s）：卡得太紧会把
+            # "untrue" 的第二个音节判到没有音可挂（人工谱里它是 `+`）。
             new_syllable = False
-            while cursor < len(parts) and parts[cursor] <= spans[note][0] + 0.02:
+            while cursor < len(parts) and parts[cursor] <= spans[note][0] + SYLLABLE_EPSILON:
                 cursor += 1
                 new_syllable = True
             lyrics[note] = CONTINUATION if new_syllable else MELISMA
