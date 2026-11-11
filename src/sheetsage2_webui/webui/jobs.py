@@ -140,6 +140,11 @@ PARAM_SPECS: dict[str, list[dict[str, Any]]] = {
         # `param_choices`）；原型是标签按钮，这里保留本项目的**下拉框**。
         {"key": "language", "label": "语言", "default": "", "widget": "select",
          "options": []},
+        # 歌词源 LRC/TXT：给了就跳过语音识别，官方词直接对齐（见 asr.LyricLine）。
+        # 输入交互由前端 LyricsSource 组件接管（拖文件/粘贴），这里只提供值的行位，
+        # 让"改了歌词源 → 歌词结果作废"的口径与其他参数一致。
+        {"key": "lyrics_lrc", "label": "歌词LRC", "default": "", "widget": "text",
+         "hint": "官方歌词 LRC/TXT：给了就跳过语音识别，直接对齐"},
     ],
 }
 

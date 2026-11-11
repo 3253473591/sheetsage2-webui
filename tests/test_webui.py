@@ -546,7 +546,7 @@ def test_env_exposes_the_param_panel(tmp_path):
     assert [item["key"] for item in params["transcribe"]] == \
         ["dtype", "device", "range", "quantize"]
     assert [item["key"] for item in params["lyrics"]] == \
-        ["asr_model", "source", "skip_instrumental", "language"]
+        ["asr_model", "source", "skip_instrumental", "language", "lyrics_lrc"]
     assert [item["label"] for item in params["transcribe"][0]["options"]] == \
         ["BF16 快速", "FP32 精确"]
     # 音高修正是**固定**的（一律降一个八度），故意不给用户选

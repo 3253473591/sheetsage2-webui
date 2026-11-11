@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import LogDrawer from '@/components/LogDrawer.vue'
+import LyricsDrawer from '@/components/LyricsDrawer.vue'
 import PipelineStages from '@/components/PipelineStages.vue'
 import ProjectHead from '@/components/ProjectHead.vue'
 import ResultsPanel from '@/components/ResultsPanel.vue'
@@ -314,6 +315,12 @@ function toggleTheme(): void {
           </div>
         </div>
 
+        <LyricsDrawer
+          v-if="active"
+          :value="String(active.options?.lyrics_lrc ?? '')"
+          :running="active.stages?.lyrics?.state === 'running'"
+          @apply="(v) => setOptions({ lyrics_lrc: v })"
+        />
         <LogDrawer :logs="logs" />
       </main>
     </div>

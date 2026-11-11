@@ -779,6 +779,35 @@ def assign_lyrics(
     return fill
 
 
+def retime_lines_by_chars(lines: Sequence[Any], chars: Sequence[Any]) -> list[Any]:
+    """无时间戳的官方词（TXT）借用已对齐字符的时间：两串字符按比例位对位。
+
+    识别文本靠不住但**时间靠得住**——TIFA 把识别文本对到音频上，每个被唱的
+    音节都有时刻；误听不改音节数（中文尤甚）。官方词的总字数与识别字数按比例
+    位对位（官方第 j 个字拿识别第 j×N/M 个字的时刻），字面换成官方词、
+    时间保持识别的。识别多听/漏听一两个字时错位不超过那一两个字；
+    但识别在某个区间**整段多听了内容**（桥段和声、说唱）时，官方词会整体
+    后移——这是按位映射的原理上限，要逐行精确请用带时间戳的 LRC。
+    """
+    from .asr import AlignedChar
+
+    spoken = [c for c in chars if str(c.text or "").strip()]
+    official: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        for ch in line.text:
+            if ch.strip():
+                official.append((index, ch))
+    if not official or not spoken:
+        return list(chars)
+    total = len(official)
+    out: list[Any] = []
+    for position, (index, ch) in enumerate(official):
+        k = min(int(position / total * len(spoken)), len(spoken) - 1)
+        spoken_char = spoken[k]
+        out.append(AlignedChar(ch, spoken_char.start, spoken_char.end))
+    return out
+
+
 def note_spans_seconds(timeline: Timeline, notes: Sequence[Mapping[str, Any]]
                        ) -> list[tuple[float, float]]:
     """把 tick 域音符换算成秒跨度。

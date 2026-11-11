@@ -123,6 +123,32 @@ def parse_lrc(text: str) -> list[LyricLine]:
     return rows
 
 
+_LRC_TAG = re.compile(r"^\[[^\]]*\]")
+
+
+def parse_lyric_text(text: str) -> list[LyricLine]:
+    """歌词文件内容 → 行。有时间标签走 LRC 口径；纯 TXT（无时间戳）的行
+    `start = -1`——没有可用的行首时间，对齐时按音符起点铺位。
+
+    两种口径都先剥掉行首的 `[标签]`（`[ti:…]` / `[offset:0]` 这类元数据行
+    塞进词序里会吃掉开头的音符配额，实测整首错位）、制作名单与演唱者标记行；
+    纯 TXT 的第一行若是 `xx - xx` 形态再当标题丢掉（没有时间可判）。
+    """
+    if _LRC_TIME.search(text):
+        return parse_lrc(text)
+    rows: list[LyricLine] = []
+    for raw in text.splitlines():
+        line = _LRC_TAG.sub("", raw).strip()
+        if not line or line.endswith(("：", ":")):
+            continue
+        if line.startswith(LRC_META_PREFIXES):
+            continue
+        rows.append(LyricLine(-1.0, line))
+    if rows and (" - " in rows[0].text or "/" in rows[0].text):
+        rows = rows[1:]
+    return rows
+
+
 def read_lrc(path: str | Path) -> str:
     """读 LRC 文件，按候选编码试（中文圈的 LRC 常见 GBK）。"""
     raw = Path(path).read_bytes()
@@ -712,7 +738,12 @@ class AsrEngine:
                 "日语歌请走普通识别（Qwen 对齐器）。")
         run = AsrRun(sections=[s.as_dict() for s in sections],
                      language=TIFA_TO_LANGUAGE.get(sticky), text=joined)
-        run.warnings.append(f"歌词源：LRC（{len(lines)} 行），官方词直接对齐，未做语音识别")
+        if lines[0].start >= 0:
+            run.warnings.append(f"歌词源：LRC（{len(lines)} 行），官方词逐行对齐，未做语音识别")
+        else:
+            run.warnings.append(
+                f"歌词源：TXT（{len(lines)} 行，无时间戳）——行序按段落时长均分，"
+                "行内位置是估的；想要逐行精确对齐请用带时间戳的 LRC")
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
@@ -726,9 +757,11 @@ class AsrEngine:
         work.mkdir(parents=True, exist_ok=True)
         self._workdir = work
 
-        # **逐行对齐**：每行 LRC 文本只对它自己那段时间窗的音频。行首时间是 LRC
-        # 的权威锚点（合成歌尤其准），这样词不可能跨行泄漏，和声/间奏也干扰不到
-        # 行内的 Viterbi——整段喂的话实测会漂出半个行（行对位 70%）。
+        # LRC 带时间戳 → **逐行对齐**：每行文本只对它自己那段时间窗的音频。
+        # 行首时间是 LRC 的权威锚点（合成歌尤其准），词不可能跨行泄漏，和声/间奏
+        # 也干扰不到行内的 Viterbi——整段喂的话实测会漂出半个行（行对位 70%）。
+        # TXT（无时间戳）不走这里：它在调用方先跑一遍识别拿时间轴，再按字符
+        # 位置替换字面（见 lyrics.retime_lines_by_chars）。
         import soundfile as sf
 
         duration = float(sf.info(str(audio)).duration)
@@ -752,7 +785,7 @@ class AsrEngine:
         try:
             if progress:
                 progress({"stage": "asr", "index": len(lines), "total": len(lines),
-                          "start": lines[-1].start, "end": line_end if lines else 0.0})
+                          "start": lines[-1].start, "end": sections[-1].end if sections else 0.0})
             run.chars.extend(self._align_with_tifa(pending, run, wanted_language, sticky))
             run.slices = len(pending)
             if on_slice is not None and run.chars:
@@ -810,7 +843,7 @@ class AsrEngine:
         if not sections:
             return AsrRun(warnings=["没有可用的区间"])
         if lyrics_source is not None:
-            lines = (parse_lrc(lyrics_source) if isinstance(lyrics_source, str)
+            lines = (parse_lyric_text(lyrics_source) if isinstance(lyrics_source, str)
                      else list(lyrics_source))
             if not lines:
                 return AsrRun(warnings=["LRC 里没有解析出唱词行"])

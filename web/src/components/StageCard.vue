@@ -32,10 +32,6 @@ function onSelect(key: string, event: Event): void {
   emit('option', key, (event.target as HTMLSelectElement).value)
 }
 
-function onText(key: string, event: Event): void {
-  emit('option', key, (event.target as HTMLInputElement).value)
-}
-
 /** 产物自检（G4）：`done` 旁边那个"自检 21/21"，有缺失时标黄。 */
 const check = computed<ArtifactCheck | null>(() => {
   const raw = props.stage.detail?.artifacts
@@ -146,16 +142,6 @@ const etaText = computed(() => {
               {{ item.label }}
             </option>
           </select>
-          <input
-            v-else-if="row.widget === 'text'"
-            type="text"
-            class="text-param"
-            :value="row.value"
-            :disabled="locked"
-            :title="locked ? lockNote : (row.hint ?? '')"
-            :placeholder="'LRC 文件路径…'"
-            @change="onText(row.key, $event)"
-          />
           <button
             v-for="item in row.options"
             v-else

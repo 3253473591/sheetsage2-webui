@@ -1,5 +1,5 @@
 {
-  "version": "V2.0-beta2",
+  "version": "V2.0-beta3",
   "note": "内测包清单：随包带 Python + ffmpeg，torch 与模型首次运行时按这里下载。",
   "bundled": {
     "python": {

@@ -24,11 +24,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from ..asr import (AsrConfig, AsrEngine, normalize_language, parse_lrc, read_lrc,
-                   parsed_sections, sections_from_lab, widen_to_vocals)
+from ..asr import (AsrConfig, AsrEngine, normalize_language, parse_lyric_text,
+                   read_lrc, parsed_sections, sections_from_lab, widen_to_vocals)
 from ..engine import EngineConfig, SheetSage2Engine
 from ..fsutil import write_text_atomic
 from ..lyrics import DEFAULT_TOLERANCE, fill_project, note_spans_seconds
+from ..timeline import from_stored_measures
 from ..pipeline import run as pipeline_run
 from ..result import EXPECTED_MIDI, EXPECTED_TEXT, inspect_output_dir
 from ..sections import is_instrumental
@@ -454,19 +455,27 @@ class RunnerSession:
         language = normalize_language(raw_language)
         language_label = raw_language or "自动"
         progress.log(f"识别语言：{language_label}")
-        # 歌词源：填了 LRC（文件路径，或直接粘贴的 LRC 文本）就用官方词对齐，
-        # 不做语音识别——识别文本靠不住的歌（文言词/合成人声/强伴奏）的救场通道。
-        lyrics_source: str | None = None
+        # 歌词源：抽屉里粘贴的 LRC/TXT（或一个文件路径）——识别文本靠不住的歌
+        # （文言词/合成人声/强伴奏）的救场通道。两种口径：
+        # - LRC（带时间戳）：跳过语音识别，逐行喂 TIFA 精确对齐；
+        # - TXT（无时间戳）：没有行首时间可用，识别照跑一趟拿粗时间轴，官方行
+        #   按字符比例铺位后逐行 TIFA 精对齐（见 lyrics.pseudo_time_lines）。
+        lyrics_source = None
+        official_lines = None
         raw_lrc = str(job.options.get("lyrics_lrc") or "").strip()
         if raw_lrc:
-            if "[00:" in raw_lrc[:200]:
-                lyrics_source = raw_lrc          # 直接粘贴的 LRC 文本
+            lrc_path = Path(raw_lrc)
+            text = read_lrc(lrc_path) if lrc_path.is_file() else raw_lrc
+            lines = parse_lyric_text(text)
+            if not lines:
+                raise RuntimeError("歌词源里没有解析出唱词行（只有标题/制作名单？）")
+            if lines[0].start < 0:
+                official_lines = lines
+                progress.log(f"歌词源：TXT（{len(lines)} 行，无时间戳）——识别跑一趟拿时间，"
+                             "歌词字面用官方词")
             else:
-                lrc_path = Path(raw_lrc)
-                if not lrc_path.is_file():
-                    raise RuntimeError(f"歌词 LRC 文件不存在：{raw_lrc}")
-                lyrics_source = read_lrc(lrc_path)
-            progress.log("歌词源：LRC，官方词直接对齐，跳过语音识别")
+                lyrics_source = lines
+                progress.log(f"歌词源：LRC（{len(lines)} 行），逐行精确对齐，跳过语音识别")
         # 切片：按模型识别出来的段落切，段落边界是音乐上的自然切点。
         # 「段落」参数默认"只跑唱段"——前奏/间奏/尾奏一般不唱，跳过省时间也省显存。
         asr_config = self.asr.config_for(job)
@@ -512,6 +521,12 @@ class RunnerSession:
         run = engine.transcribe_sections(audio_path, sections, progress=on_slice_start,
                                          on_slice=on_slice, language=language,
                                          lyrics_source=lyrics_source)
+        if official_lines is not None:
+            from ..lyrics import retime_lines_by_chars
+
+            run.chars = retime_lines_by_chars(official_lines, run.chars)
+            run.text = "\n".join(line.text for line in official_lines)
+            run.warnings.append("TXT 无时间戳：识别只用于取时间轴，歌词字面为官方词")
         progress.check()
         if not run.chars:
             hint = ("；上传的干声如果和这首不是同一首歌，或者长度对不上，就会这样"

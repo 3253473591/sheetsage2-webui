@@ -1242,3 +1242,120 @@ a {
 }
 .sg-check.bad { color: var(--warn); }
 .sg-stagnant { color: var(--warn); }
+
+/* ---- 歌词源抽屉（右侧）：拖入工程后出现，粘贴官方词、应用后跳过语音识别 ---- */
+.lyr-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+.lyr-tab {
+  position: absolute;
+  top: 96px;
+  right: 0;
+  writing-mode: vertical-rl;
+  padding: 14px 6px;
+  border-radius: 8px 0 0 8px;
+  border: 1px solid var(--line);
+  border-right: none;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 2px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.lyr-tab:hover {
+  color: var(--text);
+}
+.lyr-dot {
+  position: absolute;
+  top: 8px;
+  left: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.lyr-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 400px;
+  padding: 16px 18px;
+  background: var(--card);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: auto;
+}
+.lyr-drawer.open .lyr-panel {
+  display: flex;
+}
+.lyr-drawer.open .lyr-tab {
+  display: none;
+}
+.lyr-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+}
+.lyr-note {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.lyr-text {
+  flex: 1;
+  min-height: 180px;
+  resize: none;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+.lyr-warn {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--warn);
+  background: var(--warn-l);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.lyr-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.lyr-meta.warn {
+  color: var(--warn);
+}
+.lyr-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+.lyr-apply {
+  padding: 4px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--primary-b);
+  background: var(--primary-l);
+  color: var(--primary);
+  font-size: 12px;
+}
+.lyr-apply:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
