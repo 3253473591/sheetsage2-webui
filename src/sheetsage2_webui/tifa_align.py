@@ -232,7 +232,12 @@ class TifaAligner:
             dataset = AudioTextDataset(
                 filemap=filemap, g2p_config=self._g2p, g2p_root=self.model.parent,
                 vocabulary=self._vocab, audio_sample_rate=self._backend.sample_rate,
-                language=[self.language],
+                # 英文 LSTM 转换器一并激活：中文/粤语切片混着英文词（"Oh my god"）时，
+                # 只传 zh 会让 G2P 抛 G2PConversionError，而数据集把异常吞成 skip——
+                # 整个切片静默出不了 TextGrid（实测《爱x无限大》5 段里 3 段全灭）。
+                # 模型 config 里本来就配了 en 转换器，只是被语言过滤挡住了；
+                # 拉丁词由它认领，汉字照走拼音，纯中文不受影响。
+                language=[self.language, "en"],
                 # 默认的 "discard" 会因为**一个**没见过的音素丢掉整段
                 # （实测粤语《富士山下》「调」的 eu 就让整个 50s 窗口归零）。
                 # 丢掉那条发音路径就行，其余照常对齐。

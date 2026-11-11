@@ -12,9 +12,10 @@ import type { JobOptions, ParamChoice, ParamGroup, ParamSpecs } from '@/types'
 export interface ParamRow {
   key: string
   label: string
-  widget: 'buttons' | 'select'
+  widget: 'buttons' | 'select' | 'text'
   value: string
   options: ParamChoice[]
+  hint?: string
 }
 
 /** `/api/env` 还没回来时的兜底：版式照原型留着，值用服务端的默认。 */
@@ -47,6 +48,9 @@ export const FALLBACK_PARAMS: ParamSpecs = {
       options: [{ value: '', label: '自动' }, { value: 'Chinese', label: '中文' },
                 { value: 'English', label: '英语' }, { value: 'Japanese', label: '日语' },
                 { value: 'Cantonese', label: '粤语' }, { value: 'Korean', label: '韩语' }] },
+    { key: 'lyrics_lrc', label: '歌词LRC', default: '', widget: 'text',
+      hint: '官方歌词 LRC 文件路径（或直接粘贴 LRC 内容）。给了就跳过语音识别，' +
+            '用官方词对齐——识别文本靠不住的歌（文言词/合成人声/强伴奏）用这个' },
   ],
 }
 
@@ -61,6 +65,7 @@ export function paramRows(groups: ParamGroup[] | undefined,
       widget: group.widget ?? 'buttons',
       value: current === undefined || current === null ? group.default : String(current),
       options: group.options ?? [],
+      hint: group.hint,
     }
   })
 }
@@ -69,7 +74,7 @@ export function paramRows(groups: ParamGroup[] | undefined,
 export function paramLabel(groups: ParamGroup[] | undefined, key: string,
                            value: string): string {
   const group = groups?.find((item) => item.key === key)
-  const hit = group?.options.find((item) => item.value === value)
+  const hit = group?.options?.find((item) => item.value === value)
   if (hit) return hit.label
   return value || '自动'
 }

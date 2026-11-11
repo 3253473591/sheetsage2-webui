@@ -9,8 +9,9 @@
 
 1. 一个字的范围是 `[s, e]`（零长度的退化字当成"发生在一瞬间"，给对称窗口）。它挂到一个
    **起点落在窗口里**的音；窗口里有多个音时，空的优先，再比"字是不是真的唱在它上面"。
-2. 一个字唱了几个音：第一个音挂字，后面的音写转音标记（中文/日文 `-`，英文 `+`；
-   英文按 TIFA 的音节起点区分「延着当前音节」和「进下一个音节」）。
+2. 一个字唱了几个音：第一个音挂字，后面的音写转音标记（日文/英文 `+`——多音节词
+   进下一拍/下一音节；中粤韩 `-`——一字一音的延音）。英文按 TIFA 的音节起点区分
+   「延着当前音节」和「进下一个音节」；日文按拍唱，每个音都是下一拍。
 3. 有多出来的字没有音位可放时，**记进 `absorbed_chars`**，不丢也不悄悄覆盖——
    根因是那段旋律的音比字少（模型没扒出那么细），需要人工核对。
 4. 没分到字的音保留空串并在报告里标出来。
@@ -114,9 +115,29 @@ def _is_latin(text: str) -> bool:
     return any("a" <= ch.lower() <= "z" for ch in text)
 
 
+#: 假名（平假名/片假名）。出现假名 = 日语（汉字是中日共用的，假名才有区分度，
+#: 与 `tifa_align.guess_language` 同一口径）。
+_KANA_RANGES = (("\u3040", "\u30ff"),)
+#: 与前一个假名拼成一拍的结合假名（きょ = 一拍）。促音 っ/ッ 与长音 ー 各占一拍。
+_COMBINING_KANA = set("ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ")
+
+
+def _is_japanese(text: str) -> bool:
+    return any(lo <= ch <= hi for ch in text for lo, hi in _KANA_RANGES)
+
+
+def _mora_count(text: str) -> int:
+    """日语词的拍数（モーラ）：一个假名一拍，结合假名（ゃゅょ…）并入前一拍。
+
+    ありがとう = 5 拍；きょ = 1 拍。日语按拍唱，一个词的拍数就是它的「音节数」，
+    DP 靠它判断延音段是正常的一字一拍还是吞了后面的词。
+    """
+    return sum(1 for ch in text if ch not in _COMBINING_KANA)
+
+
 def continuation_marker(text: str) -> str:
-    """后续音节用哪个标记：英文词写 `+`，其余（中日文）写 `-`。"""
-    return CONTINUATION if _is_latin(text) else MELISMA
+    """后续音节用哪个标记：英文/日文是多音节词，写 `+`；中粤韩一字一音，写 `-`。"""
+    return CONTINUATION if _is_latin(text) or _is_japanese(text) else MELISMA
 
 
 def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
@@ -212,7 +233,13 @@ def _align_latin_words(order: Sequence[int], spans: Sequence[tuple[float, float]
             continue
         start = float(getattr(char, "start", 0.0))
         end = float(getattr(char, "end", start))
-        syllables = _syllable_count(text, getattr(char, "parts", ()) or ())
+        parts = tuple(getattr(char, "parts", ()) or ())
+        # 日语的「音节」是拍（モーラ）：Qwen 对齐器不给音节起点，按假名数拍；
+        # 英文有 TIFA 的音节起点，没有就当单音节（Qwen 路径）。
+        if _is_japanese(text):
+            syllables = _mora_count(text)
+        else:
+            syllables = _syllable_count(text, parts)
         words.append((index, text, start, end, syllables,
                       _is_inflated(start, end, syllables)))
     if not words:
@@ -234,14 +261,21 @@ def _align_latin_words(order: Sequence[int], spans: Sequence[tuple[float, float]
     choices: list[dict[int, tuple[int, bool]]] = []
 
     for step, word_key in enumerate(sequence):
-        _idx, _text, start, _end, _syllables, inflated = words[word_key]
+        _idx, prev_check, start, _end, _syllables, inflated = words[word_key]
         trusted = not inflated
         # 延音段的属主是**前一个**词，形状按它的音节数算；
         # 第一个词之前没有词，前面的音是前奏，按 LEAD 线性算。
         if step:
-            ideal = words[sequence[step - 1]][4] - 1
-            shape = _RunShape(RUN_EXCESS_COST, RUN_DEFICIT_COST,
-                              RUN_EXCESS_CAP, RUN_DEFICIT_CAP)
+            prev_word = words[sequence[step - 1]]
+            if _is_japanese(prev_word[1]):
+                # 日语词的延音段不罚：假名按拍唱多长都正常，汉字词的拍数
+                # （夢 = ゆめ 两拍）从字面上无从得知，罚了只会把后面词拽早。
+                ideal = 0
+                shape = _RunShape(0.0, 0.0, RUN_EXCESS_CAP, RUN_DEFICIT_CAP)
+            else:
+                ideal = prev_word[4] - 1
+                shape = _RunShape(RUN_EXCESS_COST, RUN_DEFICIT_COST,
+                                  RUN_EXCESS_CAP, RUN_DEFICIT_CAP)
         else:
             ideal = 0
             shape = _RunShape(LEAD_ORPHAN_COST, 0.0, note_count, 0)
@@ -544,13 +578,23 @@ def assign_lyrics(
     last_note = -1
 
     # ---------------- 第一遍：只决定每个字挂在哪个音上 ----------------
-    # 全英文（拉丁字母）的词走整体 DP 对齐（`_align_latin_words`）：词头落点、
-    # TIFA 时间漂移、ASR 重复词都在那里解决。中文/日文/混合内容走原来的逐字贪心。
+    # 日文/英文是**多音节词语言**：一个词（ありがとう / computer）唱在几个音上，
+    # 词头落点、转音分界都要按词算 → 走整体 DP 对齐（`_align_latin_words`）。
+    # 中文/粤语/韩语一个方块字就是一个音节，走原来的逐字贪心。
+    # 判定看**整首**：歌词里出现假名（含汉字混排的日语歌词）就整首按词算；
+    # 纯汉字（中粤）或韩文不会误入——它们没有假名也不全是拉丁字母。
     dp_heads: dict[int, int] | None = None
     dp_skipped: set[int] = set()
     if not only_empty:
+        # 整体重填（重新识别）：填词落点会变，旧词残留在不再是词头的音上会变成
+        # "てる てる"这种重复、或"行头一字为名"这种上一轮的词（实测两次踩过，
+        # DP/贪心两条路径都会）。清空再填，旧词一个不留。
+        lyrics[:] = [""] * len(spans)
         texts = [str(getattr(char, "text", "") or "").strip() for char in chars]
-        if any(texts) and all(_is_latin(text) for text in texts if text):
+        has_kana = any(_is_japanese(text) for text in texts)
+        if any(texts) and all(
+                _is_latin(text) or _is_japanese(text) or has_kana
+                for text in texts if text):
             dp_heads, skipped_words = _align_latin_words(order, spans, chars)
             dp_skipped = set(skipped_words)
 
@@ -709,12 +753,16 @@ def assign_lyrics(
             if only_empty and lyrics[note].strip():
                 continue
             # 有音节信息时：这个音开头新音节 → `+`，否则是延长当前音节 → `-`。
-            # 没有音节信息（中日文、或旧数据）一律写延长标记。
+            # 日文没有音节起点（Qwen 对齐器不给），但日语按拍唱——每个音都是
+            # 下一拍，写 `+`（ありがとう 跨 3 个音 = ありがとう + +）。
+            # 英文没有音节信息时（Qwen 路径/旧数据）一律写延长标记 `-`。
             # 容差是音节起点/音符起点各自的抖动（八分音符网格 ±0.1s）：卡得太紧会把
             # "untrue" 的第二个音节判到没有音可挂（人工谱里它是 `+`）。
             new_syllable = False
             while cursor < len(parts) and parts[cursor] <= spans[note][0] + SYLLABLE_EPSILON:
                 cursor += 1
+                new_syllable = True
+            if not parts and _is_japanese(text):
                 new_syllable = True
             lyrics[note] = CONTINUATION if new_syllable else MELISMA
             taken.add(note)

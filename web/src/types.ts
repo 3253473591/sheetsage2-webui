@@ -51,9 +51,11 @@ export interface ParamGroup {
   key: string
   label: string
   default: string
-  /** 画成标签按钮（默认）还是下拉框——「语言」用下拉框，选项比原型多。 */
-  widget?: 'buttons' | 'select'
-  options: ParamChoice[]
+  /** 画成标签按钮（默认）/下拉框（语言）/文本输入框（LRC 路径）。 */
+  widget?: 'buttons' | 'select' | 'text'
+  options?: ParamChoice[]
+  /** 整行（非按钮）的悬停说明——LRC 输入框用。 */
+  hint?: string
 }
 
 /** 两个阶段各自的参数行。 */
@@ -76,6 +78,8 @@ export interface JobOptions {
   /** 段落：`vocal` = 只跑唱段（跳过前奏/间奏/尾奏） / `all` = 全部段落。 */
   skip_instrumental?: string
   language?: string
+  /** 歌词 LRC：文件路径或直接粘贴的 LRC 文本。给了就跳过语音识别，用官方词对齐。 */
+  lyrics_lrc?: string
 }
 
 /** 启动预检（G15）里的一项：`error`/`warn`/`info` 会在顶栏画横幅。 */

@@ -200,9 +200,58 @@ def test_melisma_stops_at_the_next_char():
 
 def test_continuation_marker_picks_by_script():
     assert continuation_marker("你") == MELISMA
-    assert continuation_marker("あ") == MELISMA
     assert continuation_marker("hello") == CONTINUATION
     assert continuation_marker("abc") == CONTINUATION
+    # 日文是多音节词语言（ありがとう 按拍唱），延续写 `+`；中粤韩一字一音写 `-`
+    assert continuation_marker("あ") == CONTINUATION
+    assert continuation_marker("ありがとう") == CONTINUATION
+    assert continuation_marker("한") == MELISMA
+
+
+def test_japanese_word_spans_notes_with_plus():
+    """日语词跨多个音：每个音都是下一拍 → `ありがとう + +`（用户人工修谱的写法）。"""
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9))
+    fill = assign_lyrics(notes, [Char("ありがとう", 0.0, 0.9)])
+    assert fill.lyrics == ["ありがとう", CONTINUATION, CONTINUATION]
+
+
+def test_japanese_lyrics_with_kanji_go_through_the_word_path():
+    """日语歌词汉字假名混排：出现假名就整首按词算（DP 路径）。
+
+    汉字是中日共用的；纯汉字（中粤）必须仍走逐字贪心。
+    """
+    # 汉字词 + 假名词，词头各占一个音、谢谢的拍子铺满
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.2), (1.2, 1.5))
+    chars = [Char("夢", 0.0, 0.3), Char("infinite", 0.3, 0.35),
+             Char("愛", 0.35, 0.6), Char("ありがとう", 0.6, 1.5)]
+    fill = assign_lyrics(notes, chars)
+    words = [l for l in fill.lyrics if l.strip() not in ("", MELISMA, CONTINUATION)]
+    assert words[0] == "夢" and "ありがとう" in words
+    assert fill.reasons.get("dp_head", 0) >= 3
+
+
+def test_refill_wipes_stale_lyrics_off_non_head_notes():
+    """整体重填（only_empty=False）：词头落点变了，旧词不能残留在别的音上。
+
+    实测《スロウリー》重填后出现"てる てる"——旧词留在不再是词头的音上。
+    """
+    notes = spans((1.35, 1.55), (1.55, 1.75), (1.75, 1.94), (1.94, 2.13))
+    chars = [Char("壊れ", 1.30, 1.55), Char("てる", 1.92, 2.00)]
+    fill = assign_lyrics(notes, chars, existing=["x", "てる", "", ""])
+    # てる 的头按时间戳落在 note2（1.75 晚于 1.92−容差…按 DP 距离挑更近的 1.94）
+    heads = [i for i, l in enumerate(fill.lyrics) if l == "てる"]
+    assert len(heads) == 1, fill.lyrics
+    assert fill.lyrics[heads[0] - 1] != "てる"
+
+
+def test_chinese_lyrics_stay_on_the_char_path():
+    """纯汉字（中粤韩）一字一音：不走词级 DP，延续写 `-`。"""
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.5))
+    chars = [Char("爱", 0.0, 0.3), Char("无", 0.3, 0.6), Char("限", 0.6, 0.9),
+             Char("大", 0.9, 1.5)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["爱", "无", "限", "大"]
+    assert fill.reasons.get("dp_head") is None
 
 
 def test_zero_length_char_still_gets_a_note():

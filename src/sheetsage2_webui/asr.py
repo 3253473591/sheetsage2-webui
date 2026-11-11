@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -78,6 +79,59 @@ def _max_char_gap(chars: Sequence["AlignedChar"]) -> tuple[float, int]:
         if gap > worst:
             worst, worst_at = gap, index
     return worst, worst_at
+
+
+# --------------------------------------------------------------------- LRC 歌词源
+#: LRC 制作名单行的前缀（词/曲/编曲……）——不是唱词。
+LRC_META_PREFIXES = ("词", "曲", "编曲", "分轨", "调教", "吉他", "电吉他", "唢呐",
+                     "笛箫", "和声", "混音", "协力", "作词", "作曲", "监制", "出品",
+                     "PV", "美术", "字幕")
+_LRC_TIME = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]([^\n]*)")
+
+
+@dataclass
+class LyricLine:
+    """LRC 的一句唱词及其行首时间（秒）。"""
+
+    start: float
+    text: str
+
+
+#: TIFA 语言代码 -> 我们的语言名（LRC 模式写进 lyrics.json 的 language_used 用）。
+TIFA_TO_LANGUAGE = {"zh": "Chinese", "en": "English", "ja": "Japanese", "yue": "Cantonese"}
+
+
+def parse_lrc(text: str) -> list[LyricLine]:
+    """LRC 文本 → 唱词行。过滤三类非唱词行：
+
+    - 演唱者标记（行尾是冒号：`苍穹：`、`星尘infinity Rap：`）；
+    - 制作名单（词/曲/编曲……开头）；
+    - 标题行（开头一秒内、带 ` - ` 或 `/` 的那一行，如 `将军行 - 忘川风华录/苍穹`）。
+    """
+    rows: list[LyricLine] = []
+    for match in _LRC_TIME.finditer(text):
+        when = int(match.group(1)) * 60 + float(match.group(2))
+        line = match.group(3).strip()
+        if not line or line.endswith("：") or line.endswith(":"):
+            continue
+        if line.startswith(LRC_META_PREFIXES):
+            continue
+        if when < 1.0 and (" - " in line or "/" in line):
+            continue
+        rows.append(LyricLine(when, line))
+    rows.sort(key=lambda row: row.start)
+    return rows
+
+
+def read_lrc(path: str | Path) -> str:
+    """读 LRC 文件，按候选编码试（中文圈的 LRC 常见 GBK）。"""
+    raw = Path(path).read_bytes()
+    for enc in ("utf-8-sig", "gbk", "big5", "shift_jis", "utf-16"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 @dataclass
@@ -623,6 +677,110 @@ class AsrEngine:
             units = [unit.strip('.,;:!?"\'()[]{}') for unit in units]
         return units if len(units) == len(spans) else []
 
+    def _transcribe_with_lrc(
+        self,
+        audio: str | Path,
+        sections: Sequence[Section],
+        lines: Sequence[LyricLine],
+        *,
+        language: str | None,
+        progress: Any = None,
+        on_slice: Any = None,
+        workdir: str | Path | None = None,
+    ) -> AsrRun:
+        """LRC 歌词源：官方词按段落喂 TIFA 强制对齐，**不做语音识别**。
+
+        字是官方词、时间是 TIFA 测的；没有 LRC 行的段落直接跳过（那里本来就
+        不唱），识别模型与 Qwen 对齐器都不用加载。
+        """
+        from .tifa_align import guess_language, tifa_language
+
+        started = time.monotonic()
+        import torch
+
+        wanted_language = (normalize_language(self.config.language)
+                           if language is None else normalize_language(language))
+        joined = "\n".join(line.text for line in lines)
+        sticky = tifa_language(wanted_language or "zh")
+        script = guess_language(joined)
+        if sticky == "zh" and script != "zh":
+            sticky = script
+        if sticky == "ja":
+            raise JaAlignerMissing(
+                "歌词 LRC 是**日语**，但随包的 TIFA 不支持日语 G2P，LRC 对齐走不了。"
+                "双击 02_models.bat，选 2（日语特供）补下模型也不行——那是识别用的；"
+                "日语歌请走普通识别（Qwen 对齐器）。")
+        run = AsrRun(sections=[s.as_dict() for s in sections],
+                     language=TIFA_TO_LANGUAGE.get(sticky), text=joined)
+        run.warnings.append(f"歌词源：LRC（{len(lines)} 行），官方词直接对齐，未做语音识别")
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+        ready, reason = self._tifa_ready()
+        if not ready:
+            raise RuntimeError("LRC 对齐需要 TIFA 但它不可用：" + reason)
+
+        work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix=ASR_WORK_PREFIX))
+        if workdir is None:
+            _prune_stale_workdirs()
+        work.mkdir(parents=True, exist_ok=True)
+        self._workdir = work
+
+        # **逐行对齐**：每行 LRC 文本只对它自己那段时间窗的音频。行首时间是 LRC
+        # 的权威锚点（合成歌尤其准），这样词不可能跨行泄漏，和声/间奏也干扰不到
+        # 行内的 Viterbi——整段喂的话实测会漂出半个行（行对位 70%）。
+        import soundfile as sf
+
+        duration = float(sf.info(str(audio)).duration)
+        pending: list[tuple[Path, str, float]] = []
+        for index, line in enumerate(lines):
+            # 行窗：到下一行开头为止；行间空隙太大（桥段）就封顶 15s——
+            # 拿着一行词对 30s 的伴奏，Viterbi 会漂到没词的地方去。
+            line_end = (lines[index + 1].start if index + 1 < len(lines)
+                        else min(line.start + 15.0, duration))
+            clip_start = max(0.0, line.start - 0.1)
+            clip_end = min(duration, max(min(line_end + 0.05, line.start + 15.0),
+                                         line.start + 1.0))
+            if clip_end - clip_start < 0.3:
+                continue
+            clip = work / f"lrc-{index:03d}.wav"
+            self._extract(audio, Section(clip_start, clip_end), clip, tifa=True)
+            pending.append((clip, line.text, clip_start))
+            if progress:
+                progress({"stage": "asr", "index": index + 1, "total": len(lines),
+                          "start": line.start, "end": line_end})
+        try:
+            if progress:
+                progress({"stage": "asr", "index": len(lines), "total": len(lines),
+                          "start": lines[-1].start, "end": line_end if lines else 0.0})
+            run.chars.extend(self._align_with_tifa(pending, run, wanted_language, sticky))
+            run.slices = len(pending)
+            if on_slice is not None and run.chars:
+                on_slice(run, len(lines), len(lines))
+        finally:
+            for clip, _text, _offset in pending:
+                clip.unlink(missing_ok=True)
+            if workdir is None:
+                shutil.rmtree(work, ignore_errors=True)
+
+        run.elapsed_seconds = time.monotonic() - started
+        if torch.cuda.is_available():
+            run.peak_gpu_mib = torch.cuda.max_memory_allocated() / 1024**2
+        run.zero_length_chars = sum(1 for c in run.chars if c.end <= c.start + 1e-9)
+        if run.zero_length_chars:
+            run.chars, run.repaired_chars = interpolate_degenerate(run.chars)
+        if run.zero_length_ratio > 0.1:
+            run.warnings.append(
+                f"{run.zero_length_chars}/{len(run.chars)} 个字没有可用时间戳"
+                f"（{run.zero_length_ratio:.0%}），已按前后空档均分补位置")
+        run.max_gap_seconds, gap_at = _max_char_gap(run.chars)
+        run.max_gap_at = gap_at
+        text_chars = len("".join(joined.split()))
+        run.text_coverage = len(run.chars) / text_chars if text_chars else 1.0
+        if not run.chars:
+            run.warnings.append("LRC 对齐没有拿到任何时间戳")
+        return run
+
     def transcribe_sections(
         self,
         audio: str | Path,
@@ -632,6 +790,7 @@ class AsrEngine:
         on_slice: Any = None,
         language: str | None = None,
         workdir: str | Path | None = None,
+        lyrics_source: str | Sequence[LyricLine] | None = None,
     ) -> AsrRun:
         """按区间逐段识别，把每段的时间戳换算回整首曲的时间轴。
 
@@ -640,9 +799,24 @@ class AsrEngine:
 
         ``language`` 可以按次覆盖配置里的语言；``None`` 表示**自动**（让模型自己判）。
         不传则用 `config.language`。
+
+        ``lyrics_source``：官方歌词（LRC 文本/文件内容，或已解析的
+        :class:`LyricLine` 列表）。给了就**不做语音识别**——把官方词按行喂给
+        TIFA 强制对齐，拿到的字是正确的词、时间是 TIFA 测的。适用于识别文本
+        靠不住的歌（文言词/合成人声/强伴奏）：实测《将军行》ASR 行相似度只有
+        0.30，换官方词后字面全对。段落里没有 LRC 行的区间直接跳过（那里本来就
+        不唱），识别模型完全不用加载。
         """
         if not sections:
             return AsrRun(warnings=["没有可用的区间"])
+        if lyrics_source is not None:
+            lines = (parse_lrc(lyrics_source) if isinstance(lyrics_source, str)
+                     else list(lyrics_source))
+            if not lines:
+                return AsrRun(warnings=["LRC 里没有解析出唱词行"])
+            return self._transcribe_with_lrc(audio, sections, lines, language=language,
+                                             progress=progress, on_slice=on_slice,
+                                             workdir=workdir)
         self.load()
         import torch
 

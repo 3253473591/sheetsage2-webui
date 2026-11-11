@@ -26,7 +26,7 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from sheetsage2_webui import svp  # noqa: E402
 
 SAMPLES = PROJECT_ROOT / "samples"
-ALIGN = SAMPLES / "对齐"
+ALIGN = SAMPLES / "对齐" / "中"
 MACHINE = "王朝1982,朱旭BooBoo - 我本将心向明月.svp"
 MANUAL = "王朝1982,朱旭BooBoo - 我本将心向明月（人工）.svp"
 

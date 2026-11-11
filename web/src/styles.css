@@ -775,6 +775,21 @@ a {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* 歌词 LRC 路径输入框（歌词阶段参数里唯一一行文本框） */
+.text-param {
+  grid-column: 1 / -1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--primary-b);
+  background: var(--primary-l);
+  color: var(--primary);
+  font-size: 11px;
+  font-family: inherit;
+}
+.text-param:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* 结果 */
 .results {
