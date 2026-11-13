@@ -47,6 +47,42 @@ from sheetsage2_webui.webui.jobs import (  # noqa: E402
 )
 
 
+def test_jobs_facade_keeps_the_old_public_exports():
+    """`webui.jobs` 是**兼容门面**：以前能从这里 import 的名字现在还得能 import。
+
+    计划 §3.2 的“保留兼容入口”不是口号：外部脚本/插件只认这条路径，拆模块时漏一个
+    名字就是一次 `ImportError`。
+    """
+    import sheetsage2_webui.webui.jobs as facade
+
+    for name in ("option_values", "ASR_MODEL_PREFIX", "validate_options", "PARAM_SPECS",
+                 "safe_name", "scan_files", "project_folder_name", "is_internal",
+                 "claim_project_dir", "content_fingerprint"):
+        assert hasattr(facade, name), name
+    # 私有的也曾经能 import（有人在调试时用过），一并保留
+    for name in ("_per_phase", "_option_label", "_UNSAFE", "_PhaseWatch"):
+        assert hasattr(facade, name), name
+
+
+def test_manager_timeouts_stay_writable_attributes(tmp_path):
+    """阈值以前是普通属性（`manager.stall_timeout = {...}` 直接改）；现在由调度器持有，
+    门面必须保留可写语义——否则运维脚本热调阈值会静默失效。"""
+    manager = JobManager(tmp_path / "data", runners=fake_runners())
+    try:
+        manager.stall_timeout = {"transcribe": 5.0, "lyrics": 6.0}
+        assert manager.stall_timeout == {"transcribe": 5.0, "lyrics": 6.0}
+        manager.stall_timeout = 7.0                       # 一个数 = 两个阶段都用它
+        assert manager.stall_timeout == {"transcribe": 7.0, "lyrics": 7.0}
+        manager.hard_timeout = 8.0
+        assert manager.hard_timeout["lyrics"] == 8.0
+        manager.watchdog_interval = 0.5
+        assert manager.watchdog_interval == 0.5
+        manager.trash_purge_interval = 0.25
+        assert manager.trash_purge_interval == 0.25
+    finally:
+        manager.shutdown()
+
+
 def test_grid_note_name_maps_ticks_to_note():
     # 命名跟 Synthesizer V 的 SNAP 菜单对齐；量化口径 = 一拍/96
     assert grid_note_name(20, 1920) == "128 分三连音"
@@ -107,6 +143,29 @@ def test_group_lyric_lines_breaks_on_gap_and_length():
     lines = group_lyric_lines(chars)
     assert [line["text"] for line in lines] == ["晚风停在", "旧站台"]
     assert lines[0]["start"] == 1.0 and lines[1]["end"] == 5.9
+
+
+def test_metadata_counts_the_terminal_event(tmp_path):
+    """`job.json` 的 `events` 计数必须包含终态事件（诊断包对不上就是白写）。
+
+    收尾把"发终态事件"和"落盘"都放在同一把 `job.lock` 里；顺序是**先发后写**，
+    所以落盘的快照不会少算最后那条事件。
+    """
+    import threading
+
+    manager = JobManager(tmp_path / "data", runners=fake_runners())
+    try:
+        job = manager.create("歌.wav", io.BytesIO(WAV_BYTES))
+        manager.run_stage(job.id, "transcribe")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and job.snapshot()["state"] != "done":
+            time.sleep(0.02)
+        assert job.snapshot()["state"] == "done"
+        meta = json.loads((job.root / "job.json").read_text(encoding="utf-8"))
+        assert meta["events"] == len(job.events_since(0))
+        assert meta["state"] == "done"
+    finally:
+        manager.shutdown()
 
     # 一行太长要断开（显示单位，别把整段糊成一行）
     many = [Char("字", index * 0.1, index * 0.1 + 0.1) for index in range(40)]

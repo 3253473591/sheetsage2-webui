@@ -97,6 +97,41 @@ def test_deleted_project_is_not_resurrected_by_trailing_writes(tmp_path):
         manager.shutdown()
 
 
+def test_tail_write_that_started_before_delete_cannot_resurrect(tmp_path, monkeypatch):
+    """**检查与写盘必须在同一把锁里**：否则"检查完、还没写"的那一瞬间删除就会漏。
+
+    这就是真实时序：收尾线程通过 `removed` 检查 → 用户点删除（挪走/删掉目录）→
+    收尾线程才落盘，`mkdir(parents=True)` 把目录又建出来。重启后
+    `JobStore.load_existing` 会把它当成一个工程收编（没有音频的幽灵工程）。
+
+    用"慢磁盘"把这个窗口拉长到必现：修好之后 `delete()` 会先等那次写盘结束。
+    """
+    import threading
+
+    import sheetsage2_webui.webui.job_storage as storage
+
+    real_write = storage.write_text_atomic
+
+    def slow_write(path, text, **kwargs):
+        time.sleep(0.05)                     # 模拟磁盘慢：检查已通过，还没落盘
+        return real_write(path, text, **kwargs)
+
+    monkeypatch.setattr(storage, "write_text_atomic", slow_write)
+    manager = JobManager(tmp_path / "data", runners=fake_runners())
+    try:
+        job = manager.create("歌.wav", io.BytesIO(WAV_BYTES))
+        root = job.root
+        writer = threading.Thread(target=manager._write_metadata, args=(job,))
+        writer.start()
+        time.sleep(0.01)                     # 写线程已经过了检查，正卡在"慢磁盘"里
+        assert manager.delete(job.id, permanent=True)
+        writer.join(timeout=10)
+        assert not writer.is_alive()
+        assert not root.exists()             # 删除之后再没有写盘把它建回来
+    finally:
+        manager.shutdown()
+
+
 def test_trash_purge_keeps_entries_inside_the_age_window(tmp_path):
     """6 天前删的还在 7 天窗口里，不能被清掉。"""
     client, manager = make_client(tmp_path, fake_runners())

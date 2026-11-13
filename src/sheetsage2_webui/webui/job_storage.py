@@ -213,11 +213,15 @@ class JobStore:
 
         这样"上一轮残留但这一轮没产出"的文件不会混进下载包——磁盘上留着是一回事，
         当成这一版的结果发出去是另一回事。
+
+        **检查与写入在同一把 `job.lock` 里**：删除（`JobManager.delete`）会拿这把锁立
+        `removed` 墓碑再动磁盘。检查放在锁外的话，就会出现"检查通过 → 目录被删 → 才落盘"，
+        而原子写会 `mkdir(parents=True)`，把删掉的目录重新建出来（重启后成了幽灵工程）。
         """
-        if job.imported or job.removed:
-            return
         try:
             with job.lock:
+                if job.imported or job.removed:
+                    return
                 payload = {
                     "artifacts_rev": job.artifacts_rev,
                     "rev": job.rev,
@@ -227,8 +231,8 @@ class JobStore:
                     "files": {item["path"]: {"size": item["size"]}
                               for item in scan_files(job.out_dir)},
                 }
-            write_text_atomic(job.manifest_path,
-                              json.dumps(payload, ensure_ascii=False, indent=2))
+                write_text_atomic(job.manifest_path,
+                                  json.dumps(payload, ensure_ascii=False, indent=2))
         except OSError:
             pass
 
@@ -238,13 +242,14 @@ class JobStore:
         # 只读工程（output/ 里本来就有的产物）不写元数据：那会把别人跑出来的目录
         # 变成"WebUI 工程"，下次重启就按 WebUI 工程恢复了；已删除的工程同理——
         # 原子写会 `mkdir(parents=True)`，把刚删掉的目录又建回来。
-        if job.imported or job.removed:
-            return
+        # 检查和写入必须在同一把锁里，理由见 `write_manifest`。
         try:
             with job.lock:
+                if job.imported or job.removed:
+                    return
                 payload = job.metadata()
-            write_text_atomic(job.root / "job.json",
-                              json.dumps(payload, ensure_ascii=False, indent=2))
+                write_text_atomic(job.root / "job.json",
+                                  json.dumps(payload, ensure_ascii=False, indent=2))
         except OSError:
             # 元数据只是诊断用，写不进去不该影响任务本身
             pass
@@ -270,7 +275,11 @@ class JobStore:
                      if listed is None or item["path"] in listed]
             if not files:
                 raise FileNotFoundError("还没有产物可打包")
-            job.internal_dir.mkdir(parents=True, exist_ok=True)
+            # 建目录也认墓碑：工程已经删掉时不能再把 `output/<歌名>/` 建回来
+            with job.lock:
+                if job.removed:
+                    raise FileNotFoundError("工程已删除")
+                job.internal_dir.mkdir(parents=True, exist_ok=True)
             temp = job.internal_dir / "bundle.zip.part"
             with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED,
                                  compresslevel=6) as zf:

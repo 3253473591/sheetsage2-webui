@@ -43,12 +43,14 @@ export function useJobs(deps: JobListDeps) {
     return jobs.value.find((job) => job.id === id)
   }
 
-  /** 重新列一遍工程（导入备份包之后用）。拉不到就把错误交给上层。 */
-  async function reload(): Promise<void> {
+  /** 重新列一遍工程（导入备份包之后用）。拉不到就把错误交给上层，并返回 `false`。 */
+  async function reload(): Promise<boolean> {
     try {
       jobs.value = await api.listJobs()
+      return true
     } catch (exc) {
       deps.onError(exc instanceof Error ? exc.message : String(exc))
+      return false
     }
   }
 

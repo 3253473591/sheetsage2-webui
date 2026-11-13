@@ -37,6 +37,7 @@ function harness() {
       // 真实现里 reload 会把列表整个换掉，这里照做——否则 find 不到新导进来的工程
       const list = await api.listJobs()
       jobs.splice(0, jobs.length, ...list)
+      return true
     },
     find: (id) => jobs.find((item) => item.id === id),
     pushLog: (_seq, _phase, text) => logs.push(text),
@@ -101,6 +102,21 @@ describe('备份导入', () => {
     const result = await h.trash.restoreBackup(new File([], 'x.zip'))
     expect(result).toBeNull()
     expect(h.errors.at(-1)).toBe('不是备份包')
+  })
+
+  it('导入成功但列表拉不回来：返回 null，不假装成功', async () => {
+    const h = harness()
+    vi.mocked(api.restoreBackup).mockResolvedValue({
+      restored: [{ id: 'b', name: '乙', files: 1 }],
+      skipped: [],
+      count: 1,
+      backup: { created_at: 1, app_version: '0.0.0', projects: 1 },
+    } as never)
+    vi.mocked(api.listJobs).mockRejectedValue(new Error('连不上后台服务'))
+    const result = await h.trash.restoreBackup(new File([], 'b.zip'))
+    expect(result).toBeNull()
+    expect(h.logs.some((line) => line.includes('已导入'))).toBe(false)
+    expect(h.errors.at(-1)).toBe('连不上后台服务')
   })
 
   it('备份地址带 include_cache=false（缓存能重算，不该进包）', () => {

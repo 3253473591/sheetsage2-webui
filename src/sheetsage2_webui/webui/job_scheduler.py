@@ -319,14 +319,16 @@ class Scheduler:
                 run.finished_at = time.time()
                 error = {"code": run.error_code, "message": run.error,
                          "action": run.error_action, "detail": run.error_detail}
-            self._store.write_manifest(job)                  # RLock：重入自己那把锁
-            self._store.write_metadata(job)
-            # 终态事件也在这把锁里发：读方拿 `snapshot()` / `events_since()` 时要么
-            # 看到"还没 done"，要么看到"done + 事件都在"，不会只拿到一半。
+            # 终态事件先发、再落盘（都在同一把锁里）：
+            # - 读方拿 `snapshot()` / `events_since()` 时要么看到"还没 done"，要么看到
+            #   "done + 事件都在"，不会只拿到一半；
+            # - `job.json` 里的 `events` 计数也就包含了这条终态事件（以前就是这个数）。
             if error is None:
                 job.emit("phase_done", phase=phase, detail=run.detail)
             else:
                 job.emit("phase_error", phase=phase, **error)
+            self._store.write_manifest(job)                  # RLock：重入自己那把锁
+            self._store.write_metadata(job)
         if error is None:
             self._store.flush_prev(job)
     def _completion_gate(self, job: Job, phase: str,
@@ -417,11 +419,14 @@ class Scheduler:
             job.warnings = list(job.stages["transcribe"].detail.get("warnings") or [])
             job.stage = None
             state = job.state
-            self._store.write_manifest(job)                  # RLock：重入自己那把锁
-            self._store.write_metadata(job)
             payload = {"message": "全部完成" if state == "done" else "任务已结束",
                        "state": state}
+            # 终态事件先发再落盘（同一把锁里）：`job.json` 的 `events` 计数包含它，
+            # 而 `snapshot()` 的读方不会看到"done 了但事件还没发"。
             job.emit(state if state != "failed" else "error", **payload)
+            self._store.write_manifest(job)                  # RLock：重入自己那把锁
+            self._store.write_metadata(job)
+
     def _fail(self, job: Job, exc: BaseException | str) -> None:
         """工作线程兜底：连 `_run` 都炸了，至少给一句人话（不是异常类名）。"""
         error = describe_error(exc) if isinstance(exc, BaseException) else None

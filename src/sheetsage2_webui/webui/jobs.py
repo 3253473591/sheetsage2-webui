@@ -47,24 +47,27 @@ from .eta import estimate as estimate_seconds
 from .job_errors import (ImportedProject, JobCancelled, StageNotReady, StaleRevision,
                          UploadRejected)
 from .job_files import (AUDIO_SUFFIXES, FILE_KINDS, INTERNAL_DIRNAME, STEM_KINDS,
-                        STEM_LABELS, _check_audio, _kind_of, _write_stream,
+                        STEM_LABELS, _UNSAFE, _check_audio, _kind_of, _write_stream,
                         claim_project_dir, content_fingerprint, is_internal, iter_chunks,
                         project_folder_name, safe_name, scan_files, unique_project_dir,
                         unique_suffix)
 from .job_models import (DEFAULT_PLAN, DRAFT_STATE, MANIFEST_NAME, MAX_EVENTS, PHASE_LABELS,
                          PHASES, STAGE_TERMINAL, TERMINAL_STATES, Event, Job, Progress,
                          StageRunner, StageRun)
-from .job_options import (PARAM_INDEX, PARAM_OWNER, PARAM_SPECS, asr_model_label,
-                          default_options, describe_change, param_choices, validate_options)
+from .job_options import (ASR_MODEL_PREFIX, PARAM_INDEX, PARAM_OWNER, PARAM_SPECS,
+                          _option_label, asr_model_label, default_options, describe_change,
+                          option_values, param_choices, validate_options)
 from .job_backup import BackupService
 from .job_storage import JobStore
 from .job_text import bytes_text as _bytes_text, duration_text as _duration_text
 from .job_trash import (TRASH_DIRNAME, TRASH_MAX_BYTES, TRASH_MAX_DAYS,
                         TRASH_PURGE_INTERVAL, TrashStore)
-from .job_scheduler import (CANCEL_COOLDOWN_SECONDS, HARD_TIMEOUT, STALL_TIMEOUT, Scheduler)
+from .job_scheduler import (CANCEL_COOLDOWN_SECONDS, HARD_TIMEOUT, STALL_TIMEOUT, Scheduler,
+                            _per_phase, _PhaseWatch)
 
-# 兼容入口：这些名字过去都在 `webui.jobs` 里可直接导入，调用方（app / runner / 测试）
-# 正逐步改到各自模块，这里保留转发（见 docs/261113 模块化拆分与重构计划.md 第 2 条）。
+# 兼容入口：这些名字过去都在 `webui.jobs` 里可直接导入（含 `_per_phase` / `_option_label`
+# 这类私有的），调用方正逐步改到各自模块，这里保留转发
+# （见 docs/261113 模块化拆分与重构计划.md 第 2 条“保留兼容入口”）。
 
 # --------------------------------------------------------------------- 管理器
 class JobManager:
@@ -212,15 +215,30 @@ class JobManager:
 
     @property
     def stall_timeout(self) -> dict[str, float]:
-        return dict(self._scheduler.stall_timeout)
+        """阶段守护的"多久没进展算卡死"（秒，按阶段）。改它就是改调度器的阈值。"""
+        return self._scheduler.stall_timeout
+
+    @stall_timeout.setter
+    def stall_timeout(self, value: float | Mapping[str, float] | None) -> None:
+        self._scheduler.stall_timeout = _per_phase(value, STALL_TIMEOUT)
 
     @property
     def hard_timeout(self) -> dict[str, float]:
-        return dict(self._scheduler.hard_timeout)
+        """阶段守护的总时长上限（秒，按阶段）。"""
+        return self._scheduler.hard_timeout
+
+    @hard_timeout.setter
+    def hard_timeout(self, value: float | Mapping[str, float] | None) -> None:
+        self._scheduler.hard_timeout = _per_phase(value, HARD_TIMEOUT)
 
     @property
     def watchdog_interval(self) -> float:
+        """看门狗扫一遍的间隔（秒）。"""
         return self._scheduler.watchdog_interval
+
+    @watchdog_interval.setter
+    def watchdog_interval(self, value: float) -> None:
+        self._scheduler.watchdog_interval = max(0.05, float(value))
 
     # ---------------------------------------------------------------- 配置
     def set_runners(self, runners: Mapping[str, StageRunner]) -> None:
@@ -662,6 +680,15 @@ class JobManager:
     def trash_root(self) -> Path:
         """回收站目录（`<数据根>/.trash/`）。"""
         return self._trash.trash_root
+
+    @property
+    def trash_purge_interval(self) -> float:
+        """回收站定时清理的节拍（秒）。"""
+        return self._trash.purge_interval
+
+    @trash_purge_interval.setter
+    def trash_purge_interval(self, value: float) -> None:
+        self._trash.purge_interval = max(0.05, float(value))
 
     @property
     def trash_max_days(self) -> float:

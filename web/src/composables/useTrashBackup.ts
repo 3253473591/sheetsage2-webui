@@ -12,7 +12,8 @@ import type { BackupSummary, JobSnapshot, TrashEntry } from '@/types'
 export interface TrashBackupDeps {
   upsert: (job: JobSnapshot) => void
   select: (id: string) => Promise<void>
-  reload: () => Promise<void>
+  /** 重新拉工程列表；失败返回 `false`（这时候别假装导入成功）。 */
+  reload: () => Promise<boolean>
   find: (id: string) => JobSnapshot | undefined
   pushLog: (seq: number, phase: null, text: string, tone?: 'info' | 'ok' | 'warn' | 'error',
             time?: number) => void
@@ -72,7 +73,9 @@ export function useTrashBackup(deps: TrashBackupDeps) {
     deps.onError('')
     try {
       const summary = await api.restoreBackup(file)
-      await deps.reload()
+      // 列表拉不回来就说导入失败（旧行为）：否则界面还在用导入前的列表，
+      // 却弹一句"已导入 N 个工程"，下一步点哪个都找不到。
+      if (!(await deps.reload())) return null
       const names = summary.restored.map((item) => item.name).slice(0, 5)
       deps.pushLog(0, null,
                    `已导入 ${summary.count} 个工程`
