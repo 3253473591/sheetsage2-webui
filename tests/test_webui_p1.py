@@ -298,6 +298,18 @@ def test_preflight_counts_a_minimal_asr_install(tmp_path):
         module.PROJECT_ROOT = original
 
 
+def test_pick_asr_model_stays_importable_from_the_old_runner_path():
+    """旧导入路径要还能用：`webui.runner.pick_asr_model`。
+
+    拆分把它挪到了 `runner_models`（模型持有的位置），但这个函数名没有下划线、
+    历史上就在 `runner` 里——不能假定仓外没有人这么导入。转发必须是**同一个函数**，
+    否则两处行为会各自漂移。
+    """
+    from sheetsage2_webui.webui import runner, runner_models
+
+    assert runner.pick_asr_model is runner_models.pick_asr_model
+
+
 def test_default_asr_config_falls_back_to_the_installed_model(tmp_path):
     """最小集只有 0.6B：默认配置不能死认 1.7B，也不能硬塞一个没装的 Qwen 对齐器。"""
     from sheetsage2_webui.webui.runner_models import default_asr_config, pick_asr_model

@@ -36,6 +36,12 @@ from .job_models import Job, Progress, StageRunner
 from .runner_models import (AsrProvider, EngineProvider, asr_model_choices,
                             default_asr_config)
 
+#: 兼容旧导入路径：`pick_asr_model` 是公开名字（没有下划线），拆分前就住在
+#: `webui.runner` 里。实现已经挪到 `runner_models`（模型持有只在那一个地方），
+#: 这里再导出一次，仓外的 `from sheetsage2_webui.webui.runner import pick_asr_model`
+#: 才不会断；转发的就是同一个函数对象，不会出现两份行为。
+from .runner_models import pick_asr_model  # noqa: F401 - 刻意再导出
+
 #: 扒谱阶段的小步骤与进度锚点。`识别音乐` 占大头是因为它就是推理本身。
 STEP_LOAD = ("加载模型", 0.00)
 STEP_READ = ("读取音频", 0.04)
