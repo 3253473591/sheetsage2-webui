@@ -9,7 +9,7 @@
  * - 取消是协作式的：点完停止要自己拉快照，别让界面停在 58%。
  */
 
-import { computed, ref, type ComputedRef } from 'vue'
+import { ref, type ComputedRef } from 'vue'
 import * as api from '@/api'
 import type { JobEvent, JobSnapshot, LyricLine, PhaseKey } from '@/types'
 import { TERMINAL_STATES } from '@/types'
@@ -33,7 +33,6 @@ export interface JobEventDeps {
 export function useJobEvents(deps: JobEventDeps) {
   /** 边识别边出的歌词（模型逐段返回，落盘前先给界面看）。 */
   const streamedLyrics = ref<LyricLine[]>([])
-  const streaming = ref(false)
 
   let unsubscribe: (() => void) | null = null
   let retryHandle: number | null = null
@@ -140,12 +139,10 @@ export function useJobEvents(deps: JobEventDeps) {
       window.clearTimeout(retryHandle)
       retryHandle = null
     }
-    streaming.value = false
   }
 
   function openStream(id: string): void {
     if (disposed) return
-    streaming.value = true
     unsubscribe = api.subscribeJob(id, lastSeq, {
       onEvent: (event) => {
         attempts = 0
@@ -154,7 +151,6 @@ export function useJobEvents(deps: JobEventDeps) {
       },
       onClose: (reason) => {
         unsubscribe = null
-        streaming.value = false
         if (disposed) return
         void deps.refreshArtifacts()
         if (reason === 'terminal') return
@@ -262,12 +258,8 @@ export function useJobEvents(deps: JobEventDeps) {
     reset()
   }
 
-  /** 事件流是否开着（`runStage` 之后据此决定要不要补开）。 */
-  const subscribed = computed(() => streaming.value)
-
   return {
     streamedLyrics,
-    subscribed,
     applyEvent,
     openStream,
     detach,

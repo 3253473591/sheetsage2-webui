@@ -161,8 +161,11 @@ export function useStudio() {
     }
     error.value = null
     try {
-      upsert(await api.runStage(job.id, phase))
-      if (!events.subscribed.value) events.openStream(job.id)
+      const next = await api.runStage(job.id, phase)
+      upsert(next)
+      // 和"新建工程"走同一个入口：SSE + 3 秒轮询。完成过的工程两条通道都已收尾，
+      // 只补 SSE 的话，SSE 静默死掉（合盖/换网）界面就停在旧进度上了。
+      events.beginRun(next, upsert)
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     }
@@ -174,8 +177,9 @@ export function useStudio() {
     if (!job) return
     error.value = null
     try {
-      upsert(await api.runChain(job.id))
-      if (!events.subscribed.value) events.openStream(job.id)
+      const next = await api.runChain(job.id)
+      upsert(next)
+      events.beginRun(next, upsert)
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     }
