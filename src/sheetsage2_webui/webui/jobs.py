@@ -56,19 +56,14 @@ from .job_models import (DEFAULT_PLAN, DRAFT_STATE, MANIFEST_NAME, MAX_EVENTS, P
                          StageRunner, StageRun)
 from .job_options import (PARAM_INDEX, PARAM_OWNER, PARAM_SPECS, asr_model_label,
                           default_options, describe_change, param_choices, validate_options)
+from .job_backup import BackupService
+from .job_storage import JobStore
+from .job_text import bytes_text as _bytes_text, duration_text as _duration_text
+from .job_trash import (TRASH_DIRNAME, TRASH_MAX_BYTES, TRASH_MAX_DAYS,
+                        TRASH_PURGE_INTERVAL, TrashStore)
 
 # 兼容入口：这些名字过去都在 `webui.jobs` 里可直接导入，调用方（app / runner / 测试）
 # 正逐步改到各自模块，这里保留转发（见 docs/261113 模块化拆分与重构计划.md 第 2 条）。
-
-#: 软删除的回收站（数据根下的 `.trash/`，点开头所以 `_load_existing` 不扫它）。
-#: 删除 = 把工程目录 `rename` 进去（同卷原子），用户感知和"删了"一样，但能恢复。
-TRASH_DIRNAME = ".trash"
-#: 回收站保留策略：超过这些就真删（`_purge_trash` 在启动、每次删除、以及定时三处跑）。
-TRASH_MAX_DAYS = 7.0
-TRASH_MAX_BYTES = 2 * 1024 ** 3
-#: 定时清理的节拍。一小时扫一次目录很便宜；没有这条的话，**七天不删东西也不重启**
-#: 过期条目就一直躺着——「7 天自动清」就成了空话。
-TRASH_PURGE_INTERVAL = 3600.0
 
 #: 取消后的"冷静期"（秒，G14）：这段时间里的「开始」当作手抖连点，直接 409。
 CANCEL_COOLDOWN_SECONDS = 5.0
@@ -100,25 +95,6 @@ def _per_phase(value: float | Mapping[str, float] | None,
     if isinstance(value, Mapping):
         return {phase: float(value.get(phase, defaults[phase])) for phase in defaults}
     return {phase: float(value) for phase in defaults}
-
-
-def _duration_text(seconds: float) -> str:
-    """秒 -> 人话（"35 秒" / "12 分钟" / "1.5 小时"），只用在超时提示里。"""
-    if seconds < 90:
-        return f"{seconds:.0f} 秒"
-    if seconds < 5400:
-        return f"{seconds / 60:.0f} 分钟"
-    return f"{seconds / 3600:.1f} 小时"
-
-
-def _bytes_text(size: float) -> str:
-    """字节 -> 人话（"1.2 GB" / "340 MB"），磁盘预检与清理提示用。"""
-    value = float(size)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} TB"
 
 # --------------------------------------------------------------------- 管理器
 class JobManager:
@@ -171,13 +147,10 @@ class JobManager:
         self._watchdog: threading.Thread | None = None
         #: 软删除（G2）：删除 = 挪进 `.trash/`，能恢复；`use_trash=False` 是硬删（测试用）
         self.use_trash = bool(use_trash)
-        self.trash_max_days = float(trash_max_days)
-        self.trash_max_bytes = float(trash_max_bytes)
-        #: 回收站也定时扫（见 `TRASH_PURGE_INTERVAL`）：只靠"启动 + 删除"的话，
-        #: 服务连开一周、用户又没删过东西，过期条目是清不掉的。
-        self.trash_purge_interval = max(0.05, float(trash_purge_interval))
-        self._trash_stop = threading.Event()
-        self._trash_worker: threading.Thread | None = None
+        #: 回收站（挪进/列出/恢复/保留策略）交给它；管理器只负责"从列表里摘掉/登记回来"。
+        self._trash = TrashStore(self.root, enabled=self.use_trash,
+                                 max_days=trash_max_days, max_bytes=trash_max_bytes,
+                                 purge_interval=trash_purge_interval)
         #: 上传后是否做内容体检（G10）。默认关——直接 `JobManager(...)` 的测试不上 ffmpeg；
         #: 产品入口 `create_app` 会显式打开。
         self.probe_upload = bool(probe_upload)
@@ -186,33 +159,24 @@ class JobManager:
         #: 不影响真跑哪台设备（那是 `EngineProvider.config_for` 的事）。
         self.device_hint: str | None = None
         self.root.mkdir(parents=True, exist_ok=True)
+        #: 磁盘这边的读写（恢复 / 元数据 / 清单 / 隔离 / 打包 / 清理）都交给它；
+        #: 管理器自己只管排队与状态。
+        self._store = JobStore(self.root, option_defaults=self.option_defaults,
+                               eta_provider=self.eta_for)
+        #: 整库备份 / 恢复：归档格式在 `backup.py`，协调逻辑在 `job_backup.py`。
+        self._backup = BackupService(self.root, list_jobs=self.list,
+                                     audio_seconds=self.audio_seconds,
+                                     restore_dir=self._store.restore_dir,
+                                     register=self._register_restored)
         # **重启不丢**：把 output/ 里已有的工程读回来（WebUI 建的读 job.json，
         # 命令行跑出来的当"只读产物"收进来）
         self._load_existing()
-        self._purge_trash()
-        self._trash_worker = threading.Thread(target=self._purge_loop,
-                                              name="sheetsage-trash", daemon=True)
-        self._trash_worker.start()
+        self._trash.start()
 
     # ---------------------------------------------------------------- 启动恢复
     def _load_existing(self) -> None:
-        """扫描数据根（默认 `<项目根>/output/`），一个子目录 = 一个工程。
-
-        - 有 `job.json` → WebUI 建的工程，按元数据恢复（上次没跑完的阶段标成中断）；
-        - 没有 `job.json` 但有 `project.json`/`report.json` → 别处跑出来的产物，
-          作为**只读**工程收进列表（能看卷帘 / 下载 / 导 SVP）；
-        - 其它目录（比如空的、放别的东西的）跳过，不动它。
-        """
-        if not self.root.is_dir():
-            return
-        restored: list[Job] = []
-        for entry in sorted(self.root.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            job = self._restore(entry)
-            if job is not None:
-                restored.append(job)
-        restored.sort(key=lambda item: item.created_at, reverse=True)
+        """把数据根里已有的工程登记进来（扫描与恢复的细节在 `JobStore.load_existing`）。"""
+        restored = self._store.load_existing()
         with self._lock:
             for job in restored:
                 self._jobs[job.id] = job
@@ -222,131 +186,45 @@ class JobManager:
             print(f"  已载入 {len(restored)} 个工程：{', '.join(logos)}"
                   + (" …" if len(restored) > 5 else ""), flush=True)
 
+    # ---------------------------------------------------------------- 存储（委托 JobStore）
+    # 拆分后这些职责在 `job_storage.py`；名字保留，路由 / 调度 / 测试不用改。
+    def bundle(self, job: Job) -> Path:
+        """把 ``output/`` 打成一个 zip（懒生成，落盘缓存）。"""
+        return self._store.bundle(job)
+
+    def manifest_files(self, job: Job) -> dict[str, Any] | None:
+        return self._store.manifest_files(job)
+
+    def write_manifest(self, job: Job) -> None:
+        self._store.write_manifest(job)
+
+    def _write_metadata(self, job: Job) -> None:
+        self._store.write_metadata(job)
+
+    def _attach_eta(self, job: Job) -> Job:
+        return self._store._attach_eta(job)
+
     def _restore(self, root: Path) -> Job | None:
-        meta_path = root / "job.json"
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                meta = None
-            if isinstance(meta, dict):
-                return self._job_from_meta(root, meta)
-        if (root / "project.json").is_file() or (root / "report.json").is_file():
-            return self._import(root)
-        return None
+        return self._store.restore_dir(root)
 
-    def _job_from_meta(self, root: Path, meta: Mapping[str, Any]) -> Job:
-        audio = str(meta.get("audio") or "")
-        # `job.json` 里存的是绝对路径；**包（或数据目录）被整体搬走**时就对不上了，
-        # 这时候按布局重新算一遍（工程目录 + `.webui/input/<文件名>`）。
-        upload = Path(str(meta.get("upload") or ""))
-        if not upload.is_file():
-            candidate = root / INTERNAL_DIRNAME / "input" / audio
-            if not candidate.is_file():
-                # 输入文件带 uuid 前缀（G9）：绝对路径对不上时按"任意前缀 + 展示名"再找一次。
-                input_dir = root / INTERNAL_DIRNAME / "input"
-                if input_dir.is_dir():
-                    for item in sorted(input_dir.iterdir()):
-                        if item.is_file() and item.name.endswith(f"-{audio}"):
-                            candidate = item
-                            break
-            upload = candidate if candidate.is_file() else root / INTERNAL_DIRNAME / "input"
-        job = Job(
-            id=str(meta.get("id") or root.name),
-            name=str(meta.get("name") or root.name),
-            audio=audio,
-            root=root,
-            upload=upload,
-            out_dir=root,
-            created_at=float(meta.get("created_at") or root.stat().st_mtime),
-            options=dict(self.option_defaults, **(meta.get("options") or {})),
-        )
-        for phase in PHASES:
-            saved = (meta.get("stages") or {}).get(phase) or {}
-            run = job.stages[phase]
-            run.label = str(saved.get("label") or run.label)
-            run.progress = float(saved.get("progress") or 0.0)
-            run.detail = dict(saved.get("detail") or {})
-            run.started_at = saved.get("started_at")
-            run.finished_at = saved.get("finished_at")
-            state = str(saved.get("state") or "idle")
-            if state in {"queued", "running"}:
-                # 上次是在这个进程里跑的，进程没了就永远不会再推进——别装成"还在跑"
-                run.state = "idle"
-                run.progress = 0.0
-                run.step = ""
-                run.message = "上次运行被中断（程序重启），可以重跑"
-            else:
-                run.state = state
-                run.error = saved.get("error")
-                run.error_code = saved.get("error_code")
-                run.error_action = saved.get("error_action")
-                run.error_detail = saved.get("error_detail")
-        job.files = scan_files(root)
-        job.highlights = meta.get("highlights")
-        job.decisions = meta.get("decisions")
-        job.summary = meta.get("summary")
-        job.warnings = list(meta.get("warnings") or [])
-        job.rev = int(meta.get("rev") or 1)
-        job.artifacts_rev = int(meta.get("artifacts_rev") or 0)
-        interrupted = any(run.message.startswith("上次运行被中断")
-                          for run in job.stages.values())
-        job.state = DRAFT_STATE if interrupted else str(meta.get("state") or "done")
-        job.message = "上次运行被中断（程序重启），可以重跑" if interrupted else "已恢复"
-        job.emit("log", phase=None, message="工程已恢复（重启后从 output/ 载入）"
-                 + ("；上次没跑完，可以重跑" if interrupted else ""))
-        return self._attach_eta(job)
+    def _clean_derived(self, job: Job) -> None:
+        self._store.clean_derived(job)
 
-    def _import(self, root: Path) -> Job:
-        """`output/` 里本来就有的产物目录：只读收编。"""
-        created = root.stat().st_mtime
-        job = Job(
-            id=root.name, name=root.name, audio="", root=root,
-            upload=root / INTERNAL_DIRNAME / "input",
-            out_dir=root, created_at=created,
-            options=dict(self.option_defaults), imported=True,
-        )
-        transcribed = (root / "project.json").is_file() or (root / "report.json").is_file()
-        if transcribed:
-            job.stages["transcribe"].state = "done"
-            job.stages["transcribe"].label = PHASE_LABELS["transcribe"]
-        if (root / "lyrics.json").is_file():
-            job.stages["lyrics"].state = "done"
-        job.state = "done" if transcribed else DRAFT_STATE
-        job.message = "已有产物（只读）"
-        job.files = scan_files(root)
-        job.highlights = self._highlights_from_disk(root)
-        job.emit("log", phase=None,
-                 message="从 output/ 载入已有产物（只读：能看卷帘 / 下载 / 导 SVP，不能重跑）")
-        return self._attach_eta(job)
+    def _quarantine_stage_outputs(self, job: Job, phase: str) -> None:
+        self._store.quarantine(job, phase)
 
-    @staticmethod
-    def _highlights_from_disk(root: Path) -> dict[str, Any] | None:
-        """给只读工程补一份 `highlights`（产物里有 project/report/summary 就能补）。"""
+    def _flush_prev(self, job: Job) -> None:
+        self._store.flush_prev(job)
 
-        def load(name: str) -> Any:
-            path = root / name
-            if not path.is_file():
-                return None
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return None
+    def cleanup(self, job_id: str) -> dict[str, Any]:
+        """清掉一个工程的可重算缓存（整包 zip / SVP / 波形 / 旧版本 prev）。"""
+        job = self.get(job_id)
+        if job is None:
+            return {"freed": 0}
+        return self._store.cleanup(job)
 
-        project = load("project.json")
-        if not isinstance(project, dict):
-            return None
-        payload = {"project": project, "summary": load("summary.json") or {},
-                   "decisions": ((load("report.json") or {}).get("decisions")
-                                 if isinstance(load("report.json"), dict) else {})}
-        try:
-            from .runner import build_highlights
-        except ImportError:                      # pragma: no cover - 只有拆包用了才发生
-            return None
-        try:
-            return build_highlights(payload)
-        except Exception:                        # noqa: BLE001 - 产物不齐时别把恢复搞崩
-            return None
+
+
 
     # ---------------------------------------------------------------- 配置
     def set_runners(self, runners: Mapping[str, StageRunner]) -> None:
@@ -416,11 +294,6 @@ class JobManager:
         return estimate_seconds(phase, self.audio_seconds(job), self._device_for(job),
                                 job.options)
 
-    def _attach_eta(self, job: Job) -> Job:
-        """给工程挂上预估提供者（`Job.snapshot()` 里按阶段调它）。"""
-        job.eta_provider = self.eta_for
-        return job
-
     # ---------------------------------------------------------------- 生命周期
     def _ensure_workers(self) -> None:
         with self._lock:
@@ -436,21 +309,10 @@ class JobManager:
                                                   name="sheetsage-watchdog", daemon=True)
                 self._watchdog.start()
 
-    def _purge_loop(self) -> None:
-        """定时清回收站。清理失败只跳过这一轮，绝不把服务带走。"""
-        while not self._trash_stop.wait(self.trash_purge_interval):
-            try:
-                self._purge_trash()
-            except Exception:      # noqa: BLE001 - 目录被占用/权限问题都不该影响识别
-                continue
-
     def shutdown(self, timeout: float = 5.0) -> None:
         """请求停止；正在跑的阶段不会被粗暴中断。"""
         self._stop.set()
-        self._trash_stop.set()
-        if self._trash_worker is not None:
-            self._trash_worker.join(timeout=timeout)
-            self._trash_worker = None
+        self._trash.stop(timeout=timeout)
         for _ in self._threads:
             self._queue.put(None)
         for thread in self._threads:
@@ -787,64 +649,7 @@ class JobManager:
         self._write_metadata(job)
         return job
 
-    # ---------------------------------------------------------------- 打包
-    def bundle(self, job: Job) -> Path:
-        """把 ``output/`` 打成一个 zip（懒生成，落盘缓存）。
-
-        缓存**跟着产物版本走**（G3）：`bundle.meta.json` 里记着打包时的 `artifacts_rev`，
-        重跑过（rev 变了）就一定重打，不会把上一版的结果发出去。
-
-        打包含一把独立的锁：它跑在请求线程里，不能占用 ``job.lock``——那个锁还要给
-        工作线程汇报进度，一个几百 MB 的产物目录会把进度卡住。
-        """
-        target = job.internal_dir / "bundle.zip"
-        meta = job.internal_dir / "bundle.meta.json"
-        with self._bundle_lock:
-            if target.is_file() and self._bundle_is_fresh(job, meta):
-                return target
-            listed = self.manifest_files(job)
-            files = [item for item in scan_files(job.out_dir)
-                     if listed is None or item["path"] in listed]
-            if not files:
-                raise FileNotFoundError("还没有产物可打包")
-            job.internal_dir.mkdir(parents=True, exist_ok=True)
-            temp = job.internal_dir / "bundle.zip.part"
-            with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED,
-                                 compresslevel=6) as zf:
-                for item in files:
-                    path = job.out_dir / item["path"]
-                    if not path.is_file():          # 清单里列着但磁盘上没了：跳过
-                        continue
-                    zf.write(path, arcname=f"{safe_name(job.name)}/{item['path']}")
-            temp.replace(target)
-            try:
-                write_text_atomic(meta, json.dumps({
-                    "artifacts_rev": job.artifacts_rev,
-                    "files": len(files),
-                    "built_at": time.time(),
-                }, ensure_ascii=False))
-            except OSError:
-                pass
-        return target
-
-    @staticmethod
-    def _bundle_is_fresh(job: Job, meta: Path) -> bool:
-        """缓存还认不认：版本戳一致 + 清单在 + 包里有东西。"""
-        try:
-            data = json.loads(meta.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        try:
-            stamped = int(data.get("artifacts_rev", -1))
-        except (TypeError, ValueError):
-            return False
-        return stamped == job.artifacts_rev and int(data.get("files") or 0) > 0
-
     # ---------------------------------------------------------------- 删除 / 回收站
-    @property
-    def trash_root(self) -> Path:
-        return self.root / TRASH_DIRNAME
-
     def delete(self, job_id: str, *, permanent: bool = False) -> bool:
         """删除工程。默认是**软删除**：目录 rename 进 `.trash/`，能恢复（G2）。
 
@@ -874,11 +679,8 @@ class JobManager:
         if permanent or not self.use_trash:
             shutil.rmtree(job.root, ignore_errors=True)
             return True
-        self.trash_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        entry = self.trash_root / f"{safe_name(job.name)}-{job.id}-{stamp}"
         try:
-            move_into(job.root, entry)
+            self._trash.move_in(job.id, job.name, job.root)
         except OSError:
             # 挪不进回收站就别硬删：宁可报错让用户重试，也不能把东西弄丢
             with job.lock:
@@ -887,44 +689,37 @@ class JobManager:
                 self._jobs[job_id] = job
                 self._order.insert(0, job_id)
             raise RuntimeError(f"删除失败：工程目录被占用（{job.root}），关掉相关程序再试")
-        self._purge_trash()
         return True
+
+    @property
+    def trash_root(self) -> Path:
+        """回收站目录（`<数据根>/.trash/`）。"""
+        return self._trash.trash_root
+
+    @property
+    def trash_max_days(self) -> float:
+        return self._trash.max_days
+
+    @trash_max_days.setter
+    def trash_max_days(self, value: float) -> None:
+        self._trash.max_days = float(value)
+
+    @property
+    def trash_max_bytes(self) -> float:
+        return self._trash.max_bytes
+
+    @trash_max_bytes.setter
+    def trash_max_bytes(self, value: float) -> None:
+        self._trash.max_bytes = float(value)
 
     def trash(self) -> list[dict[str, Any]]:
         """回收站列表（新的在前）。每项就是一个被挪进来的工程目录。"""
-        if not self.trash_root.is_dir():
-            return []
-        entries: list[dict[str, Any]] = []
-        for entry in sorted(self.trash_root.iterdir(), reverse=True):
-            if not entry.is_dir():
-                continue
-            meta: dict[str, Any] = {}
-            try:
-                meta = json.loads((entry / "job.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                meta = {}
-            size = 0
-            for path in entry.rglob("*"):
-                try:
-                    if path.is_file():
-                        size += path.stat().st_size
-                except OSError:
-                    continue
-            stat = entry.stat()
-            entries.append({
-                "id": entry.name,
-                "name": str(meta.get("name") or entry.name),
-                "job_id": meta.get("id"),
-                "deleted_at": stat.st_mtime,
-                "size": size,
-                "files": len(meta.get("files") or []),
-            })
-        return entries
+        return self._trash.entries()
 
     def restore(self, entry_id: str) -> Job | None:
         """把回收站里的工程挪回 `output/`（重名就 `-2`），并重新登记。"""
-        source = self.trash_root / safe_name(entry_id)
-        if not source.is_dir() or TRASH_DIRNAME not in str(source):
+        source = self._trash.entry_dir(entry_id)
+        if source is None:
             return None
         try:
             meta = json.loads((source / "job.json").read_text(encoding="utf-8"))
@@ -947,42 +742,11 @@ class JobManager:
 
     def purge_from_trash(self, entry_id: str) -> bool:
         """彻底删掉回收站里的一项（不可恢复）。"""
-        target = self.trash_root / safe_name(entry_id)
-        if not target.is_dir() or TRASH_DIRNAME not in str(target):
-            return False
-        shutil.rmtree(target, ignore_errors=True)
-        return True
+        return self._trash.drop(entry_id)
 
     def _purge_trash(self) -> None:
         """回收站保留策略：超过 7 天、或总共超过 2GB，就真删最旧的。"""
-        if not self.trash_root.is_dir():
-            return
-        entries = []
-        for entry in self.trash_root.iterdir():
-            if not entry.is_dir():
-                continue
-            try:
-                entries.append((entry.stat().st_mtime, entry))
-            except OSError:
-                continue
-        entries.sort()
-        deadline = time.time() - self.trash_max_days * 86400.0
-        total = 0
-        sizes: list[tuple[float, int, Path]] = []
-        for mtime, entry in entries:
-            size = 0
-            for path in entry.rglob("*"):
-                try:
-                    if path.is_file():
-                        size += path.stat().st_size
-                except OSError:
-                    continue
-            sizes.append((mtime, size, entry))
-            total += size
-        for mtime, size, entry in sizes:
-            if mtime < deadline or total > self.trash_max_bytes:
-                shutil.rmtree(entry, ignore_errors=True)
-                total -= size
+        self._trash.purge_expired()
 
     # ---------------------------------------------------------------- 看门狗
     def _watch_begin(self, job: Job, phase: str) -> _PhaseWatch:
@@ -1239,22 +1003,6 @@ class JobManager:
                     f"{name}: {type(exc).__name__}: {exc}")
         return None
 
-    # ---------------------------------------------------------------- 产物版本
-    @staticmethod
-    def _derived_patterns() -> tuple[str, ...]:
-        return ("bundle.zip", "bundle.meta.json", "peaks-*.json")
-
-    def _clean_derived(self, job: Job) -> None:
-        """阶段开始前清掉上一版的派生缓存（它们都能重算，留着只会发旧货）。"""
-        internal = job.internal_dir
-        for pattern in self._derived_patterns():
-            for path in internal.glob(pattern):
-                path.unlink(missing_ok=True)
-        export = internal / "export"
-        if export.is_dir():
-            for path in export.glob("*.svp*"):
-                path.unlink(missing_ok=True)
-
     # ---------------------------------------------------------------- 磁盘（G11）
     def _disk_estimate(self, job: Job) -> int:
         """一次阶段大概需要多少字节（够粗就行：音频 × 3 + 50MB）。"""
@@ -1278,45 +1026,6 @@ class JobManager:
                 f"{_bytes_text(needed)}",
                 "清理 output/ 里不要的工程或缓存，或把数据目录换到大一点的盘，再重跑",
                 f"free={usage.free} needed={needed} phase={phase}")
-
-    def cleanup(self, job_id: str) -> dict[str, Any]:
-        """清掉一个工程的可重算缓存（整包 zip / SVP / 波形 / 旧版本 prev），返回释放了多少。
-
-        「清理」页（G11）用：这些都是能从产物再算出来的东西，删了不影响结果，只影响下次
-        下载/画波形时要重算。
-        """
-        job = self.get(job_id)
-        if job is None:
-            return {"freed": 0}
-        internal = job.internal_dir
-        before = 0
-        for path in internal.rglob("*"):
-            try:
-                if path.is_file():
-                    before += path.stat().st_size
-            except OSError:
-                continue
-        # bundle / peaks / prev 都能重算；export 里的 SVP 也能重算（产物还在）。
-        for pattern in self._derived_patterns():
-            for path in internal.glob(pattern):
-                path.unlink(missing_ok=True)
-        export = internal / "export"
-        if export.is_dir():
-            shutil.rmtree(export, ignore_errors=True)
-        prev = internal / "prev"
-        if prev.is_dir():
-            shutil.rmtree(prev, ignore_errors=True)
-        after = 0
-        for path in internal.rglob("*"):
-            try:
-                if path.is_file():
-                    after += path.stat().st_size
-            except OSError:
-                continue
-        freed = max(0, before - after)
-        job.emit("log", phase=None,
-                 message=f"已清理缓存，释放 {_bytes_text(freed)}（产物本身没动）")
-        return {"freed": freed}
 
     # ---------------------------------------------------------------- 诊断包（G12）
     def diagnose_bundle(self, job_id: str | None = None) -> bytes:
@@ -1348,163 +1057,24 @@ class JobManager:
     # ---------------------------------------------------------------- 备份 / 迁移（G22）
     def backup_file(self, *, include_audio: bool = True,
                     include_cache: bool = False) -> tuple[Path, dict[str, Any]]:
-        """把所有工程打成一个备份 zip，返回 `(临时文件路径, 摘要)`。
-
-        落在系统临时目录而不是数据根里：数据根是用户的东西，别在旁边拉一坨几百 MB 的包
-        （而且它会被磁盘预检算进去）。调用方（API）负责把临时目录清掉。
-        """
-        from . import backup as backup_mod
-
-        projects: list[dict[str, Any]] = []
-        pairs: list[tuple[str, Path]] = []
-        used: set[str] = set()
-        for job in self.list():
-            folder = safe_name(job.root.name) or "工程"
-            if folder in used:                      # 目录名撞了（极少见）：带一段 id
-                folder = f"{folder}-{safe_name(job.id)[:8]}"
-            used.add(folder)
-            pairs.append((folder, job.root))
-            projects.append({
-                "id": job.id, "name": job.name, "folder": folder,
-                "created_at": job.created_at, "state": job.state,
-                "rev": job.rev, "artifacts_rev": job.artifacts_rev,
-                "imported": job.imported, "audio": job.audio,
-                "duration_seconds": self.audio_seconds(job),
-            })
-        manifest = backup_mod.build_manifest(
-            projects, data_root=self.root,
-            include_audio=include_audio, include_cache=include_cache)
-        folder = Path(tempfile.mkdtemp(prefix="sheetsage2-backup-"))
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = folder / f"sheetsage2-backup-{stamp}.zip"
-        summary = backup_mod.write_backup(target, pairs, manifest,
-                                          include_audio=include_audio,
-                                          include_cache=include_cache)
-        summary["projects"] = len(projects)
-        return target, summary
+        """把所有工程打成一个备份 zip，返回 `(临时文件路径, 摘要)`（细节见 `job_backup`）。"""
+        return self._backup.write(include_audio=include_audio,
+                                  include_cache=include_cache)
 
     def restore_backup(self, archive: str | Path) -> dict[str, Any]:
-        """把备份包里的工程收进来（**不覆盖**已有的，重名自动 `-2`）。
+        """把备份包里的工程收进来（**不覆盖**已有的，重名自动 `-2`）。"""
+        return self._backup.restore(archive)
 
-        包里每个工程都会经过和"重启恢复"完全相同的那条路（`_restore`）：带 `job.json` 的
-        按元数据恢复（原音频绝对路径对不上就按布局重找），只有产物的当只读工程收编。
-        """
-        from . import backup as backup_mod
-
-        staging = Path(tempfile.mkdtemp(prefix="sheetsage2-restore-"))
-        restored: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        try:
-            manifest, projects = backup_mod.extract_backup(Path(archive), staging)
-            if not projects:
-                raise backup_mod.BackupRejected("备份包里没有工程")
-            for source in projects:
-                name = safe_name(source.name) or "工程"
-                try:
-                    target = claim_project_dir(self.root, project_folder_name(name))
-                except OSError as exc:
-                    skipped.append({"name": name, "reason": f"目录建不出来：{exc}"})
-                    continue
-                try:
-                    for child in source.iterdir():
-                        move_into(child, target / child.name)
-                except OSError as exc:
-                    shutil.rmtree(target, ignore_errors=True)
-                    skipped.append({"name": name, "reason": f"文件写不进去：{exc}"})
-                    continue
-                job = self._restore(target)
-                if job is None:
-                    shutil.rmtree(target, ignore_errors=True)
-                    skipped.append({"name": name, "reason": "包里没有可识别的工程"})
-                    continue
-                with self._lock:
-                    if job.id in self._jobs:         # id 撞了（同一个包导两次）：换个 id
-                        job.id = f"{job.id}-{uuid.uuid4().hex[:4]}"
-                    self._jobs[job.id] = job
-                    self._order.insert(0, job.id)
-                job.emit("log", phase=None, message=f"已从备份导入：{job.name}")
-                self._write_metadata(job)
-                self.write_manifest(job)
-                restored.append({"id": job.id, "name": job.name, "files": len(job.files)})
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-        return {
-            "restored": restored,
-            "skipped": skipped,
-            "count": len(restored),
-            "backup": {
-                "created_at": manifest.get("created_at"),
-                "app_version": manifest.get("app_version"),
-                "projects": len(manifest.get("projects") or []),
-            },
-        }
-
-    def _quarantine_stage_outputs(self, job: Job, phase: str) -> None:
-        """把这阶段上一轮写的产物挪进 `.webui/prev/<rev>-<时间>/`。
-
-        重跑中途失败/取消时，`output/` 里不会出现"上一轮的歌词 + 这一轮的项目"这种
-        混搭；旧版本在 `prev/` 里还留了一份，跑成功之后再清掉（`_flush_prev`）。
-        """
-        from ..result import EXPECTED_MIDI, EXPECTED_TEXT
-
-        if phase == "transcribe":
-            # 重跑扒谱会连带作废歌词（音符位置变了），所以旧 `lyrics.json` 也一起挪走——
-            # 不然会留下"这一轮的新谱面 + 上一轮的旧歌词"这种混搭，下载包里也会带上旧歌词。
-            names: list[str] = (["project.json", "report.json", "summary.json", "lyrics.json"]
-                                + list(EXPECTED_TEXT) + list(EXPECTED_MIDI))
-        else:
-            names = ["lyrics.json"]
-        present = [name for name in names if (job.out_dir / name).is_file()]
-        if not present:
-            return
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = job.internal_dir / "prev" / f"{job.artifacts_rev:04d}-{stamp}"
-        for name in present:
-            try:
-                move_into(job.out_dir / name, target / name)
-            except OSError:
-                # 挪不动（被占用/权限）就算了：宁可留着旧文件，也不能把这一阶段搞挂
-                pass
-
-    @staticmethod
-    def _flush_prev(job: Job) -> None:
-        """阶段成功后清掉 `prev/`（旧版本已经没有用了）。"""
-        prev = job.internal_dir / "prev"
-        if prev.is_dir():
-            shutil.rmtree(prev, ignore_errors=True)
-
-    def manifest_files(self, job: Job) -> dict[str, Any] | None:
-        """读产物清单；没有就是 `None`（老工程 / 只读工程按目录扫描走）。"""
-        try:
-            data = json.loads(job.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        files = data.get("files")
-        return dict(files) if isinstance(files, dict) else None
-
-    def write_manifest(self, job: Job) -> None:
-        """落 `<工程>/.webui/manifest.json`：`/files` 与 `/download` 只信它。
-
-        这样"上一轮残留但这一轮没产出"的文件不会混进下载包——磁盘上留着是一回事，
-        当成这一版的结果发出去是另一回事。
-        """
-        if job.imported or job.removed:
-            return
-        try:
-            with job.lock:
-                payload = {
-                    "artifacts_rev": job.artifacts_rev,
-                    "rev": job.rev,
-                    "updated_at": time.time(),
-                    "options": dict(job.options),
-                    "stages": {key: run.state for key, run in job.stages.items()},
-                    "files": {item["path"]: {"size": item["size"]}
-                              for item in scan_files(job.out_dir)},
-                }
-            write_text_atomic(job.manifest_path,
-                              json.dumps(payload, ensure_ascii=False, indent=2))
-        except OSError:
-            pass
+    def _register_restored(self, job: Job) -> None:
+        """把一个从包里恢复出来的工程登记进列表（id 撞了就换一个）。"""
+        with self._lock:
+            if job.id in self._jobs:             # 同一个包导两次：换个 id
+                job.id = f"{job.id}-{uuid.uuid4().hex[:4]}"
+            self._jobs[job.id] = job
+            self._order.insert(0, job.id)
+        job.emit("log", phase=None, message=f"已从备份导入：{job.name}")
+        self._write_metadata(job)
+        self.write_manifest(job)
 
     # ---------------------------------------------------------------- 收尾
     def _finish(self, job: Job) -> None:
@@ -1547,17 +1117,3 @@ class JobManager:
         job.emit("error", phase=job.stage, **payload)
         self._write_metadata(job)
 
-    def _write_metadata(self, job: Job) -> None:
-        # 只读工程（output/ 里本来就有的产物）不写元数据：那会把别人跑出来的目录
-        # 变成"WebUI 工程"，下次重启就按 WebUI 工程恢复了；已删除的工程同理——
-        # 原子写会 `mkdir(parents=True)`，把刚删掉的目录又建回来。
-        if job.imported or job.removed:
-            return
-        try:
-            with job.lock:
-                payload = job.metadata()
-            write_text_atomic(job.root / "job.json",
-                              json.dumps(payload, ensure_ascii=False, indent=2))
-        except OSError:
-            # 元数据只是诊断用，写不进去不该影响任务本身
-            pass
