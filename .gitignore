@@ -56,3 +56,6 @@ desktop.ini
 
 pytest-of-*/
 sheetsage-asr-*/
+
+# 重构/计划执行的工作区记录（可随时丢弃）
+.superpowers/
