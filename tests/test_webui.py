@@ -223,13 +223,17 @@ def job_internal(manager: JobManager, job: Mapping) -> Path:
 
 def wait_stage(manager: JobManager, job_id: str, phase: str,
                timeout: float = 20.0) -> str:
-    """等某个阶段跑完（假 runner 是同步的，轮询够了）。"""
+    """等某个阶段跑完（假 runner 是同步的，轮询够了）。
+
+    **走快照**（`snapshot()` 拿 `job.lock`）：直接读 `job.stages[...].state` 会和收尾
+    线程抢，可能看到 done 而 `job.json` / 终态事件还没落。
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         job = manager.get(job_id)
         if job is None:
             return ""
-        state = job.stages[phase].state
+        state = job.snapshot()["stages"][phase]["state"]
         if state in {"done", "failed", "cancelled", "idle"}:
             return state
         time.sleep(0.02)
@@ -1418,6 +1422,27 @@ def test_delete_with_permanent_flag_skips_the_trash(tmp_path):
         assert response.status_code == 200
         assert client.get("/api/trash").json()["entries"] == []
         assert not job_dir(manager, job).exists()
+
+
+def test_deleted_project_is_not_resurrected_by_trailing_writes(tmp_path):
+    """删掉的工程不许被收尾线程写盘复活。
+
+    `_finish` 先把 `state` 置成 `done` 才写 `manifest.json` / `job.json`，而
+    `write_bytes_atomic` 会 `mkdir(parents=True)`。用户看到"完成"后立刻删除，
+    收尾中的那次写盘就会把刚删掉的目录**重新建出来**（整仓测试间歇失败的根源）。
+    """
+    manager = JobManager(tmp_path / "data", runners=fake_runners())
+    try:
+        job = manager.create("歌.wav", io.BytesIO(WAV_BYTES))
+        root = job.root
+        assert manager.delete(job.id, permanent=True)
+        assert not root.exists()
+
+        manager._write_metadata(job)                 # 收尾线程此刻还在写
+        manager.write_manifest(job)
+        assert not root.exists()
+    finally:
+        manager.shutdown()
 
 
 # --------------------------------------------------- 回收站的保留策略（7 天 / 2GB）

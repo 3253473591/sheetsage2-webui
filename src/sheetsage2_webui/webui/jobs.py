@@ -787,28 +787,6 @@ class JobManager:
         self._write_metadata(job)
         return job
 
-    def delete(self, job_id: str) -> bool:
-        """删除任务与它的全部产物。正在跑的任务必须先取消。
-
-        `output/` 里**本来就有的**产物不在这里删：那是命令行 / 别处跑出来的东西，
-        删它等于删用户的作品——要让列表干净请手动删目录（提示里会写清楚）。
-        """
-        job = self.get(job_id)
-        if job is None:
-            return False
-        if job.imported:
-            raise ImportedProject(
-                f"{job.name} 是 output/ 里已有的产物，不能从这里删"
-                f"（要删请手动删目录 {job.root}）")
-        if job.state == "running":
-            raise RuntimeError("任务正在运行，请先取消")
-        with self._lock:
-            self._jobs.pop(job_id, None)
-            if job_id in self._order:
-                self._order.remove(job_id)
-        shutil.rmtree(job.root, ignore_errors=True)
-        return True
-
     # ---------------------------------------------------------------- 打包
     def bundle(self, job: Job) -> Path:
         """把 ``output/`` 打成一个 zip（懒生成，落盘缓存）。
@@ -889,6 +867,10 @@ class JobManager:
             self._jobs.pop(job_id, None)
             if job_id in self._order:
                 self._order.remove(job_id)
+        # 先立"已删除"的墓碑再动磁盘：收尾线程（`_finish`）可能正在写 job.json /
+        # manifest.json，而原子写会 `mkdir(parents=True)`——它会把这个目录**重新建出来**。
+        with job.lock:
+            job.removed = True
         if permanent or not self.use_trash:
             shutil.rmtree(job.root, ignore_errors=True)
             return True
@@ -899,6 +881,8 @@ class JobManager:
             move_into(job.root, entry)
         except OSError:
             # 挪不进回收站就别硬删：宁可报错让用户重试，也不能把东西弄丢
+            with job.lock:
+                job.removed = False
             with self._lock:
                 self._jobs[job_id] = job
                 self._order.insert(0, job_id)
@@ -1176,7 +1160,12 @@ class JobManager:
 
     # ---------------------------------------------------------------- 完成门禁
     def _settle_phase(self, job: Job, phase: str, detail: Mapping[str, Any]) -> None:
-        """阶段收尾：**先体检产物，通过了才算 done**（G4）。"""
+        """阶段收尾：**先体检产物，通过了才算 done**（G4）。
+
+        写盘（`manifest.json` / `job.json`）也留在同一个临界区里：调用方拿到
+        "这一阶段 done"之后就会去备份/下载/删除，此时磁盘上必须已经是这一版
+        （`artifacts_rev` 已经 +1）。放在锁外面就会读到上一版的 `job.json`。
+        """
         failure: StageFailure | None = None
         with job.lock:
             run = job.stages[phase]
@@ -1194,12 +1183,16 @@ class JobManager:
                 run.finished_at = time.time()
                 error = {"code": run.error_code, "message": run.error,
                          "action": run.error_action, "detail": run.error_detail}
+            self.write_manifest(job)                  # RLock：重入自己那把锁
+            self._write_metadata(job)
+            # 终态事件也在这把锁里发：读方拿 `snapshot()` / `events_since()` 时要么
+            # 看到"还没 done"，要么看到"done + 事件都在"，不会只拿到一半。
+            if error is None:
+                job.emit("phase_done", phase=phase, detail=run.detail)
+            else:
+                job.emit("phase_error", phase=phase, **error)
         if error is None:
-            job.emit("phase_done", phase=phase, detail=run.detail)
             self._flush_prev(job)
-        else:
-            job.emit("phase_error", phase=phase, **error)
-        self.write_manifest(job)
 
     def _completion_gate(self, job: Job, phase: str,
                          detail: Mapping[str, Any]) -> StageFailure | None:
@@ -1495,7 +1488,7 @@ class JobManager:
         这样"上一轮残留但这一轮没产出"的文件不会混进下载包——磁盘上留着是一回事，
         当成这一版的结果发出去是另一回事。
         """
-        if job.imported:
+        if job.imported or job.removed:
             return
         try:
             with job.lock:
@@ -1515,7 +1508,12 @@ class JobManager:
 
     # ---------------------------------------------------------------- 收尾
     def _finish(self, job: Job) -> None:
-        """所有阶段都跑完（或停了）之后：汇总任务级状态 + 扫产物。"""
+        """所有阶段都跑完（或停了）之后：汇总任务级状态 + 扫产物。
+
+        **写盘必须在同一个临界区里**：`snapshot()` 也是拿 `job.lock` 的，所以调用方
+        不可能"先看到 done、再去删/备份"，而 `manifest.json` / `job.json` 还没落盘。
+        否则删工程会撞上收尾写盘（回收站里的 `files` 也会是 0）。
+        """
         with job.lock:
             states = [job.stages[phase].state for phase in PHASES]
             if job.cancel_requested and "failed" not in states:
@@ -1530,10 +1528,11 @@ class JobManager:
             job.warnings = list(job.stages["transcribe"].detail.get("warnings") or [])
             job.stage = None
             state = job.state
-        payload = {"message": "全部完成" if state == "done" else "任务已结束", "state": state}
-        job.emit(state if state != "failed" else "error", **payload)
-        self.write_manifest(job)
-        self._write_metadata(job)
+            self.write_manifest(job)                  # RLock：重入自己那把锁
+            self._write_metadata(job)
+            payload = {"message": "全部完成" if state == "done" else "任务已结束",
+                       "state": state}
+            job.emit(state if state != "failed" else "error", **payload)
 
     def _fail(self, job: Job, exc: BaseException | str) -> None:
         """工作线程兜底：连 `_run` 都炸了，至少给一句人话（不是异常类名）。"""
@@ -1550,8 +1549,9 @@ class JobManager:
 
     def _write_metadata(self, job: Job) -> None:
         # 只读工程（output/ 里本来就有的产物）不写元数据：那会把别人跑出来的目录
-        # 变成"WebUI 工程"，下次重启就按 WebUI 工程恢复了
-        if job.imported:
+        # 变成"WebUI 工程"，下次重启就按 WebUI 工程恢复了；已删除的工程同理——
+        # 原子写会 `mkdir(parents=True)`，把刚删掉的目录又建回来。
+        if job.imported or job.removed:
             return
         try:
             with job.lock:

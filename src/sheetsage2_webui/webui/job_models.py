@@ -173,6 +173,10 @@ class Job:
     canceled_at: float | None = None
     #: `output/` 里本来就有的产物目录（不是 WebUI 建的）——只读。
     imported: bool = False
+    #: **墓碑**：这个工程已经从列表里删掉了。收尾线程（`_finish` 之后的写盘）可能还在跑，
+    #: 而原子写会 `mkdir(parents=True)`——不认这个标记就会把刚删掉的目录重新建出来。
+    #: 只影响写盘，不进快照 / `job.json`。
+    removed: bool = False
     #: 耗时预估（G20）的提供者：`(job, phase) -> {seconds,low,high,label,…} | None`。
     #: 由 :class:`JobManager` 在登记工程时挂上——`Job` 自己不知道显卡、音频时长这些上下文。
     eta_provider: Callable[["Job", str], Mapping[str, Any] | None] | None = field(

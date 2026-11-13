@@ -88,6 +88,8 @@ def upload(client: TestClient, name: str = "测试.wav", data: bytes = WAV_BYTES
 
 def wait_stage(manager: JobManager, job_id: str, phase: str,
                timeout: float = 20.0) -> str:
+    """等某个阶段跑完。**走快照**（`snapshot()` 拿 `job.lock`）而不是直接读字段：
+    直接读会和收尾线程抢，可能看到"done"而 `job.json` / 终态事件还没落。"""
     import time
 
     deadline = time.monotonic() + timeout
@@ -95,8 +97,9 @@ def wait_stage(manager: JobManager, job_id: str, phase: str,
         job = manager.get(job_id)
         if job is None:
             return ""
-        if job.stages[phase].state in {"done", "failed", "cancelled"}:
-            return job.stages[phase].state
+        state = job.snapshot()["stages"][phase]["state"]
+        if state in {"done", "failed", "cancelled"}:
+            return state
         time.sleep(0.02)
     return "timeout"
 
