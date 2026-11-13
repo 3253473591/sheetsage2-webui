@@ -56,12 +56,18 @@ def sse_frame(payload: dict[str, Any]) -> bytes:
 
 
 def terminal_event(job: Job, seq: int) -> dict[str, Any]:
-    """补一个终态事件：客户端连上时任务已经结束了，也要让它干净地收尾。"""
-    state = job.state
+    """补一个终态事件：客户端连上时任务已经结束了，也要让它干净地收尾。
+
+    错误要从**快照**里取：`Job` 自己没有 `error` 字段，各阶段各自记（快照把第一个
+    非空的拍平成一个值）。直接读 `job.error` 会让这个分支每次 `AttributeError`——
+    而它正是客户端带着"最后看到的 seq"重连时走的路。
+    """
+    snapshot = job.snapshot()
+    state = snapshot["state"]
     type_ = {"done": "done", "failed": "error", "cancelled": "cancelled"}.get(state, "done")
-    message = job.error or ("全部完成" if state == "done" else "任务已结束")
+    message = snapshot["error"] or ("全部完成" if state == "done" else "任务已结束")
     return {"seq": seq, "type": type_, "time": job.created_at,
-            "data": {"message": message, "state": state, "phase": job.stage}}
+            "data": {"message": message, "state": state, "phase": snapshot["stage"]}}
 
 
 def event_stream(job: Job, manager: JobManager, since: int,

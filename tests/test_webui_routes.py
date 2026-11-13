@@ -195,6 +195,44 @@ def test_sse_replays_from_since(tmp_path):
         assert [event["seq"] for event in tail] == [everything[-1]["seq"]]
 
 
+def test_sse_terminal_replay_without_pending_events_closes_cleanly(tmp_path):
+    """`since` 正好等于最后一条事件：没有待补事件也要补一个终态帧再收尾。
+
+    这是客户端最常见的重连姿势（带着"我最后看到的 seq"回来）。回归：`terminal_event()`
+    曾读 `job.error`——`Job` 上没有这个字段——于是这个分支每次 `AttributeError`，
+    流异常中断（基线 `app.py` 的 `_terminal_event()` 同款）。
+    """
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        job = upload(client, plan="transcribe").json()
+        wait_for_state(client, job["id"], {"done"})
+        everything = collect_events(client, f"/api/jobs/{job['id']}/events")
+        last = everything[-1]["seq"]
+        assert last == len(everything), "seq 应当连续，终态帧紧接其后"
+        replay = collect_events(client, f"/api/jobs/{job['id']}/events?since={last}")
+    assert [event["type"] for event in replay] == ["done"]
+    assert replay[0]["seq"] == last + 1
+    assert replay[0]["data"]["state"] == "done"
+
+
+def test_sse_terminal_replay_reports_the_stage_error(tmp_path):
+    """失败工程重连时，补发的终态帧要带上阶段里那句人话，不能只说"任务已结束"。"""
+    def boom(job, progress):
+        progress.step("识别音乐", 0.06)
+        raise ValueError("显存不够了")
+
+    client, _ = make_client(tmp_path, {"transcribe": boom, "lyrics": fake_lyrics})
+    with client:
+        job = upload(client, plan="transcribe").json()
+        wait_for_state(client, job["id"], {"failed"})
+        everything = collect_events(client, f"/api/jobs/{job['id']}/events")
+        replay = collect_events(client,
+                                f"/api/jobs/{job['id']}/events?since={everything[-1]['seq']}")
+    assert [event["type"] for event in replay] == ["error"]
+    assert "显存不够了" in replay[0]["data"]["message"]
+    assert replay[0]["data"]["state"] == "failed"
+
+
 def test_failed_stage_surfaces_the_error(tmp_path):
     def boom(job, progress):
         progress.step("识别音乐", 0.06)
