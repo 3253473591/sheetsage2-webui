@@ -34,7 +34,8 @@ from ..pipeline import run as pipeline_run
 from ..result import EXPECTED_MIDI, EXPECTED_TEXT, inspect_output_dir
 from ..sections import is_instrumental
 from ..timeline import PPQ, from_stored_measures
-from .jobs import (PHASE_LABELS, Job, Progress, StageRunner, asr_model_label)
+from .job_models import Job, Progress, StageRunner
+from .job_options import asr_model_label
 
 #: 扒谱阶段的小步骤与进度锚点。`识别音乐` 占大头是因为它就是推理本身。
 STEP_LOAD = ("加载模型", 0.00)

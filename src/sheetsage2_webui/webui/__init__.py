@@ -7,7 +7,9 @@
 """
 
 from .app import STATIC_DIR, create_app
-from .jobs import PHASES, Job, JobCancelled, JobManager, Progress, StageNotReady, StageRun
+from .job_errors import JobCancelled, StageNotReady
+from .job_models import PHASES, Job, Progress, StageRun
+from .jobs import JobManager
 from .runner import RunnerSession, build_highlights, group_lyric_lines
 
 __all__ = [
