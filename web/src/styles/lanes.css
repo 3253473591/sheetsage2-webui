@@ -1,0 +1,75 @@
+/* SheetSage2 Studio —— lanes
+ *
+ * 音轨与波形：音轨行、波形柱、播放头。
+ */
+
+/* 音轨 */
+.tracks {
+  padding: 4px 12px;
+}
+.track {
+  display: grid;
+  grid-template-columns: 24px 118px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  height: 58px;
+}
+.track + .track {
+  border-top: 1px solid var(--line-soft);
+}
+.tr-play {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--card);
+  font-size: 9px;
+  color: var(--muted);
+}
+.tr-play.on {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.tr-name {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.tr-name small {
+  display: block;
+  font-weight: normal;
+  color: var(--light);
+  font-size: 10px;
+}
+.wave {
+  height: 40px;
+  position: relative;
+  min-width: 0;
+}
+.wave canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: pointer;
+}
+.tr-empty {
+  height: 40px;
+  border: 1px dashed var(--line);
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--light);
+}
+.tr-act {
+  font-size: 11px;
+  color: var(--light);
+  white-space: nowrap;
+}
+.tr-act a {
+  color: var(--primary);
+  font-size: 11px;
+  margin-left: 6px;
+  text-decoration: none;
+}

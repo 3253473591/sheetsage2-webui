@@ -1,0 +1,260 @@
+/* SheetSage2 Studio —— results
+ *
+ * 结果面板：文件清单、摘要、卷帘里的歌词与和弦。
+ */
+
+/* 结果 */
+.results {
+  flex: 1;
+  min-height: 340px;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px;
+}
+.rs-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.rs-title {
+  font-weight: 700;
+}
+.kv {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.kv b {
+  color: var(--text);
+  font-size: 12.5px;
+  margin-left: 3px;
+}
+.kv em {
+  font-style: normal;
+  color: var(--light);
+  margin-left: 3px;
+}
+.tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 2px;
+  margin-left: auto;
+}
+.tab {
+  padding: 3px 12px;
+  border-radius: 3px;
+  font-size: 12px;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+.tab.active {
+  background: var(--card);
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.lanes {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  overflow: hidden;
+  margin-bottom: 10px;
+  flex: 0 0 auto;
+}
+.lane-labels {
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.lane-labels div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid var(--line-soft);
+}
+.lane-scroll {
+  overflow-x: auto;
+}
+.lane-inner {
+  position: relative;
+}
+.row {
+  position: relative;
+  border-bottom: 1px solid var(--line-soft);
+}
+.h-ruler {
+  height: 18px;
+}
+.h-sec {
+  height: 22px;
+}
+.h-chord {
+  height: 24px;
+}
+.h-lyric {
+  height: 28px;
+}
+.tick {
+  position: absolute;
+  top: 3px;
+  font-size: 9.5px;
+  color: var(--light);
+  border-left: 1px solid var(--line);
+  padding-left: 3px;
+  height: 12px;
+  line-height: 12px;
+}
+.bar-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--line);
+}
+.blk {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  padding: 0 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+}
+.blk.sec {
+  color: #fff;
+  font-weight: 600;
+}
+.blk.chord {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+.blk.lyric {
+  background: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+}
+[data-theme='dark'] .blk.lyric {
+  background: #1e3a5f;
+  color: #c7d2fe;
+  border-color: #2563eb;
+}
+.blk.pending {
+  color: var(--primary);
+  border: 1px dashed #93c5fd;
+  background: repeating-linear-gradient(45deg, #f8fafc 0 6px, #eff6ff 6px 12px);
+}
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--danger);
+  pointer-events: none;
+}
+.detail {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.detail-empty {
+  color: var(--light);
+  font-size: 11.5px;
+  padding: 12px 2px;
+  line-height: 1.9;
+}
+.section-row {
+  margin-bottom: 12px;
+}
+.section-header {
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.chord-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chord-tag {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+.chord-tag .time,
+.ly-time {
+  color: var(--light);
+  font-size: 10px;
+  margin-right: 4px;
+}
+.ly-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12px;
+}
+.ly-row.pending {
+  color: var(--light);
+}
+.notes-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  font-size: 11.5px;
+}
+.notes-strip .nk {
+  color: var(--light);
+  font-size: 10px;
+}
+.warn-box {
+  border: 1px solid var(--warn-l);
+  background: var(--warn-l);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.8;
+  margin-bottom: 10px;
+}
+.warn-box b {
+  color: var(--warn);
+}
+.error-box {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--danger);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+[data-theme='dark'] .error-box {
+  background: #4c1d1d;
+  border-color: #7f1d1d;
+}
+.error-box button {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: inherit;
+}

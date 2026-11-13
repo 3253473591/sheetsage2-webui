@@ -32,7 +32,7 @@ describe('参数行', () => {
     expect(paramRows(FALLBACK_PARAMS.transcribe, undefined).length).toBe(4)
   })
 
-  it('「语言」是下拉框，其余是标签按钮', () => {
+  it('「语言」是下拉框、「歌词LRC」是文本框，其余是标签按钮', () => {
     const lyrics = paramRows(FALLBACK_PARAMS.lyrics, undefined)
     const language = lyrics.find((row) => row.key === 'language')!
     expect(language.widget).toBe('select')
@@ -41,7 +41,10 @@ describe('参数行', () => {
     )
     // 原型只有 4 个语言，这里是下拉框全量——这就是"本项目多的那一处"
     expect(language.options.length).toBeGreaterThan(4)
-    for (const row of lyrics.filter((item) => item.key !== 'language')) {
+    // 歌词源是 LRC/TXT 的输入（拖文件或粘贴），不是几个固定取值 -> 文本框
+    const lrc = lyrics.find((row) => row.key === 'lyrics_lrc')!
+    expect(lrc.widget).toBe('text')
+    for (const row of lyrics.filter((item) => !['language', 'lyrics_lrc'].includes(item.key))) {
       expect(row.widget).toBe('buttons')
     }
   })
@@ -74,8 +77,9 @@ describe('参数行', () => {
   it('三行的顺序与原型一致（精度 / 设备 / 范围），量化在最后', () => {
     expect(paramRows(FALLBACK_PARAMS.transcribe, undefined).map((row) => row.label))
       .toEqual(['精度', '设备', '范围', '量化'])
+    // 歌词那几行在「语言」之后多了「歌词LRC」（官方词对齐的入口）
     expect(paramRows(FALLBACK_PARAMS.lyrics, undefined).map((row) => row.label))
-      .toEqual(['模型', '音源', '段落', '语言'])
+      .toEqual(['模型', '音源', '段落', '语言', '歌词LRC'])
   })
 
   it('值 -> 显示名', () => {

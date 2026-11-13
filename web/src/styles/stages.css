@@ -1,0 +1,218 @@
+/* SheetSage2 Studio —— stages
+ *
+ * 流水线与阶段卡：小步骤、进度条、耗时预估、参数面板（含下拉框与歌词 LRC 输入框）。
+ */
+
+/* 流水线 */
+.pipeline {
+  display: grid;
+  grid-template-columns: 1fr 26px 1fr;
+}
+.arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #cbd5e1;
+  font-size: 16px;
+}
+.arrow.on {
+  color: var(--primary);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.stage {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stage.running {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px var(--primary-l);
+}
+.stage.done {
+  border-color: #a7f3d0;
+}
+.stage.failed {
+  border-color: #fecaca;
+}
+.sg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sg-no {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--line);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.stage.done .sg-no {
+  background: var(--ok);
+  color: #fff;
+}
+.stage.running .sg-no {
+  background: var(--primary);
+  color: #fff;
+}
+.stage.failed .sg-no {
+  background: var(--danger);
+  color: #fff;
+}
+.sg-title {
+  font-weight: 700;
+}
+.sg-engine {
+  font-size: 11px;
+  color: var(--light);
+}
+.pill {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.pill.ok {
+  background: var(--ok-l);
+  color: var(--ok);
+}
+.pill.run {
+  background: var(--primary-l);
+  color: var(--primary);
+  font-weight: 600;
+}
+.pill.idle {
+  background: var(--line-soft);
+  color: var(--light);
+}
+.pill.bad {
+  background: var(--warn-l);
+  color: var(--danger);
+}
+.bar {
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.bar > div {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.2s;
+}
+.stage.done .bar > div {
+  background: var(--ok);
+}
+.sg-step {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 15px;
+}
+/* 耗时预估（G20）：等待时"还要等多久"比任何数字都重要，单独给一行 */
+.sg-eta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.sg-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+}
+.sg-foot .spacer {
+  flex: 1;
+}
+.link {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 11px;
+}
+.params {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+  grid-template-columns: 36px 1fr;
+  gap: 7px 10px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  display: grid;
+}
+.params.collapsed {
+  display: none;
+}
+.btn-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tag-btn {
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  font-size: 11px;
+  color: var(--muted);
+}
+.tag-btn.active {
+  background: var(--primary-l);
+  border-color: var(--primary-b);
+  color: var(--primary);
+  font-weight: 500;
+}
+.tag-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+/* 参数面板为什么不能改（4G 特供锁死 / 阶段正在跑）——横跨两列 */
+.params .param-lock {
+  grid-column: 1 / -1;
+  color: var(--warn);
+  font-size: 10.5px;
+}
+/* 页面上放开给用户的下拉框（识别语言，选项比原型多） */
+.lang-select {
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--primary-b);
+  background: var(--primary-l);
+  color: var(--primary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.lang-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* 歌词 LRC 路径输入框（歌词阶段参数里唯一一行文本框） */
+.text-param {
+  grid-column: 1 / -1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--primary-b);
+  background: var(--primary-l);
+  color: var(--primary);
+  font-size: 11px;
+  font-family: inherit;
+}
+.text-param:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

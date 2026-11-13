@@ -1,0 +1,233 @@
+/* SheetSage2 Studio —— components
+ *
+ * 通用组件：主区里的按钮、只读工程标记、下载菜单、「导出」弹窗。
+ */
+
+/* ===== 主区 ===== */
+.main {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workspace {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+.ws-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.empty-hint {
+  margin: auto;
+  text-align: center;
+  color: var(--light);
+  font-size: 13px;
+  line-height: 2;
+  padding: 48px 16px;
+}
+.empty-hint b {
+  color: var(--text);
+  font-size: 15px;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.proj-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ph-name {
+  font-size: 17px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ph-meta {
+  font-size: 11px;
+  color: var(--light);
+  margin-top: 2px;
+}
+.ph-actions {
+  display: flex;
+  gap: 6px;
+  position: relative;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.btn-primary {
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.btn-secondary {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text);
+}
+.btn-secondary.danger {
+  color: var(--danger);
+  border-color: #fecaca;
+}
+.dl-menu {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  z-index: 20;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 6px;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.dl-menu a {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-decoration: none;
+  font-size: 11.5px;
+  color: var(--text);
+}
+.dl-menu a:hover {
+  background: var(--line-soft);
+  color: var(--primary);
+}
+.dl-menu .sz {
+  margin-left: auto;
+  color: var(--light);
+  font-size: 10.5px;
+}
+.dl-menu .all {
+  border-bottom: 1px solid var(--line);
+  border-radius: 4px 4px 0 0;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+/* 「下载 SVP」主按钮 + 展开产物菜单的小箭头，共用一个定位上下文 */
+.dl-group {
+  position: relative;
+  display: flex;
+}
+.dl-group .dl-main {
+  border-radius: 4px 0 0 4px;
+}
+.dl-group .dl-caret {
+  border-radius: 0 4px 4px 0;
+  border-left: none;
+  padding: 6px 7px;
+  line-height: 1;
+}
+.dl-group .dl-caret.on,
+.dl-group .dl-caret:hover {
+  color: var(--primary);
+  border-color: var(--primary-b);
+}
+
+/* ===== 导出弹窗 ===== */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(17, 24, 39, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+  width: 100%;
+  max-width: 420px;
+  padding: 14px 16px 12px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.modal-x {
+  background: none;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+}
+.modal-sub {
+  margin: 6px 0 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.modal-loading,
+.modal-error {
+  font-size: 12px;
+  padding: 10px 0;
+  color: var(--muted);
+}
+.modal-error {
+  color: var(--danger);
+}
+.modal-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.modal-row.off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.modal-row .mr-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.modal-row small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.modal-sum {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--muted);
+}

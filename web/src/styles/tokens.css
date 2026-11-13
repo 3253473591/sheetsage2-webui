@@ -1,0 +1,65 @@
+/* SheetSage2 Studio —— tokens
+ *
+ * 颜色、间距、尺寸令牌。**所有颜色都从这里来**，组件样式里不写死色值。
+ */
+
+:root {
+  --bg: #f3f4f6;
+  --card: #fff;
+  --line: #e5e7eb;
+  --line-soft: #f3f4f6;
+  --primary: #2563eb;
+  --primary-l: #eff6ff;
+  --primary-b: #bfdbfe;
+  --ok: #059669;
+  --ok-l: #ecfdf5;
+  --warn: #d97706;
+  --warn-l: #fffbeb;
+  --danger: #dc2626;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --light: #9ca3af;
+}
+[data-theme='dark'] {
+  --bg: #111827;
+  --card: #1f2937;
+  --line: #374151;
+  --line-soft: #2b3648;
+  --primary: #60a5fa;
+  --primary-l: #1e3a5f;
+  --primary-b: #2563eb;
+  --ok: #34d399;
+  --ok-l: #064e3b;
+  --warn: #fbbf24;
+  --warn-l: #4a3410;
+  --danger: #f87171;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --light: #6b7280;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#app {
+  height: 100%;
+}
+button {
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+a {
+  color: inherit;
+}
