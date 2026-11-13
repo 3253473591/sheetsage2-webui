@@ -1,7 +1,7 @@
 """错误码表：把异常翻译成「人话 + 下一步 + 技术细节」。
 
-**为什么要有这个模块**：以前 `jobs._run_phase` 把 `f"{type(exc).__name__}: {exc}"`
-直接塞进快照、SSE 与 `job.json`，页面上显示的是
+**为什么要有这个模块**：以前阶段收尾（现在在 `job_scheduler.Scheduler._run_phase`）把
+`f"{type(exc).__name__}: {exc}"` 直接塞进快照、SSE 与 `job.json`，页面上显示的是
 `TranscriptionError: 转写失败：RuntimeError: CUDA error: an illegal memory access was encountered`
 这种给开发者看的东西。用户看不懂，也就没法据此行动。
 

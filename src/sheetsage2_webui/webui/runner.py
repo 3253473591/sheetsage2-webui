@@ -245,7 +245,7 @@ class RunnerSession:
         grid = (payload.get("highlights") or {}).get("quantize") or {}
         # **完成门禁**（G4）：跑完不等于成功。`result.inspect_output_dir` 是 CLI 一直在用
         # 的那套体检（15 个文本产物 + 6 个 MIDI 的完整性/自洽性），WebUI 以前从不调用，
-        # 于是半成品也被标成 ✅。这里跑一次，结果交给 `JobManager._settle_phase` 判定。
+        # 于是半成品也被标成 ✅。这里跑一次，结果交给 `job_scheduler.Scheduler._settle_phase` 判定。
         artifacts = inspect_artifacts(job.out_dir,
                                       (payload.get("summary") or {}).get("duration_seconds"))
         if not artifacts["ok"]:
