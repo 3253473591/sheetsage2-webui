@@ -95,7 +95,7 @@ def resolve_asr_model(path: str) -> str:
     `01_install.bat` 默认下最小集（只有 0.6B），而这边的默认值是 1.7B——
     新机器上一进歌词阶段就会「模型权重没找到」。
     """
-    from .runner import pick_asr_model
+    from .runner_models import pick_asr_model
 
     resolved = Path(resolve(path))
     if (resolved / "config.json").is_file():

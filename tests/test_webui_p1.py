@@ -300,7 +300,7 @@ def test_preflight_counts_a_minimal_asr_install(tmp_path):
 
 def test_default_asr_config_falls_back_to_the_installed_model(tmp_path):
     """最小集只有 0.6B：默认配置不能死认 1.7B，也不能硬塞一个没装的 Qwen 对齐器。"""
-    from sheetsage2_webui.webui.runner import default_asr_config, pick_asr_model
+    from sheetsage2_webui.webui.runner_models import default_asr_config, pick_asr_model
 
     models = tmp_path / "models"
     (models / "Qwen3-ASR-0.6B").mkdir(parents=True)
