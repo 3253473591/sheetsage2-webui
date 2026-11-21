@@ -665,27 +665,36 @@ def text_similarity(manual: Sequence[Note], chars: Sequence[Char]) -> float:
 def manual_triplet_share(manual: Sequence[Note], bpm: float | None) -> float:
     """人工谱里"纯三连音间隔"的占比（判断这首歌是不是三连音歌）。
 
-    只看相邻音起点的间隔：落在 1/3 或 1/6 拍上、且不落在直线位上就算。
-    **不需要估相位**（相位坑见 `docs/音符量化规格.md` §8.1）。
+    判定在 **tick 域**做：把秒按 BPM 换成 tick（一拍 1920），间隔落在 **320 tick
+    （1/6 拍）或 640 tick（1/3 拍）** 上、且不落在 480/960/1920（直线位）上就算。
+
+    这是 `docs/音符量化规格.md` 里验证过的判据（Believer 69.1%、巴拉莱卡 80.9%、
+    皮囊 53.1%、不想长大 0%）。**不要用"按拍拟合相位"的位置法**——它会把普通
+    慢歌（如《相思》）算成 58%。
     """
     if not bpm or bpm <= 0 or len(manual) < 3:
         return 0.0
-    beat = 60.0 / float(bpm)
-    starts = sorted(note.start for note in manual)
-    gaps = [b - a for a, b in zip(starts, starts[1:]) if b - a > 0]
-    if not gaps:
-        return 0.0
 
-    def distance(value: float, step: float) -> float:
-        rest = value % step
-        return min(rest, step - rest)
+    def distance(value: int, size: int) -> int:
+        rest = value % size
+        return min(rest, size - rest)
 
-    hits = sum(
-        1 for gap in gaps
-        if (distance(gap, beat / 3) <= 0.02 or distance(gap, beat / 6) <= 0.02)
-        and distance(gap, beat / 4) > 0.02 and distance(gap, beat / 2) > 0.02
-    )
-    return hits / len(gaps)
+    def share_at(beats_per_minute: float) -> float:
+        beat_seconds = 60.0 / float(beats_per_minute)
+        ticks = sorted(round(note.start / beat_seconds * 1920) for note in manual)
+        gaps = [b - a for a, b in zip(ticks, ticks[1:]) if b - a > 0]
+        if not gaps:
+            return 0.0
+        hits = sum(
+            1 for gap in gaps
+            if (distance(gap, 320) <= 15 or distance(gap, 640) <= 15)
+            and distance(gap, 480) > 15 and distance(gap, 240) > 15
+            and distance(gap, 960) > 15
+        )
+        return hits / len(gaps)
+
+    # 自动判的 BPM 可能是歌速的一半/两倍（半速记法），三种都试，取最大。
+    return max(share_at(bpm), share_at(bpm * 2), share_at(bpm / 2))
 
 
 def estimate_offset(manual: Sequence[Note], chars: Sequence[Char], *,

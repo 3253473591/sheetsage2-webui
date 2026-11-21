@@ -268,3 +268,14 @@ def test_read_midi_notes_reads_lyrics_and_seconds(tmp_path):
     # 120 BPM、480 PPQ：第 2 个音在 1.0s
     assert abs(notes[0].start) < 1e-3
     assert abs(notes[1].start - 1.0) < 1e-3
+
+def test_manual_triplet_share_sees_triplets_and_ignores_straight():
+    """三连音占比：tick 域间隔法；直线歌必须是 0。"""
+    from sheetsage2_webui.bench import Note, manual_triplet_share
+
+    # 120 BPM → 一拍 0.5s；三连音间隔 1/6s
+    triplets = [Note(0.166666 * i, 0.166666 * i + 0.1, 60, "x") for i in range(24)]
+    assert manual_triplet_share(triplets, 120.0) > 0.7
+    # 直线八分音符间隔 0.25s
+    straight = [Note(0.25 * i, 0.25 * i + 0.1, 60, "x") for i in range(24)]
+    assert manual_triplet_share(straight, 120.0) == 0.0
