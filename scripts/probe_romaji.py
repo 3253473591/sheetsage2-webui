@@ -2,7 +2,7 @@ r"""探针：Qwen3-ASR 能不能把日语转写成**罗马音**？
 
     .\.venv\Scripts\python.exe scripts\probe_romaji.py
     .\.venv\Scripts\python.exe scripts\probe_romaji.py --start 60 --seconds 30
-    .\.venv\Scripts\python.exe scripts\probe_romaji.py --audio "samples\某首日语歌.flac"
+    .\.venv\Scripts\python.exe scripts\probe_romaji.py --audio "samples\某首日语歌.mp3"
 
 要回答的两件事：
 
@@ -36,9 +36,9 @@ CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
 KANA = re.compile(r"[\u3040-\u30ff]")
 LATIN = re.compile(r"[A-Za-z]")
 
-DEFAULT_AUDIO = PROJECT / "samples" / "麻枝准,やなぎなぎ - 死にゆく季節のきみへ.flac"
+DEFAULT_AUDIO = PROJECT / "samples" / "音频" / "麻枝准,やなぎなぎ - 死にゆく季節のきみへ.mp3"
 #: 没有日语素材时的退路：拿中文歌 + `language=Japanese` 也能验"指令改不了文字"这一条。
-FALLBACK_AUDIO = PROJECT / "samples" / "凤凰传奇 - 光芒.flac"
+FALLBACK_AUDIO = PROJECT / "samples" / "音频" / "凤凰传奇 - 光芒.mp3"
 
 #: (标签, 强制语言, context, 说明)。context 是唯一能下"用罗马音写"这道指令的通道。
 CASES: list[tuple[str, str | None, str, str]] = [

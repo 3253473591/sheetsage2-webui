@@ -42,6 +42,8 @@ from typing import Any, Callable, Iterable, Mapping
 
 from ..bootstrap import PROJECT_ROOT
 from ..fsutil import move_into, write_text_atomic
+from ..meta import write_meta
+from ..meta_watch import MetaWatcher
 from .errors import StageFailure, describe as describe_error
 from .eta import estimate as estimate_seconds
 from .job_errors import (ImportedProject, JobCancelled, StageNotReady, StaleRevision,
@@ -103,6 +105,8 @@ class JobManager:
         trash_purge_interval: float = TRASH_PURGE_INTERVAL,
         use_trash: bool = True,
         probe_upload: bool = False,
+        meta_watch: bool = False,
+        meta_watch_dirs: Iterable[str | Path] = (),
     ) -> None:
         self.root = Path(root) if root is not None else PROJECT_ROOT / "tmp" / "webui"
         self.max_upload_mb = float(max_upload_mb)
@@ -146,12 +150,26 @@ class JobManager:
         # **重启不丢**：把 output/ 里已有的工程读回来（WebUI 建的读 job.json，
         # 命令行跑出来的当"只读产物"收进来）
         self._load_existing()
+        # 手动精修只改/加 auto.svp / manual.svp：轮询这些目录，源文件一变就刷新
+        # meta.json（write_meta 自己会看 mtime，没变不写盘）。生产入口默认开；
+        # 测试里 create_app 不传就不起线程。
+        self._meta_watch = (MetaWatcher([self.root, *meta_watch_dirs])
+                            if meta_watch else None)
+        if self._meta_watch is not None:
+            self._meta_watch.start()
         self._trash.start()
 
     # ---------------------------------------------------------------- 启动恢复
     def _load_existing(self) -> None:
         """把数据根里已有的工程登记进来（扫描与恢复的细节在 `JobStore.load_existing`）。"""
         restored = self._store.load_existing()
+        for job in restored:
+            # 手动精修往往是在识别完成之后再加/改 auto.svp / manual.svp 的；
+            # 启动扫描时顺手刷新，meta 就不会停在旧统计上。
+            try:
+                write_meta(job.out_dir)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         with self._lock:
             for job in restored:
                 self._jobs[job.id] = job
@@ -210,6 +228,8 @@ class JobManager:
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """请求停止；正在跑的阶段不会被粗暴中断。"""
+        if self._meta_watch is not None:
+            self._meta_watch.stop()
         self._scheduler.shutdown(timeout=timeout)
         self._trash.stop(timeout=timeout)
 

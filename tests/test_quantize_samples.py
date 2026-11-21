@@ -32,6 +32,14 @@ from sheetsage2_webui.quantize import (  # noqa: E402
 )
 
 SAMPLES = PROJECT_ROOT / "samples"
+#: 2026-11-20 整理后的位置：量化样本在 `samples/量化/<歌>/`，
+#: 旷古回响的两个 SVP 是 auto.svp / manual.svp，MIDI 统一叫 ref.mid。
+SAMPLE_FILES = {
+    "忘川风华录 - 旷古回响.svp": SAMPLES / "量化" / "忘川风华录 - 旷古回响" / "auto.svp",
+    "忘川风华录 - 旷古回响（人工）.svp": SAMPLES / "量化" / "忘川风华录 - 旷古回响" / "manual.svp",
+    "皮囊.mid": SAMPLES / "量化" / "萧敬腾 - 皮囊" / "ref.mid",
+    "巴拉莱卡（The Rod）.mid": SAMPLES / "量化" / "门尼 - 巴拉莱卡（The Rod）" / "ref.mid",
+}
 PPQ = 1920
 GRID_TICKS = PPQ // 96                     # 网格步长 = 一拍/96 = 20 tick（32 分 × 三连音）
 SVP_BAR = 705_600_000                      # SV 工程的一小节 = 1920 tick（4/4）
@@ -41,9 +49,13 @@ QUARTER = 705_600_000                      # 一拍 = 上面的 1/4，所以 SVP
 SVP_TICK_OFFSET = 7680
 
 
+def _sample_path(name: str) -> Path:
+    return SAMPLE_FILES.get(name, SAMPLES / name)
+
+
 def _load_svp(name: str) -> list[tuple[int, int]]:
     """SV 工程 → 工程 tick 的 (start, end)。文件尾部有一个 NUL，要 strip。"""
-    path = SAMPLES / name
+    path = _sample_path(name)
     if not path.is_file():
         pytest.skip(f"样本不在：{path}")
     doc = json.loads(path.read_bytes().rstrip(b"\x00").decode("utf-8"))
@@ -58,7 +70,7 @@ def _load_svp(name: str) -> list[tuple[int, int]]:
 
 def _load_midi(name: str) -> tuple[list[tuple[int, int]], int]:
     """MIDI → 工程 tick 的 (start, end)，以及 PPB。"""
-    path = SAMPLES / name
+    path = _sample_path(name)
     if not path.is_file():
         pytest.skip(f"样本不在：{path}")
     import mido

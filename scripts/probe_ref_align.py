@@ -22,7 +22,7 @@ from sheetsage2_webui.bootstrap import find_ffmpeg  # noqa: E402
 
 MODELS = PROJECT / "models"
 SLUG = "凤凰传奇_-_光芒"
-AUDIO = PROJECT / "samples" / "凤凰传奇 - 光芒.flac"
+AUDIO = PROJECT / "samples" / "音频" / "凤凰传奇 - 光芒.mp3"
 project_dir = PROJECT / "output" / SLUG
 
 

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -43,6 +45,7 @@ from sheetsage2_webui.webui.security import (  # noqa: E402
 
 WAV_BYTES = b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 64
 PROJECT_STUB = {"version": 1, "ppq": 1920, "audio": "t.wav", "duration_seconds": 8.0}
+LRC_TEXT = "[00:01.00]晚风停在旧站台\n[00:05.00]旧站台"
 
 
 def write_artifacts(out_dir: Path) -> None:
@@ -122,6 +125,60 @@ def test_optimistic_lock_rejects_a_stale_revision(tmp_path):
         body = stale.json()
         assert "旧的" in body["detail"]["message"]
         assert body["detail"]["snapshot"]["rev"] == 2
+
+
+def test_lrc_text_can_be_applied_without_500(tmp_path):
+    """歌词源抽屉的「应用」：自由文本要能存进 options，而不是去查枚举白名单。"""
+    client, _manager = make_client(tmp_path)
+    with client:
+        job = upload(client).json()
+        response = client.patch(f"/api/jobs/{job['id']}/options",
+                                json={"lyrics_lrc": LRC_TEXT})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["options"]["lyrics_lrc"] == LRC_TEXT
+        assert body["rev"] == 2
+
+
+def test_stage_completion_writes_meta_json(tmp_path):
+    """每个阶段 done 后都刷新 meta.json；歌词阶段覆盖成完整版。"""
+    client, manager = make_client(tmp_path)
+    with client:
+        job = upload(client).json()
+        manager.run_stage(job["id"], "transcribe")
+        assert wait_stage(manager, job["id"], "transcribe") == "done"
+        out_dir = manager.get(job["id"]).out_dir
+        meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+        assert meta["stats"]["notes_auto"] is None   # 这个假工程没有音符轨
+        assert meta["stats"]["chars"] == 0
+        assert meta["files"]["lyrics"] is None
+
+        manager.run_stage(job["id"], "lyrics")
+        assert wait_stage(manager, job["id"], "lyrics") == "done"
+        meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+        assert meta["stats"]["chars"] == 0          # 这个假 runner 只写了空 text
+        assert meta["files"]["lyrics"] == "lyrics.json"
+
+
+def test_opening_job_refreshes_meta_after_manual_svp(tmp_path):
+    """手动精修只改/加 manual.svp：再打开工程时 meta 要自动跟上。"""
+    client, manager = make_client(tmp_path)
+    with client:
+        job = upload(client).json()
+        manager.run_stage(job["id"], "transcribe")
+        assert wait_stage(manager, job["id"], "transcribe") == "done"
+        out_dir = manager.get(job["id"]).out_dir
+        (out_dir / "manual.svp").write_text(json.dumps({
+            "tracks": [{"mainGroup": {"notes": [{"lyrics": "晚"},
+                                                  {"lyrics": "-"},
+                                                  {"lyrics": "风"}]}}],
+        }), encoding="utf-8")
+        os.utime(out_dir / "manual.svp", (time.time() + 5, time.time() + 5))
+
+        response = client.get(f"/api/jobs/{job['id']}")
+        assert response.status_code == 200
+        meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+        assert meta["stats"]["notes_manual"] == 3
 
 
 def test_rev_bumps_on_any_result_changing_edit(tmp_path):

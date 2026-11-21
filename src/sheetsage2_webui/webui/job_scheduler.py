@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
+from ..meta import write_meta
 from .errors import StageFailure, describe as describe_error
 from .job_errors import JobCancelled
 from .job_files import scan_files
@@ -288,12 +289,27 @@ class Scheduler:
                 with job.lock:
                     run.detail.update(detail)
             else:
+                # 先写 meta 再做完成门禁：这样读方看到 stage=done 时，
+                # meta.json 一定已经在盘上（否则会有一个"done 了但 meta 还没写"的窗口）。
+                self._refresh_meta(job, phase)
                 self._settle_phase(job, phase, detail)
         finally:
             self._watch_end(job, phase)
             with job.lock:
                 job.stage = None
             self._store.write_metadata(job)
+
+    def _refresh_meta(self, job: Job, phase: str) -> None:
+        """阶段收尾前刷新 `meta.json`（歌词阶段带歌词，扒谱阶段只有音符）。
+
+        meta 是辅助索引，写失败不能把阶段改回 failed；读方最多看到旧 meta，
+        不能看到半截 JSON（`write_meta` 是原子写）。
+        """
+        try:
+            write_meta(job.out_dir, include_lyrics=(phase == "lyrics"))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            job.emit("log", phase=phase, message=f"meta.json 生成失败：{exc}")
+
     # ---------------------------------------------------------------- 完成门禁
     def _settle_phase(self, job: Job, phase: str, detail: Mapping[str, Any]) -> None:
         """阶段收尾：**先体检产物，通过了才算 done**（G4）。

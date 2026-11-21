@@ -1,5 +1,5 @@
 /**
- * 钢琴卷帘交互原型的**无头冒烟测试**。
+ * 编辑页（编排 + 钢琴卷帘，合并版）的**无头冒烟测试**。
  *
  *     cd web && node smoke-pianoroll.mjs
  *
@@ -8,17 +8,17 @@
  * 看个大概，而它们恰恰是最容易写错、且错了以后每首歌都会歪的地方。
  *
  * jsdom 没有布局引擎（`getBoundingClientRect()` 一律返回 0），所以这里把网格区的矩形
- * 打桩成一个固定值，于是 clientX → 内容坐标 的映射变成可预期的。原型那一侧的几何
+ * 打桩成一个固定值，于是 clientX → 内容坐标 的映射变成可预期的。页面那一侧的几何
  * 换算全是纯函数，DOM 只负责把坐标喂进去——这就是它能在无头环境里被驱动的原因。
  *
  * 判据：结构渲染正确 + tick↔秒 往返一致（含变速）+ 拖移/拉边/新建/删除/框选/量化/
- * 撤销重做/缩放锚定 各自的数值结果符合预期。
+ * 撤销重做/缩放锚定 + 编排条作为导航器（切轨、缩略图、拍号/曲速标记）+ 调式高亮。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { JSDOM, VirtualConsole } from 'jsdom'
 
-const htmlPath = fileURLToPath(new URL('../编辑页交互原型.html', import.meta.url))
+const htmlPath = fileURLToPath(new URL('../编辑页.html', import.meta.url))
 const html = readFileSync(htmlPath, 'utf8')
 
 // ---------------------------------------------------------------------------
@@ -606,6 +606,100 @@ ok('横向缩到 50% 时过密的细分线自动隐藏',
 PR.state.view.hZoom = 100
 PR.api.setSnap(8)
 PR.api.renderAll()
+
+// ---------------------------------------------------------------------------
+section('21. 合并：编排条是卷帘的导航器')
+// ---------------------------------------------------------------------------
+const railKeys = document.querySelectorAll('.arr-key')
+const arrTracks = document.querySelectorAll('.arr-track')
+ok('轨道列 3 行（人声/器乐/和弦）',
+  railKeys.length === 3
+  && [...railKeys].map((k) => k.querySelector('.nm').textContent).join(',') === '人声,器乐,和弦',
+  [...railKeys].map((k) => k.querySelector('.nm').textContent).join(','))
+ok('每条轨都画出了缩略音符',
+  [...arrTracks].every((t) => t.querySelectorAll('.arr-note').length > 0),
+  [...arrTracks].map((t) => t.querySelectorAll('.arr-note').length).join(','))
+ok('当前轨在轨道列上标了 aria-current',
+  railKeys[0].getAttribute('aria-current') === 'true')
+ok('拍了 4/4 拍号标记',
+  [...document.querySelectorAll('.arr-mark')].some((m) => m.textContent === '4/4'))
+ok('拍了曲速标记（来自 tempoMap，不是写死文案）',
+  [...document.querySelectorAll('.arr-mark.tempo')].some((m) => m.textContent === '120.00'))
+ok('音域 chip 显示 A3–E6',
+  document.getElementById('rangeChip').textContent === 'A3–E6',
+  document.getElementById('rangeChip').textContent)
+
+// 点第二条轨的行 = 切轨
+PR.state.selection.clear()
+railKeys[1].click()
+ok('点轨道行切到器乐轨', PR.state.currentTrack === 1, `${PR.state.currentTrack}`)
+ok('切轨后该轨的 aria-current 跟随',
+  document.querySelectorAll('.arr-key')[1].getAttribute('aria-current') === 'true')
+ok('切轨后卷帘渲染的是该轨音符',
+  document.querySelectorAll('.note:not(.ghost)').length
+    === PR.state.notes.filter((n) => n.track === 1).length,
+  `${document.querySelectorAll('.note:not(.ghost)').length}`)
+
+PR.api.setTrack(0)
+ok('能切回人声轨', PR.state.currentTrack === 0)
+
+// 点缩略图空白 = 定位（卷帘横向滚动 + 播放头）
+resetScroll()
+PR.api.scrollRollToSec(PR.api.totalSec() / 2)
+ok('导航器能把卷帘滚到曲子中段', scrollEl().scrollLeft > 0, `scrollLeft=${scrollEl().scrollLeft}`)
+resetScroll()
+
+// ---------------------------------------------------------------------------
+section('22. 调式音阶：高亮跟着根音/音阶走')
+// ---------------------------------------------------------------------------
+const inScaleRows = () => document.querySelectorAll('.grid-row.in-scale').length
+const majorC = inScaleRows()            // C 大调在 C0..C8 上是 57 行
+const rootSelEl = document.getElementById('scaleRoot')
+rootSelEl.value = '2'                   // 换成 D 根音
+rootSelEl.dispatchEvent(new window.Event('change', { bubbles: true }))
+
+/*
+ * 别拿行数当不变量：97 个键的两端不都落在音阶上，换根音会让行数差 1（57 → 56）。
+ * 真正的不变量是**哪些音在音阶里**，所以用具体音级判定。
+ * F#(66) 在 C 大调是外音、在 D 大调是内音 —— 这是最干净的判别点。
+ */
+ok('换根音后音阶集合确实变了（F# 在 C 大调外、D 大调内）',
+  PR.state.scaleRoot === 2 && PR.api.inScale(66) === true,
+  `根音 ${PR.state.scaleRoot}，F#(66) inScale=${PR.api.inScale(66)}`)
+ok('换根音后高亮行数与音阶集合一致（C0..C8 上 7 音 × 8 八度 + 尾音）',
+  Math.abs(inScaleRows() - majorC) <= 1,
+  `C 大调 ${majorC} 行 → D 大调 ${inScaleRows()} 行`)
+
+const modeSelEl = document.getElementById('scaleMode')
+modeSelEl.value = 'minor'
+modeSelEl.dispatchEvent(new window.Event('change', { bubbles: true }))
+// D 自然小调：D E F G A Bb C。F(65) 仍是内音，F#(66) 退回外音。
+ok('切自然小调后 D 小调成立（D=内、F#=外）',
+  PR.state.scaleMode === 'minor' && PR.api.inScale(62) === true && PR.api.inScale(66) === false,
+  `D(62)=${PR.api.inScale(62)}, F#(66)=${PR.api.inScale(66)}`)
+
+modeSelEl.value = 'major'
+modeSelEl.dispatchEvent(new window.Event('change', { bubbles: true }))
+rootSelEl.value = '0'
+rootSelEl.dispatchEvent(new window.Event('change', { bubbles: true }))
+ok('恢复 C 大调', PR.state.scaleRoot === 0 && PR.state.scaleMode === 'major')
+
+// ---------------------------------------------------------------------------
+section('23. 合并后仍是一张对齐的版面')
+// ---------------------------------------------------------------------------
+const css = document.querySelector('style').textContent.replace(/\s+/g, ' ')
+ok('两条带子共用同一个左侧列宽变量 --rail',
+  /--rail: 48px/.test(css)
+  && /\.arr-rail \{ width: var\(--rail\)/.test(css)
+  && /grid-template-columns: var\(--rail\)/.test(css))
+ok('颜色令牌有职责区分（黄铜=人在动，钢蓝=机器产出）',
+  /--brass: #C89B4A/.test(css) && /--steel: #7A9BB0/.test(css))
+ok('没有残留的旧绿色强调色', !/#78ab2d/i.test(css) && !/#7ea83c/i.test(css))
+ok('音符圆角统一 2px', /--r-note: 2px/.test(css))
+// 视窗方块是 top:0/bottom:0 的绝对定位；容器少 position:relative 的话它会相对视口定位，
+// 两条黄铜边贯穿整页。jsdom 没有布局引擎，测不出来，所以直接在样式表上钉住这个约束。
+ok('.arr-tracks 是定位上下文（否则视窗边框会溢出到整页）',
+  /\.arr-tracks \{ position: relative/.test(css))
 
 // ---------------------------------------------------------------------------
 console.log(`\n${'='.repeat(56)}`)

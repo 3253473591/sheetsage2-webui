@@ -109,6 +109,12 @@ def test_run_quantizes_project_notes_by_default(tmp_path):
     assert report["quantize"]["grid_ticks"] == GRID_TICKS
     assert any("量化" in w for w in written["meta"]["warnings"])
 
+    # 扒谱完成时也要落一份最小 meta（歌词阶段之后会被覆盖成完整版）
+    meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
+    assert meta["stats"]["notes_auto"] > 0
+    assert meta["language"] is None
+    assert meta["files"]["lyrics"] is None
+
 
 def test_run_can_skip_quantization(tmp_path):
     payload = run("stub.flac", tmp_path, engine=StubEngine(melody=MELODY),

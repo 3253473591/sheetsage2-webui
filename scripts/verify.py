@@ -101,10 +101,10 @@ def slug(path: Path) -> str:
 def discover_audio() -> list[Path]:
     found = [p for p in sorted(PROJECT_ROOT.iterdir())
              if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES]
-    samples = PROJECT_ROOT / "samples"
-    if samples.is_dir():
-        found += [p for p in sorted(samples.iterdir())
-                  if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES]
+    for samples in (PROJECT_ROOT / "samples", PROJECT_ROOT / "samples" / "音频"):
+        if samples.is_dir():
+            found += [p for p in sorted(samples.iterdir())
+                      if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES]
     return found
 
 

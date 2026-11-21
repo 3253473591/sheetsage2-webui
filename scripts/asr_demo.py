@@ -16,6 +16,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
 from sheetsage2_webui.asr import AsrConfig, AsrEngine, sections_from_lab  # noqa: E402
+from sheetsage2_webui.meta import write_meta  # noqa: E402
 
 MODELS = PROJECT / "models"
 SAMPLES = PROJECT / "samples"
@@ -44,9 +45,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     project = json.loads((project_dir / "project.json").read_text(encoding="utf-8"))
-    audio = args.audio or (SAMPLES / project["audio"])
-    if not audio.is_file():
-        print(f"找不到音频 {audio}", file=sys.stderr)
+    raw_audio = Path(project["audio"])
+    audio = args.audio
+    if audio is None:
+        for candidate in (project_dir / raw_audio, SAMPLES / raw_audio,
+                          SAMPLES / "音频" / raw_audio.name):
+            if candidate.is_file():
+                audio = candidate
+                break
+    if audio is None or not audio.is_file():
+        print(f"找不到音频 {audio or raw_audio}", file=sys.stderr)
         return 2
 
     sections = sections_from_lab(structure.read_text(encoding="utf-8"),
@@ -106,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps({"text": run.text, "fill": result["fill"],
                         "chars": [c.as_dict() for c in run.chars]},
                        ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            write_meta(project_dir)
+        except (OSError, ValueError) as exc:
+            print(f"! meta.json 生成失败：{exc}", file=sys.stderr)
 
         stats = result["fill"]
         print(f"\n已填进 {args.track} 轨（{result['notes']} 个音）：")

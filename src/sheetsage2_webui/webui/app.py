@@ -37,7 +37,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Iterable, Mapping
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -91,6 +91,8 @@ def create_app(
     loopback_guard: bool = False,
     allowed_hosts: tuple[str, ...] = (),
     device_hint: str | None = None,
+    meta_watch: bool = False,
+    meta_watch_dirs: Iterable[str | Path] = (),
 ) -> FastAPI:
     """构造应用。
 
@@ -120,7 +122,9 @@ def create_app(
                              trash_max_days=trash_max_days,
                              trash_max_bytes=trash_max_bytes,
                              trash_purge_interval=trash_purge_interval,
-                             probe_upload=probe_upload)
+                             probe_upload=probe_upload,
+                             meta_watch=meta_watch,
+                             meta_watch_dirs=meta_watch_dirs)
     static_ready = (STATIC_DIR / "index.html").is_file()
 
     # 耗时预估（G20）的设备口径：显式传入 > 会话自报 > 不知道（按显卡算）。

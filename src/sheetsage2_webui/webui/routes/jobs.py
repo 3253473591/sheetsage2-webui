@@ -13,6 +13,7 @@ from starlette.concurrency import run_in_threadpool
 from ... import __version__
 from ...asr import language_choices
 from ...bootstrap import find_ffmpeg
+from ...meta import write_meta
 from ..job_errors import ImportedProject, StageNotReady, StaleRevision, UploadRejected
 from ..job_models import DEFAULT_PLAN, PHASE_LABELS, PHASES
 from ..job_options import param_choices
@@ -98,7 +99,14 @@ def build_router(deps: ApiDeps) -> APIRouter:
 
     @router.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> dict[str, Any]:
-        return require_job(deps, job_id).snapshot()
+        job = require_job(deps, job_id)
+        # 手动精修只改/加 auto.svp / manual.svp；再打开工程时顺手刷新 meta，
+        # 不需要用户重启或跑脚本。写失败不影响快照。
+        try:
+            await run_in_threadpool(write_meta, job.out_dir)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return job.snapshot()
 
     @router.post("/jobs/{job_id}/cancel")
     async def cancel_job(job_id: str) -> dict[str, Any]:

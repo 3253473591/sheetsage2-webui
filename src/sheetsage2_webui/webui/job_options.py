@@ -72,17 +72,51 @@ PARAM_INDEX: dict[str, dict[str, Any]] = {
 }
 
 
+#: 歌词源（LRC/TXT 原文）的最大长度。整首歌词通常几 KB；200 KB 已经是非常宽的上限。
+#: 再大就不是歌词，而是误把音频/日志粘进来了。
+MAX_LYRICS_SOURCE_CHARS = 200_000
+
+
 def option_values(key: str) -> set[str]:
     """某个参数认哪些值。
 
     「语言」的可选值不写死在 `PARAM_SPECS` 里（那是 `asr.LANGUAGE_CHOICES` 的事），
     这里延迟 import，免得 `jobs.py` 在模块层依赖 asr。
+
+    文本类参数（`widget="text"`，目前只有歌词源）没有枚举白名单，返回空集合；
+    它的校验走 `_validate_text_option`，不要拿 `in` 去查。
     """
+    spec = PARAM_INDEX[key]
+    if spec.get("widget") == "text":
+        return set()
     if key == "language":
         from ..asr import LANGUAGE_CHOICES
 
         return {value for value, _ in LANGUAGE_CHOICES}
-    return {str(item["value"]) for item in PARAM_INDEX[key]["options"]}
+    return {str(item["value"]) for item in spec["options"]}
+
+
+def _validate_text_option(spec: Mapping[str, Any], value: Any) -> str:
+    """文本类参数：限长、统一换行、必须能解析出唱词行。空串表示清空。
+
+    歌词源既可以是 LRC（带时间戳）也可以是 TXT（纯文本），所以这里只要求
+    `parse_lyric_text` 能解析出至少一行——真正的口径（LRC 精确对齐 / TXT 估算）
+    由 runner 决定。
+    """
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{spec['label']}必须是文本")
+    text = "" if value is None else value.strip()
+    if not text:
+        return ""
+    if len(text) > MAX_LYRICS_SOURCE_CHARS:
+        raise ValueError(
+            f"{spec['label']}太长（{len(text)} 字，最多 {MAX_LYRICS_SOURCE_CHARS} 字）")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    from ..asr import parse_lyric_text
+
+    if not parse_lyric_text(text):
+        raise ValueError(f"{spec['label']}里没有解析出唱词行（只有标题/制作名单？）")
+    return text
 
 
 def default_options() -> dict[str, Any]:
@@ -97,6 +131,9 @@ def validate_options(values: Mapping[str, Any]) -> dict[str, Any]:
         spec = PARAM_INDEX.get(str(key))
         if spec is None:
             raise ValueError(f"未知参数 {key}")
+        if spec.get("widget") == "text":
+            out[key] = _validate_text_option(spec, value)
+            continue
         text = "" if value is None else str(value).strip()
         if key == "language":                     # 大小写/auto 之类的写法都收敛一下
             from ..asr import normalize_language
@@ -155,6 +192,11 @@ def _option_label(spec: Mapping[str, Any] | None, value: Any) -> str:
     """一个取值 -> 显示名（"自动"给空串；标签表里没有就原样返回）。"""
     text = "" if value is None else str(value)
     if spec is not None:
+        if spec.get("widget") == "text":
+            if not text.strip():
+                return "空"
+            # 不要把整首 LRC 塞进日志/作废提示；行数 + 字数足够定位。
+            return f"{len(text.splitlines())} 行 / {len(text)} 字"
         hit = next((str(item["label"]) for item in spec["options"]
                     if str(item["value"]) == text), None)
         if hit is not None:

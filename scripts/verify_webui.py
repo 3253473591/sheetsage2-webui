@@ -1,7 +1,7 @@
 r"""P1 端到端验证：真起服务、真上传、**扒谱 + 歌词识别**两阶段真跑、真下载 zip。
 
     .\.venv\Scripts\python.exe scripts\verify_webui.py
-    .\.venv\Scripts\python.exe scripts\verify_webui.py --audio "samples\毛阿敏 - 相思.flac" --seconds 60
+    .\.venv\Scripts\python.exe scripts\verify_webui.py --audio "samples\音频\毛阿敏 - 相思.mp3" --seconds 60
     .\.venv\Scripts\python.exe scripts\verify_webui.py --base-url http://127.0.0.1:8000 --keep
 
 **为什么不放进 pytest**：这一步会真的加载 SheetSage2 + Qwen3-ASR 并在 GPU 上跑推理
@@ -46,7 +46,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 from sheetsage2_webui.bootstrap import find_ffmpeg, prepare  # noqa: E402
 
 VERIFY_ROOT = PROJECT / "tmp" / "webui-verify"
-DEFAULT_AUDIO = PROJECT / "samples" / "凤凰传奇 - 光芒.flac"
+DEFAULT_AUDIO = PROJECT / "samples" / "音频" / "凤凰传奇 - 光芒.mp3"
 
 
 class Check:

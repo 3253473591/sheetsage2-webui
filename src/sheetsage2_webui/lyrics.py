@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import bisect
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -113,6 +114,26 @@ class LyricFill:
 
 def _is_latin(text: str) -> bool:
     return any("a" <= ch.lower() <= "z" for ch in text)
+
+
+#: 英文单词的音节数粗估只当**上限**用：数元音组（y 也算）。
+_EN_VOWEL_GROUPS = re.compile(r"[aeiouy]+")
+
+
+def _latin_syllables(text: str) -> int:
+    """英文音节数的粗估（只当上限：元音组数，去掉结尾静音 e）。
+
+    混唱的 `parts` 是空的（走中文对齐路径拿不到音节起点），补标记时拿它判断
+    「一个音一个音节」是否成立。everywhere → 4（实际 3），所以只在
+    `音节数 ≥ 音数` 时才敢把延音写成 `+`。
+    """
+    word = "".join(ch for ch in text.lower() if ch.isalpha())
+    if not word:
+        return 1
+    groups = len(_EN_VOWEL_GROUPS.findall(word))
+    if groups > 1 and word.endswith("e") and not word.endswith(("le", "ee")):
+        groups -= 1
+    return max(1, groups)
 
 
 #: 假名（平假名/片假名）。出现假名 = 日语（汉字是中日共用的，假名才有区分度，
@@ -204,6 +225,195 @@ class _RunShape:
         return (min(over, self.excess_cap) * self.excess
                 + min(under, self.deficit_cap) * self.deficit)
 
+
+
+# --------------------------------------------------------------------- 字级 DP
+#: 字级 DP：跳过一个音的代价（中文的转音很常见，所以给得很小）。
+DP_SKIP_NOTE_COST = 0.05
+#: 字级 DP：英文词多占一个音的代价（对齐器把词时间拉长时用）。
+DP_RUN_EXCESS_COST = 0.05
+#: 字级 DP：英文词少占一个音的代价（比多占更值得罚：词被挤前一位正是混唱的病）。
+DP_RUN_DEFICIT_COST = 0.10
+#: 延音段长度偏离「预期」超过这么多音就不再细分（更长的一律按封顶算）。
+DP_RUN_CAP = 4
+#: 英文词「预期占几个音」的上限（窗口被对齐器拉长时别夸张）。
+DP_MAX_SPAN = 6
+#: 英文词的「预期延音段」上限：粗估音节数会多算（everywhere 数出 4，实际 3），
+#: 封顶 2 免得把下一个词推得太晚。
+
+#: 字级 DP：跳过一个字的代价（字比音多时才会用：absorbed/dropped 走这条）。
+DP_SKIP_CHAR_COST = 1.0
+#: 字级 DP：起点距离的封顶。字时间有 ±0.2~0.4s 抖动，超过这个距离的"匹配"没有信息量，
+#: 封顶避免一个漂移字把整段拉走。
+DP_DISTANCE_CAP = 0.5
+#: 字级 DP：硬门限。离所有候选音都超过这个距离的字直接跳过（否则封顶会让 5 秒外的字
+#: 也"挂"到最近的音上）；跳过的字按有没有音盖住它分成 absorbed / dropped。
+DP_MAX_GAP = 1.0
+
+
+def _refine_latin_runs(order: Sequence[int], spans: Sequence[tuple[float, float]],
+                       chars: Sequence[Any], sequence: Sequence[int],
+                       heads: dict[int, int], skipped: list[int]) -> None:
+    """混唱：把连续的英文段交给词级 DP（`_align_latin_words`）重排。
+
+    字级 DP 每个 token 只占一个音，`everywhere`（3 个音节）后两个音会被下一个词占走，
+    `parts` 就没有落点。词级 DP 按音节数预留延音段；边界取**相邻中文头之间**的音
+    `[上一个中文头 + 1, 下一个中文头 − 1]`，段落首尾则取全曲边界。
+
+    只动英文段，中文头一个都不碰（中文结果已单独验证过）。
+    """
+    position_of = {note: index for index, note in enumerate(order)}
+    flags = [_is_latin(str(getattr(chars[index], "text", ""))) for index in sequence]
+    step = 0
+    while step < len(sequence):
+        if not flags[step]:
+            step += 1
+            continue
+        end_step = step
+        while end_step + 1 < len(sequence) and flags[end_step + 1]:
+            end_step += 1
+        run = list(sequence[step:end_step + 1])
+        # 没有 `parts`（音节起点）时词级 DP 会把每个词都当单音节，反而比字级 DP 差
+        # （《梦不落》英文 token 50% → 27%）。只重排真正拿到音节信息的段。
+        if not any(getattr(chars[index], "parts", ()) for index in run):
+            step = end_step + 1
+            continue
+
+        low = 0
+        for previous in range(step - 1, -1, -1):
+            note = heads.get(sequence[previous])
+            if note is not None:
+                low = position_of.get(note, 0) + 1
+                break
+        high = len(order) - 1
+        for following in range(end_step + 1, len(sequence)):
+            note = heads.get(sequence[following])
+            if note is not None:
+                high = position_of.get(note, len(order)) - 1
+                break
+        if high >= low:
+            sub_order = list(order[low:high + 1])
+            sub_heads, _ignored = _align_latin_words(
+                sub_order, spans, [chars[index] for index in run])
+            for index in run:
+                heads.pop(index, None)
+            # 词级 DP 返回的是**子序列内**的下标，要映回全局字下标
+            for local_index, note in sub_heads.items():
+                heads[run[local_index]] = note
+            dropped = set(run)
+            skipped[:] = [index for index in skipped if index not in dropped]
+        step = end_step + 1
+
+
+def _align_chars_dp(order: Sequence[int], spans: Sequence[tuple[float, float]],
+                    chars: Sequence[Any], *,
+                    skip_char_cost: float = DP_SKIP_CHAR_COST,
+                    cap: float = DP_DISTANCE_CAP,
+                    max_gap: float = DP_MAX_GAP
+                    ) -> tuple[dict[int, int], list[int]]:
+    """中文/粤语/混唱：token 序列 → 音符序列的**单调 DP**（一个 token 一个头）。
+
+    逐字贪心在中文上有一个结构性毛病：字时间有 ±0.2~0.4s 抖动，而音符中位长只有
+    0.25s，一旦某个字被放到后一个音上，**后面整段会跟着错位**，直到碰到一个空音才
+    重新对上（实测 1123 个 ±1 的 token 只来自 267 段这样的错位）。所以这里改成整体
+    最小代价对齐：
+
+    - 头的音符下标**严格递增**（后一个字不能挂到更早的音上）；
+    - 代价 = 起点距离（封顶）+ 与「预期延音段」的偏离 + 跳过的字数 × 大代价；
+    - 预期延音段：中文恒 0；英文词取**它时间窗里的音数 − 1**（everywhere 占 3 个音
+      就保 2 个），混唱里靠这个不让后面的词被挤前一位；
+    - 允许跳音（转音）、允许跳字（字比音多）。
+
+    DP 状态是「处理完当前字、下一个空闲音位置 u」，转移按 mid（延音段长度）展开，
+    超出 `DP_RUN_CAP` 的用前缀最小值兜住，整体 O(字数×音数)。
+
+    返回 `(头表 {字下标: 音符下标}, 跳过的字下标)`。
+    """
+    onsets = [spans[note][0] for note in order]
+    note_count = len(onsets)
+    if not note_count:
+        return {}, list(range(len(chars)))
+    sequence = [index for index, _char in
+                sorted(enumerate(chars),
+                       key=lambda item: (float(getattr(item[1], "start", 0.0)),
+                                         item[0]))]
+
+    #: 每个 token 的「预期延音段」。中文/混唱暂按 0：英文词的时间窗太粗
+    #: （TIFA 给 everywhere 的窗口只有 0.12s，实际占 3 个音），按音节预留会推错方向
+    #: （实测《梦不落》英文 token 50% → 40%）。等英文段拿到 `parts`（音节起点）再开。
+    ideals = [0 for _index in sequence]
+    infinity = float("inf")
+    #: `prev[u]`：处理完前几个字、下一个空闲音是 u 的最小代价。
+    prev = [0.0] * (note_count + 1)
+    #: 每个字在每个状态下的决策：(前一状态, 占的音符下标或 None)
+    backs: list[list[tuple[int, int | None]]] = []
+
+    for step, char_index in enumerate(sequence):
+        start = float(getattr(chars[char_index], "start", 0.0))
+        # 这一段延音属于**前一个** token：它的预期长度决定跳几个音才免费。
+        ideal = ideals[step - 1] if step else 0
+        current = [infinity] * (note_count + 1)
+        back: list[tuple[int, int | None]] = [(0, None)] * (note_count + 1)
+        # 前缀最小：给超出封顶的长延音段兜底（形状是常数，不用逐个 mid 算）。
+        prefix = [infinity] * note_count
+        prefix_arg = [-1] * note_count
+        best, best_u = infinity, -1
+        for u in range(note_count + 1):
+            if prev[u] < best:
+                best, best_u = prev[u], u
+            if u < note_count:
+                prefix[u] = best
+                prefix_arg[u] = best_u
+        for position in range(note_count):
+            if prefix[position] == infinity:
+                continue
+            gap = abs(onsets[position] - start)
+            if gap > max_gap:
+                continue                # 太远：宁可跳过这个字，也不硬挂到别的句子上
+            distance = min(gap, cap)
+            head_cost = infinity
+            head_from = -1
+            for mid in range(0, min(position, ideal + DP_RUN_CAP) + 1):
+                value = prev[position - mid]
+                if value == infinity:
+                    continue
+                shape = (DP_RUN_EXCESS_COST * max(0, mid - ideal)
+                         + DP_RUN_DEFICIT_COST * max(0, ideal - mid))
+                if value + shape < head_cost:
+                    head_cost, head_from = value + shape, position - mid
+            tail = position - (ideal + DP_RUN_CAP) - 1
+            if tail >= 0 and prefix[tail] != infinity:
+                value = prefix[tail] + DP_RUN_EXCESS_COST * DP_RUN_CAP
+                if value < head_cost:
+                    head_cost, head_from = value, prefix_arg[tail]
+            if head_from >= 0:
+                cost = head_cost + distance
+                if cost < current[position + 1]:
+                    current[position + 1] = cost
+                    back[position + 1] = (head_from, position)
+        # 跳过这个字（字比音多时才会选它）
+        for u in range(note_count + 1):
+            value = prev[u] + skip_char_cost
+            if value < current[u]:
+                current[u] = value
+                back[u] = (u, None)
+        prev = current
+        backs.append(back)
+
+    state = min(range(note_count + 1), key=lambda u: prev[u])
+    heads: dict[int, int] = {}
+    skipped: list[int] = []
+    for step in range(len(sequence) - 1, -1, -1):
+        previous_state, position = backs[step][state]
+        if position is None:
+            skipped.append(sequence[step])
+        else:
+            heads[sequence[step]] = order[position]
+        state = previous_state
+    skipped.reverse()
+    # 混唱：连续的英文段用词级 DP 重排（按音节预留音，`parts` 才有落点）
+    _refine_latin_runs(order, spans, chars, sequence, heads, skipped)
+    return heads, skipped
 
 
 def _align_latin_words(order: Sequence[int], spans: Sequence[tuple[float, float]],
@@ -585,6 +795,7 @@ def assign_lyrics(
     # 纯汉字（中粤）或韩文不会误入——它们没有假名也不全是拉丁字母。
     dp_heads: dict[int, int] | None = None
     dp_skipped: set[int] = set()
+    dp_kind = "word"
     if not only_empty:
         # 整体重填（重新识别）：填词落点会变，旧词残留在不再是词头的音上会变成
         # "てる てる"这种重复、或"行头一字为名"这种上一轮的词（实测两次踩过，
@@ -597,6 +808,12 @@ def assign_lyrics(
                 for text in texts if text):
             dp_heads, skipped_words = _align_latin_words(order, spans, chars)
             dp_skipped = set(skipped_words)
+        elif any(texts):
+            # 中文/粤语（一字一音节）：逐字贪心会被 ±0.2~0.4s 的字时间抖动带成整段
+            # 错位，改用整体单调 DP（见 `_align_chars_dp`）。
+            dp_heads, skipped_chars = _align_chars_dp(order, spans, chars)
+            dp_skipped = set(skipped_chars)
+            dp_kind = "char"
 
     for char_index, char in enumerate(chars):
         text = str(getattr(char, "text", "") or "").strip()
@@ -617,15 +834,33 @@ def assign_lyrics(
                 fill.reasons["dp_head"] = fill.reasons.get("dp_head", 0) + 1
                 fill.assigned += 1
             else:
-                # DP 跳过的词 = 没有合法词头的词（ASR 重复 / 多出的词）。
-                # 与 absorbed 一个语义：登记出来让人核对，不悄悄丢。
+                # DP 跳过的字/词：没有合法头位。登记出来让人核对，不悄悄丢。
+                # 中文（字级 DP）再分一层：有音盖住这个字的起点 = 音符比字少（absorbed）；
+                # 连盖住的音都没有 = 起点落在音符之间的间隙（dropped）。
                 fill.reasons["dp_skip"] = fill.reasons.get("dp_skip", 0) + 1
+                counted = True
                 if char_index in dp_skipped:
-                    fill.absorbed_chars.append(text)
-                    fill.warnings.append(
-                        f"词「{text}」({start:.2f}s) 没有可挂的音位"
-                        f"（多半是识别重复/多出的词）")
-                fill.assigned += 1
+                    covering = next((note for note in order
+                                     if spans[note][0] <= start <= spans[note][1]),
+                                    None)
+                    if dp_kind == "char" and covering is None:
+                        fill.dropped += 1
+                        fill.dropped_chars.append(text)
+                        fill.reasons["dropped"] = (
+                            fill.reasons.get("dropped", 0) + 1)
+                        counted = False
+                    else:
+                        fill.absorbed_chars.append(text)
+                        if covering is not None:
+                            fill.warnings.append(
+                                f"字「{text}」({start:.2f}s) 落在已经占住的音上"
+                                f"（音 {covering}）：那段音符比字少")
+                        else:
+                            fill.warnings.append(
+                                f"字「{text}」({start:.2f}s) 没有可挂的音位"
+                                f"（那段音符比字少，或识别重复）")
+                if counted:
+                    fill.assigned += 1
             continue
 
         # 对齐器对约 16% 的字给出零长度时间戳（start == end），意思是"这个字没对齐上"。
@@ -656,8 +891,13 @@ def assign_lyrics(
         best_key: tuple[int, int, int, float] | None = None
         for note in order:
             note_start, note_end = spans[note]
-            if note_start < start - tolerance:
-                continue                        # 已经响过、或者比容差还早
+            # 起点比容差还早的音，只有一种情况仍然算候选：**这个字的起点落在它里面**。
+            # 音符中位长只有 0.25s，而字时间有 ±0.2~0.4s 抖动，光靠「起点不早于容差」
+            # 会把短音整片跳过，字被挤到后一个音上——实测《最炫民族风》「涯」晚
+            # 0.213s（容差 0.20）就漏掉自己的音，后面整段跟着错位到下一个空隙为止。
+            if (note_start < start - tolerance
+                    and not (note_start <= start <= note_end)):
+                continue
             if note_start >= window_end:
                 break                           # 起点单调，后面的音只会更远
             if not available(note):
@@ -729,6 +969,7 @@ def assign_lyrics(
     # 一个字挂到某个音之后，从这个音往后、直到下一个字的"头"之前，落在该字时间窗内的
     # 音符都算这个字的转音。零长度的字没有窗口，不参与这一遍。
     ordered_heads = sorted(heads.items(), key=lambda item: item[0])
+    all_onsets = sorted(spans[note][0] for note in order)
     for position, (head, (text, start, end)) in enumerate(ordered_heads):
         if end <= start + 1e-9:
             continue
@@ -741,7 +982,8 @@ def assign_lyrics(
         next_word_start = (ordered_heads[position + 1][1][1]
                            if position + 1 < len(ordered_heads)
                            and _is_latin(ordered_heads[position + 1][1][0]) else None)
-        cursor = 0
+        # 先把"属于这个词的延音音"挑出来，再决定哪些写 `+`。
+        candidates: list[int] = []
         for note in order:
             if note <= head or note >= limit or note in taken:
                 continue
@@ -752,17 +994,33 @@ def assign_lyrics(
                 break     # 已经唱到下一个词了：这个音留给它，不当延音
             if only_empty and lyrics[note].strip():
                 continue
-            # 有音节信息时：这个音开头新音节 → `+`，否则是延长当前音节 → `-`。
-            # 日文没有音节起点（Qwen 对齐器不给），但日语按拍唱——每个音都是
-            # 下一拍，写 `+`（ありがとう 跨 3 个音 = ありがとう + +）。
-            # 英文没有音节信息时（Qwen 路径/旧数据）一律写延长标记 `-`。
-            # 容差是音节起点/音符起点各自的抖动（八分音符网格 ±0.1s）：卡得太紧会把
-            # "untrue" 的第二个音节判到没有音可挂（人工谱里它是 `+`）。
+            candidates.append(note)
+
+        # 没有 `parts` 的英文词：按粗估音节数在"头 + 延音"上均分边界。
+        # 实测人工谱里 `+` 被写成 `-` 的有 101 处、反向只有 9 处 —— 以前"保守写 `-`"
+        # 是错的方向；now 只要音数 ≥ 2 就按音节均分（hello 2 音节 / 3 个音 → `- +`）。
+        total = len(candidates) + 1
+        boundaries: set[int] = set()
+        if not parts and _is_latin(text):
+            # 没有音节信息时按粗估音节数在「头 + 延音」上均分边界。
+            # 注意：8 首人工谱的标注约定并不一致（`+` 占比 44.8%~89.5%），所以这里的
+            # 取舍不可能对所有歌都对；严格 marker 要按"与写法无关"的 `marker_any` 一起看。
+            syllables = max(1, min(total, _latin_syllables(text)))
+            for index in range(1, syllables):
+                boundaries.add(round(index * total / syllables))
+
+        cursor = 0
+        for ordinal, note in enumerate(candidates, start=1):
             new_syllable = False
-            while cursor < len(parts) and parts[cursor] <= spans[note][0] + SYLLABLE_EPSILON:
-                cursor += 1
+            if parts:
+                while (cursor < len(parts)
+                       and parts[cursor] <= spans[note][0] + SYLLABLE_EPSILON):
+                    cursor += 1
+                    new_syllable = True
+            elif _is_japanese(text):
+                # 日语没有音节起点，按拍唱：每个音都是下一拍
                 new_syllable = True
-            if not parts and _is_japanese(text):
+            elif ordinal in boundaries:
                 new_syllable = True
             lyrics[note] = CONTINUATION if new_syllable else MELISMA
             taken.add(note)

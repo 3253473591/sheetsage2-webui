@@ -35,7 +35,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 from sheetsage2_webui.bootstrap import find_ffmpeg, prepare  # noqa: E402
 
 CLIP_DIR = PROJECT / "tmp" / "webui-verify"
-DEFAULT_AUDIO = PROJECT / "samples" / "凤凰传奇 - 光芒.flac"
+DEFAULT_AUDIO = PROJECT / "samples" / "音频" / "凤凰传奇 - 光芒.mp3"
 
 
 def cut_clip(audio: Path, seconds: float) -> Path:

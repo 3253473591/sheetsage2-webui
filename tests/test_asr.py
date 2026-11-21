@@ -256,6 +256,29 @@ def test_tifa_language_mapping_falls_back_to_chinese():
     assert guess_language("阳光在身上流转") == "zh"
 
 
+def test_mixed_latin_word_in_a_chinese_song_gets_syllable_onsets():
+    """中文歌里夹的英文词也要切音节（`parts` 只在整首英文时才给，是旧的门槛）。
+
+    TIFA 的 `language=[zh, en]` 让拉丁词走英文 G2P，phones 层里就是 ARPAbet；
+    汉字词是拼音（`ao`/`en`/`er` 与 ARPAbet 撞名），只能按词面判断，一律不切。
+    """
+    from sheetsage2_webui.tifa_align import syllable_onsets, word_syllable_onsets
+
+    phones = [(0.0, 0.1, "b"), (0.1, 0.2, "ax"), (0.2, 0.3, "n"),
+              (0.3, 0.4, "t"), (0.4, 0.5, "uw")]
+    # 最大开头原则：两个元音之间只有一个辅音组时，最后一个辅音归后一个音节
+    assert syllable_onsets(phones, 0.0, 0.5) == (0.3,)
+
+    assert word_syllable_onsets(phones, "captain", 0.0, 0.5,
+                                language="zh") == (0.3,)
+    assert word_syllable_onsets(phones, "captain", 0.0, 0.5,
+                                language="en") == (0.3,)
+
+    pinyin = [(0.0, 0.1, "h"), (0.1, 0.2, "ao"), (0.2, 0.3, "x"),
+              (0.3, 0.4, "iao")]
+    assert word_syllable_onsets(pinyin, "好", 0.0, 0.4, language="zh") == ()
+
+
 def test_parse_text_grid_skips_silence_and_zero_width():
     from sheetsage2_webui.tifa_align import parse_text_grid
 

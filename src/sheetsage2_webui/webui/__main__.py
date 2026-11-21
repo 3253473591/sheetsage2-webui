@@ -41,6 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-root", default=None,
                         help="上传与产物的根目录（默认 <项目根>/tmp/webui，可用 SHEETSAGE_WEBUI_DATA 覆盖）")
+    parser.add_argument("--meta-watch-dir", action="append", default=[], metavar="DIR",
+                        help="额外监控的样本目录：里面的 project.json / SVP 一变就刷新 meta.json"
+                             "（可重复；数据根与 samples/对齐（若存在）默认已监控）")
     parser.add_argument("--model", default=EngineConfig.model_id, help="扒谱模型 id 或本地目录")
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp32"))
@@ -167,11 +170,21 @@ def main(argv: list[str] | None = None) -> int:
         if hint == "auto":
             hint = "cuda" if cuda_available() else "cpu"
 
+        # meta.json 的自动刷新：数据根默认监控；本项目里的 samples/对齐 也顺手带上，
+        # 这样手动改完两个 SVP 不用再跑 tmp/make_meta.py。
+        watch_dirs = [resolve(item) for item in args.meta_watch_dir]
+        sample_root = PROJECT_ROOT / "samples" / "对齐"
+        if sample_root.is_dir():
+            watch_dirs.append(str(sample_root))
+        watch_dirs = list(dict.fromkeys(watch_dirs))
+
         app = create_app(data_root=data_root, session=session,
                          max_upload_mb=args.max_upload_mb,
                          workers=args.workers, lock_params=args.lock_params,
                          loopback_guard=True, require_token=require_token,
-                         pair_token=pair_token, device_hint=hint)
+                         pair_token=pair_token, device_hint=hint,
+                         meta_watch=True,
+                         meta_watch_dirs=watch_dirs)
 
         try:
             import uvicorn

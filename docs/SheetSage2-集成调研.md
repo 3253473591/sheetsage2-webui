@@ -278,6 +278,21 @@ rows.append([float(event["time"]), int(position) + 1, int(meter[0]), int(meter[1
 `playback.json` 的小节表（每小节都有 `start`/`end` 秒数）逐小节换算。
 
 
+### 5.x 节奏词汇表：不支持三连音（2026-11-20）
+
+模型的**时值词汇表**是"亚拍整数倍"（1 亚拍 = 1/4 拍）：
+
+- `notation_sheetsage2.py`: `SUBBEAT_DIVISION = 4`（每拍均分 4 份）；
+- `durations_sheetsage2.py`: `DURATION_TEMPLATES = 1,2,3,4,6,8,12,…`（全是整数亚拍）；
+- `tokenization_sheetsage2.py`: `subbeat_shift` 令牌也是整数亚拍。
+
+所以 1/3 拍（三连音）= 1.33 亚拍**表示不出来**。实测 Believer 30s 切片：vocal onset
+100% 落在 1/4 拍网格，IOI 480/960/1920，没有一个 320/640；运行时把
+`SUBBEAT_DIVISION` 改成 12 重跑，输出逐位相同（只影响 ABC 重建）。
+
+结论：**三连音缺失是模型侧的结构限制，不是量化/后处理参数**。要补只有音频侧重定时，
+或换时值词汇含三连音的旋律模型。
+
 ## 6. 风险与后续
 
 1. **许可**：CC BY-NC 4.0，非商业。若产品要商用，需要先解决授权。

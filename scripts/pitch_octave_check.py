@@ -7,7 +7,7 @@ r"""查"扒谱音高整体高一个八度"：音域统计 + 谱面音高 vs 音�
 
     # ② 逐音比 F0：取时值 >=0.6s 的长音，在音的中点开 0.4s 窗估 F0，和谱面比差几个半音
     .\.venv\Scripts\python.exe scripts\pitch_octave_check.py ^
-        "samples\萧敬腾 - 皮囊.flac" "output\萧敬腾_-_皮囊\melody_vocal.lab"
+        "samples\音频\萧敬腾 - 皮囊.mp3" "output\萧敬腾_-_皮囊\melody_vocal.lab"
 
 **⚠️ 全混音上做这件事有八度歧义**：伴奏能量大时自相关会挑到 2 倍周期（少算一个八度），
 所以 `--method acf` 与 `--method comb`（自相关峰 + 谐波梳选八度）的**绝对倍数会不一样**。

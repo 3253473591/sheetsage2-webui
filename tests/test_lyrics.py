@@ -68,12 +68,89 @@ def test_char_spanning_several_notes_becomes_melisma():
     assert fill.assigned == 1 and fill.melisma == 2
 
 
-def test_english_word_without_syllable_info_sustains():
-    """没有音节信息时（旧数据 / Qwen 路径）延续就是延长，不能瞎标成下一个音节。"""
+def test_english_word_without_syllable_info_gets_even_syllable_boundaries():
+    """没有音节信息时按粗估音节数均分：hello 2 音节占 3 个音 → `- +`。
+
+    （旧行为是"说不清就全写 `-`"；8 首人工谱统计显示 `+` 被少标 101 处、反向只有 9 处，
+    所以改成按音节均分。不同人的标注约定不同，严格 marker 要配 `marker_any` 一起看。）
+    """
     notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9))
     chars = [Char("hello", 0.0, 0.9)]
     fill = assign_lyrics(notes, chars)
-    assert fill.lyrics == ["hello", MELISMA, MELISMA]
+    assert fill.lyrics == ["hello", MELISMA, CONTINUATION]
+
+
+def test_mixed_song_marks_one_syllable_per_note_as_continuation():
+    """混唱（汉字 + 英文词）：一个字一个音的词写 `+`。
+
+    everywhere 占 3 个音、粗估 4 个音节 → 音数 ≤ 音节数，可以认为一个音一个音节，
+    三个音里后两个写 `+`（人工谱「everywhere + +」）。
+    """
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.2))
+    chars = [Char("你", 0.0, 0.3), Char("everywhere", 0.3, 1.2)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["你", "everywhere", CONTINUATION, CONTINUATION]
+
+
+def test_mixed_song_splits_english_syllables_evenly():
+    """混唱里的英文词同样按音节均分（hello 2 音节占 3 个音 → `- +`）。"""
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.2))
+    chars = [Char("你", 0.0, 0.3), Char("hello", 0.3, 1.2)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["你", "hello", MELISMA, CONTINUATION]
+
+
+def test_mixed_english_run_with_parts_reserves_its_syllables():
+    """混唱里拿到 `parts` 的英文段交给词级 DP：everywhere 占 3 个音（+ +），
+
+    后面的 `we` 因此从第 5 个音开始——这就是梦不落「everywhere + + we」的人工写法。
+    """
+    notes = spans(*[(i * 0.3, (i + 1) * 0.3) for i in range(6)])
+    chars = [Char("你", 0.0, 0.3),
+             Char("everywhere", 0.3, 1.2, parts=(0.6, 0.9)),
+             Char("we", 1.2, 1.5)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["你", "everywhere", CONTINUATION, CONTINUATION, "we", ""]
+
+
+def test_mixed_english_run_without_parts_stays_on_the_char_path():
+    """没有 `parts` 就不重排：一个字级 DP，词按自己的时间落（`we` 在第 5 个音）。"""
+    notes = spans(*[(i * 0.3, (i + 1) * 0.3) for i in range(6)])
+    chars = [Char("你", 0.0, 0.3), Char("everywhere", 0.3, 1.2),
+             Char("we", 1.2, 1.5)]
+    fill = assign_lyrics(notes, chars)
+    heads = [i for i, text in enumerate(fill.lyrics) if text in ("everywhere", "we")]
+    assert heads == [1, 4]          # 一个字级 DP：everywhere 一个音，we 按自己的时间
+
+
+def test_refine_latin_runs_moves_the_next_word_only_with_parts():
+    """白盒：`_refine_latin_runs` 只在英文段带 `parts` 时改头。
+
+    没有 `parts` 时词级 DP 会把每个词当单音节，反而更差（《梦不落》英文 token
+    50% → 27%），所以加了这道门槛。
+    """
+    from sheetsage2_webui.lyrics import _refine_latin_runs
+
+    notes = [(i * 0.3, (i + 1) * 0.3) for i in range(8)]
+    order = list(range(8))
+    without = [Char("你", 0.0, 0.3), Char("everywhere", 0.3, 1.2),
+               Char("we", 1.2, 1.2)]
+    with_parts = [Char("你", 0.0, 0.3),
+                  Char("everywhere", 0.3, 1.2, parts=(0.6, 0.9)),
+                  Char("we", 1.2, 1.2)]
+
+    heads, skipped = {0: 0, 1: 1, 2: 2}, []
+    _refine_latin_runs(order, notes, without, [0, 1, 2], heads, skipped)
+    assert heads == {0: 0, 1: 1, 2: 2}
+    assert skipped == []
+
+    heads, skipped = {0: 0, 1: 1, 2: 2}, []
+    _refine_latin_runs(order, notes, with_parts, [0, 1, 2], heads, skipped)
+    assert heads[1] == 1            # everywhere 的词头不动
+    assert heads[2] == 4            # we 让出 everywhere 的两个音节音
+
+
+
 
 
 def test_english_word_marks_each_new_syllable_with_plus():
@@ -245,13 +322,14 @@ def test_refill_wipes_stale_lyrics_off_non_head_notes():
 
 
 def test_chinese_lyrics_stay_on_the_char_path():
-    """纯汉字（中粤韩）一字一音：不走词级 DP，延续写 `-`。"""
+    """纯汉字（中粤韩）一字一音：走**字级 DP**，不走词级 DP，延续写 `-`。"""
     notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.5))
     chars = [Char("爱", 0.0, 0.3), Char("无", 0.3, 0.6), Char("限", 0.6, 0.9),
              Char("大", 0.9, 1.5)]
     fill = assign_lyrics(notes, chars)
     assert fill.lyrics == ["爱", "无", "限", "大"]
-    assert fill.reasons.get("dp_head") is None
+    assert fill.reasons.get("dp_head") == 4        # 字级 DP
+    assert fill.reasons.get("window") is None      # 不是逐字贪心
 
 
 def test_zero_length_char_still_gets_a_note():
@@ -408,11 +486,13 @@ def test_quantize_notes_carry_raw_position_and_keep_lyric():
 
 # --------------------------------------------------------------- 容差与退化
 def test_tolerance_lets_a_slightly_early_char_land():
-    """容差是往**前**放宽：字来得比音符晚一点时，仍然能挂到那个音符上。"""
+    """容差是**逐字贪心路径**的参数（`only_empty=True` 时走那条）；字级 DP 用距离代价。"""
     notes = spans((1.00, 1.10))
     chars = [Char("晚", 1.20, 1.30)]           # 字整个落在音符之后，没有重叠
-    assert assign_lyrics(notes, chars, tolerance=0.20).lyrics == ["晚"]
-    assert assign_lyrics(notes, chars, tolerance=0.05).lyrics == [""]
+    assert assign_lyrics(notes, chars, tolerance=0.20,
+                         only_empty=True).lyrics == ["晚"]
+    assert assign_lyrics(notes, chars, tolerance=0.05,
+                         only_empty=True).lyrics == [""]
 
 
 def test_char_with_no_note_is_dropped_and_reported():
@@ -425,10 +505,10 @@ def test_char_with_no_note_is_dropped_and_reported():
 
 
 def test_falls_back_to_the_most_overlapping_note():
-    """没有音符起点落在窗口里时，挂到重叠最多的那个音。"""
+    """没有音符起点落在窗口里时，贪心路径挂到重叠最多的那个音（字级 DP 用距离代价）。"""
     notes = spans((0.0, 1.0), (1.0, 2.0))
     chars = [Char("回", 0.85, 0.95)]           # 起点都不在窗口内
-    fill = assign_lyrics(notes, chars)
+    fill = assign_lyrics(notes, chars, only_empty=True)
     assert fill.lyrics == ["回", ""]           # 与第一个音重叠最多
 
 

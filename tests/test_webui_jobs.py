@@ -45,6 +45,12 @@ from sheetsage2_webui.webui.jobs import (  # noqa: E402
     UploadRejected,
     param_choices,
 )
+from sheetsage2_webui.webui.job_options import (  # noqa: E402
+    describe_change,
+    validate_options,
+)
+
+LRC_TEXT = "[00:01.00]晚风停在旧站台\n[00:05.00]旧站台"
 
 
 def test_jobs_facade_keeps_the_old_public_exports():
@@ -136,6 +142,33 @@ def test_param_choices_follow_the_servers_asr_model():
     language = next(row for row in param_choices(None)["lyrics"]
                     if row["key"] == "language")
     assert language["widget"] == "select" and len(language["options"]) == 6
+
+
+def test_validate_options_accepts_lrc_text():
+    """歌词源是自由文本，不是枚举值：粘贴 LRC 不能去查 `options` 白名单。"""
+    assert validate_options({"lyrics_lrc": LRC_TEXT}) == {"lyrics_lrc": LRC_TEXT}
+
+
+def test_validate_options_accepts_empty_lrc_to_clear():
+    assert validate_options({"lyrics_lrc": ""}) == {"lyrics_lrc": ""}
+    assert validate_options({"lyrics_lrc": None}) == {"lyrics_lrc": ""}
+
+
+def test_validate_options_rejects_text_without_lyrics():
+    with pytest.raises(ValueError, match="唱词"):
+        validate_options({"lyrics_lrc": "[ti:标题]\n[ar:歌手]\n[by:某人]"})
+
+
+def test_validate_options_rejects_oversized_lrc():
+    with pytest.raises(ValueError, match="太长"):
+        validate_options({"lyrics_lrc": "啊" * 200_001})
+
+
+def test_describe_change_summarizes_lrc_text():
+    """日志/作废提示里不能塞整首 LRC；只报行数和字数。"""
+    why = describe_change({"lyrics_lrc": ""}, {"lyrics_lrc": LRC_TEXT})
+    assert "晚风" not in why
+    assert "2 行" in why
 
 
 def test_group_lyric_lines_breaks_on_gap_and_length():
@@ -441,8 +474,8 @@ def test_upload_runs_both_stages_when_explicitly_planned(tmp_path):
     assert stages["transcribe"]["detail"]["meter"] == "4/4"
     assert done["highlights"]["notes"]["vocal"] == 5
     assert [item["path"] for item in done["files"]] == [
-        "lyrics.json", "melody.mid", "notation/song_melody.mid", "project.json",
-        "report.json", "structure.lab", "summary.json"]
+        "lyrics.json", "melody.mid", "meta.json", "notation/song_melody.mid",
+        "project.json", "report.json", "structure.lab", "summary.json"]
 
 
 def test_plan_can_run_transcribe_only_then_lyrics_separately(tmp_path):

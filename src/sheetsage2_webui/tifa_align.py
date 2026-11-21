@@ -127,6 +127,16 @@ _VOWELS = frozenset({"aa", "ae", "ah", "ao", "aw", "ay", "ax", "eh", "er", "ey",
                      "ih", "iy", "ow", "oy", "uh", "uw", "ix", "ux", "el", "em", "en"})
 
 
+def _phone_name(text: str) -> str:
+    """TIFA 的 phones 标签带语言前缀（`en/eh`、`zh/ao`），去掉前缀再判断。
+
+    混唱切片里英文词的音素长这样：`en/eh` `en/v` `en/r` `en/iy` …；
+    不剥前缀就永远匹配不到 `_VOWELS`，`parts` 会一直是空。
+    """
+    head, _, tail = text.partition("/")
+    return tail or head
+
+
 def syllable_onsets(phones: Sequence[tuple[float, float, str]],
                     start: float, end: float) -> tuple[float, ...]:
     """一个英文词内部「第二、三…个音节」的起点时刻。
@@ -140,7 +150,7 @@ def syllable_onsets(phones: Sequence[tuple[float, float, str]],
     inside = [(a, b, label) for a, b, label in phones
               if start - 1e-6 <= a < end - 1e-6]
     vowel_index = [i for i, (_a, _b, label) in enumerate(inside)
-                   if label.lower().rstrip("012") in _VOWELS]
+                   if _phone_name(label).lower().rstrip("012") in _VOWELS]
     onsets: list[float] = []
     for previous, current in zip(vowel_index, vowel_index[1:]):
         consonants = inside[previous + 1:current]
@@ -149,6 +159,22 @@ def syllable_onsets(phones: Sequence[tuple[float, float, str]],
         else:
             onsets.append(consonants[-1][0])
     return tuple(onsets)
+
+
+def word_syllable_onsets(phones: Sequence[tuple[float, float, str]],
+                         label: str, start: float, end: float, *,
+                         language: str = "zh") -> tuple[float, ...]:
+    """这个词内部的「第二、三…个音节」起点；汉字/假名词一律返回空。
+
+    整首是英文时（`language == "en"`）全部词都切；**中文歌里夹的英文词也切**——
+    TIFA 的 `language=[zh, en]` 让拉丁词走英文 G2P，phones 层里本来就是 ARPAbet。
+    但中文词是拼音（`ao`/`en`/`er` 和 ARPAbet 撞名），所以只能按**词面**判断，
+    不能按音素判断，不然汉字会被切出假的音节边界。
+    """
+    latin = any("a" <= ch.lower() <= "z" for ch in label)
+    if language != "en" and not latin:
+        return ()
+    return syllable_onsets(phones, start, end)
 
 
 class TifaAligner:
@@ -207,8 +233,9 @@ class TifaAligner:
                    ) -> list[list[tuple[str, float, float, tuple[float, ...]]]]:
         """给多段 (音频, 文本) 一次对齐完。
 
-        每段返回 `(文本, 起, 止, 音节起点)`；第四项只有英文有意义（用来区分
-        「接着上一个音节唱」和「进下一个音节」），中日文是空元组。
+        每段返回 `(文本, 起, 止, 音节起点)`；第四项只对**拉丁词**有意义（用来区分
+        「接着上一个音节唱」和「进下一个音节」），汉字/假名词是空元组。中文歌里夹的
+        英文词也会切（TIFA 的 `language=[zh, en]` 让它们走英文 G2P）。
         """
         if not items:
             return []
@@ -257,6 +284,7 @@ class TifaAligner:
                     words, phones = parse_grid_tiers(grid)
                     results[owner_index] = [
                         (label, start, end,
-                         syllable_onsets(phones, start, end) if self.language == "en" else ())
+                         word_syllable_onsets(phones, label, start, end,
+                                              language=self.language))
                         for label, start, end in words]
         return results

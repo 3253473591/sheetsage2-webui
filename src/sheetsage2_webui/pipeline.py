@@ -24,6 +24,7 @@ from typing import Any, Callable, Mapping
 
 from .engine import EngineConfig, SheetSage2Engine
 from .fsutil import write_text_atomic
+from .meta import write_meta
 from .pitch import DEFAULT_SEMITONES as PITCH_SEMITONES
 from .pitch import apply as apply_pitch_shift, warnings_for as pitch_warnings
 from .quantize import (
@@ -457,6 +458,12 @@ def run(
     summary["artifacts_missing"] = missing
 
     if write:
+        # 扒谱阶段先落一份最小 meta（只有音符/速度；歌词阶段会刷新成完整版）。
+        # 生成失败不该让整条流水线失败——产物已经写好了。
+        try:
+            write_meta(out, include_lyrics=False)
+        except (OSError, ValueError) as exc:
+            summary["warnings"].append(f"meta.json 生成失败：{exc}")
         write_text_atomic(out / "summary.json", json.dumps(summary, ensure_ascii=False,
                                                           indent=2))
         files = sorted(str(p.relative_to(out)).replace("\\", "/")
