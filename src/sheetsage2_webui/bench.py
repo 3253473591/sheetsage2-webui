@@ -117,6 +117,103 @@ def read_svp_notes(path: Path) -> list[Note]:
     return notes
 
 
+def read_midi_notes(path: Path) -> list[Note]:
+    """从 `ref.mid` 读人工谱：音符时间 + 逐音歌词。
+
+    量化金标（`samples/量化/*/ref.mid`）和部分英文样本只有 MIDI，没有 `manual.svp`。
+    MIDI 里的歌词是 `lyrics`/`text` 元事件，按时间顺序与 `note_on` 一一配对。
+    """
+    import mido
+
+    midi = mido.MidiFile(str(path))
+    #: mido 的 `message.time` 是 **tick 差**，不是秒；而且 tempo 常只写在 0 轨，
+    #: 所以要先汇总全局 tempo 表，再把绝对 tick 换成秒（按轨默认 120 BPM 会整体偏）。
+    ticks_per_beat = midi.ticks_per_beat or 480
+    tempo_events: list[tuple[int, int]] = []
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type == "set_tempo":
+                tempo_events.append((tick, message.tempo))
+    tempo_events.sort()
+
+    def to_seconds(target: int) -> float:
+        seconds = 0.0
+        previous = 0
+        tempo = 500000
+        for when, value in tempo_events:
+            if when > target:
+                break
+            seconds += mido.tick2second(when - previous, ticks_per_beat, tempo)
+            previous = when
+            tempo = value
+        return seconds + mido.tick2second(target - previous, ticks_per_beat, tempo)
+
+    notes: list[tuple[float, int, int]] = []   # (start_seconds, pitch, track)
+    texts: list[tuple[float, str]] = []
+    for track_index, track in enumerate(midi.tracks):
+        tick = 0
+        open_notes: dict[int, list[float]] = {}
+        for message in track:
+            tick += message.time
+            when = to_seconds(tick)
+            if message.type == "note_on" and message.velocity > 0:
+                open_notes.setdefault(message.note, []).append(when)
+            elif message.type == "note_off" or (message.type == "note_on"
+                                                 and message.velocity == 0):
+                stack = open_notes.get(message.note)
+                if stack:
+                    start = stack.pop()
+                    notes.append((start, message.note, track_index))
+            elif message.type in ("lyrics", "text"):
+                lyric = str(message.text).strip()
+                if lyric:
+                    texts.append((when, lyric))
+    if not notes:
+        return []
+    # 旋律轨：歌词元事件最多的那条轨道（都没有就取音最多的）
+    counts: dict[int, int] = {}
+    for _, _, track_index in notes:
+        counts[track_index] = counts.get(track_index, 0) + 1
+    melody_track = max(counts, key=counts.get)
+    melody = sorted(note for note in notes if note[2] == melody_track)
+    if texts:
+        # 文本先按时间排；每个文本配给它后面（或最近）的音符
+        texts.sort()
+        lyrics = [""] * len(melody)
+        cursor = 0
+        for when, lyric in texts:
+            while cursor < len(melody) and melody[cursor][0] < when - 0.05:
+                cursor += 1
+            if cursor >= len(melody):
+                break
+            if not lyrics[cursor]:
+                lyrics[cursor] = lyric
+        result = [Note(start, start, pitch, lyric)
+                  for (start, pitch, _), lyric in zip(melody, lyrics)]
+    else:
+        result = [Note(start, start, pitch, "") for start, pitch, _ in melody]
+    # 音长用下一个同轨音的起点兜底
+    for index in range(len(result) - 1):
+        if result[index].end <= result[index].start:
+            result[index] = Note(result[index].start, result[index + 1].start,
+                                 result[index].pitch, result[index].lyric)
+    return result
+
+
+def read_manual(folder: Path) -> list[Note]:
+    """人工谱：优先 `manual.svp`，其次 `ref.mid` / `ref.midi`。"""
+    svp = folder / "manual.svp"
+    if svp.is_file():
+        return read_svp_notes(svp)
+    for name in ("ref.mid", "ref.midi"):
+        candidate = folder / name
+        if candidate.is_file():
+            return read_midi_notes(candidate)
+    return []
+
+
 def read_chars(path: Path) -> list[Char]:
     data = _read_json(path)
     return [Char(str(item["text"]), float(item["start"]), float(item["end"]),
@@ -635,11 +732,9 @@ def score_folder(folder: Path, *, offset: float | None = None,
     folder = Path(folder)
     project_path = folder / "project.json"
     lyrics_path = folder / "lyrics.json"
-    manual_path = folder / "manual.svp"
-    if not (project_path.is_file() and lyrics_path.is_file()
-            and manual_path.is_file()):
+    manual = read_manual(folder)
+    if not (project_path.is_file() and lyrics_path.is_file() and manual):
         return None
-    manual = read_svp_notes(manual_path)
     chars = read_chars(lyrics_path)
     if not manual or not chars:
         return None
@@ -725,7 +820,10 @@ def pending(root: Path, *, exclude: Iterable[str] = ("新建文件夹",)) -> lis
             continue
         if not (folder / "lyrics.json").is_file():
             continue
+        # 只判文件在不在，别在这里解析（`pending` 会被很轻的夹具调用）
         if (folder / "manual.svp").is_file():
+            continue
+        if any((folder / name).is_file() for name in ("ref.mid", "ref.midi")):
             continue
         names.append(folder.name)
     return names

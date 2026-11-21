@@ -244,3 +244,27 @@ def test_pending_lists_only_dirs_missing_manual(tmp_path):
 
     assert pending(tmp_path) == ["待补"]
 
+
+def test_read_midi_notes_reads_lyrics_and_seconds(tmp_path):
+    """`ref.mid` 金标：tick 要按全局 tempo 换成秒，歌词按时间配到音符上。"""
+    import mido
+    from sheetsage2_webui.bench import read_midi_notes
+
+    midi = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(120), time=0))
+    track.append(mido.MetaMessage("lyrics", text="He", time=0))
+    track.append(mido.Message("note_on", note=60, velocity=100, time=0))
+    track.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    track.append(mido.MetaMessage("lyrics", text="llo", time=0))
+    track.append(mido.Message("note_on", note=62, velocity=100, time=480))
+    track.append(mido.Message("note_off", note=62, velocity=0, time=480))
+    path = tmp_path / "ref.mid"
+    midi.save(str(path))
+
+    notes = read_midi_notes(path)
+    assert [note.lyric for note in notes] == ["He", "llo"]
+    # 120 BPM、480 PPQ：第 2 个音在 1.0s
+    assert abs(notes[0].start) < 1e-3
+    assert abs(notes[1].start - 1.0) < 1e-3
