@@ -442,3 +442,15 @@ def test_lrc_mode_refuses_korean_instead_of_using_chinese():
         assert "韩语" in str(exc)
     else:
         raise AssertionError("韩语 LRC 应该抛 JaAlignerMissing")
+
+def test_explode_cjk_items_splits_hangul_words():
+    """Qwen 对齐器对韩语给词级时间戳，必须拆成音节（否则 69% 的字没时间）。"""
+    from types import SimpleNamespace
+    from sheetsage2_webui.asr import AsrEngine
+
+    items = [SimpleNamespace(text="사랑해", start_time=1.0, end_time=2.5),
+             SimpleNamespace(text="love", start_time=3.0, end_time=3.5)]
+    out = AsrEngine._explode_cjk_items(items)
+    assert [text for text, _s, _e in out] == ["사", "랑", "해", "love"]
+    assert out[0][1] == 1.0 and abs(out[2][2] - 2.5) < 1e-9
+    assert out[3] == ("love", 3.0, 3.5)

@@ -648,16 +648,31 @@ class AsrEngine:
         return not path.is_absolute() and "/" not in str(model) and "\\" not in str(model)
 
     @staticmethod
-    def _chars_from_stamps(stamps: Any, offset: float) -> list[AlignedChar]:
-        """Qwen 的 `time_stamps` -> 整首曲时间轴上的字。"""
-        chars: list[AlignedChar] = []
+    def _explode_cjk_items(stamps: Any) -> list[tuple[str, float, float]]:
+        """Qwen 对齐器对 CJK/韩文给的是**词**级时间戳，按音节拆开。
+
+        实测韩语 143 个字只回 42 项（≈3 字/词），不拆的话 69% 的字没有时间。
+        拉丁词（英文）保持整词，因为挂字层对英文就是按词处理的。
+        """
+        out: list[tuple[str, float, float]] = []
         for item in stamps or ():
-            chars.append(AlignedChar(
-                text=str(getattr(item, "text", "")),
-                start=offset + float(getattr(item, "start_time", 0.0)),
-                end=offset + float(getattr(item, "end_time", 0.0)),
-            ))
-        return chars
+            text = str(getattr(item, "text", "") or "")
+            start = float(getattr(item, "start_time", 0.0))
+            end = float(getattr(item, "end_time", 0.0))
+            latin = any("a" <= ch.lower() <= "z" for ch in text)
+            if len(text) > 1 and not latin:
+                step = (end - start) / len(text)
+                for index, char in enumerate(text):
+                    out.append((char, start + index * step, start + (index + 1) * step))
+            else:
+                out.append((text, start, end))
+        return out
+
+    @classmethod
+    def _chars_from_stamps(cls, stamps: Any, offset: float) -> list[AlignedChar]:
+        """Qwen 的 `time_stamps` -> 整首曲时间轴上的字（CJK 词会拆成音节）。"""
+        return [AlignedChar(text=text, start=offset + start, end=offset + end)
+                for text, start, end in cls._explode_cjk_items(stamps)]
 
     def _chars_from_stamped(self, stamped: Sequence[tuple[float, Any]]) -> list[AlignedChar]:
         chars: list[AlignedChar] = []
@@ -770,9 +785,9 @@ class AsrEngine:
                 results = []
             finally:
                 clip.unlink(missing_ok=True)
-            for item in (results[0].items if results else ()):
-                chars.append(AlignedChar(str(item.text), window.start + float(item.start_time),
-                                         window.start + float(item.end_time)))
+            for text, start, end in self._explode_cjk_items(
+                    results[0].items if results else ()):
+                chars.append(AlignedChar(text, window.start + start, window.start + end))
         run.chars = chars
         run.elapsed_seconds = time.monotonic() - started
         run.zero_length_chars = sum(1 for c in chars if c.end <= c.start + 1e-9)
