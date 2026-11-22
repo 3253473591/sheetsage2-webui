@@ -22,6 +22,24 @@ MODELS = PROJECT / "models"
 SAMPLES = PROJECT / "samples"
 
 
+CREDIT_HINTS = ("lyrics by", "composed by", "written by", "arranged by",
+                "produced by", "作词", "作曲", "编曲", "制作", "混音", "母带")
+
+
+def _drop_credits(text: str) -> str:
+    """去掉 LRC 里的署名行（作词/作曲/制作…），它们会被当成歌词挂到前奏上。"""
+    kept = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if any(hint in lowered for hint in CREDIT_HINTS):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="按 SheetSage2 区间跑歌词识别")
     parser.add_argument("slug", help="output/ 下的工程目录名")
@@ -36,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tolerance", type=float, default=0.20, help="填词容差（秒）")
     parser.add_argument("--only-empty", action="store_true", help="只填目前为空的音符")
     parser.add_argument("--audio", type=Path, default=None, help="默认按工程里的音频名到 samples/ 找")
+    parser.add_argument("--lrc", default=None,
+                        help="官方歌词（LRC/TXT）：只做 TIFA 强制对齐，不跑识别")
     args = parser.parse_args(argv)
 
     project_dir = PROJECT / "output" / args.slug
@@ -60,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     sections = sections_from_lab(structure.read_text(encoding="utf-8"),
                                  max_seconds=args.max_slice)
     print(f"工程 {args.slug}   音频 {audio.name} {project['duration_seconds']:.1f}s")
+    if args.lrc:
+        print(f"歌词源：{args.lrc}（TIFA 强制对齐，不跑识别）")
     print(f"structure.lab 合并后得到 {len(sections)} 个切片：")
     for section in sections:
         label = f"  [{section.label}]" if section.label else ""
@@ -80,7 +102,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"   [{value['index']}/{value['total']}] "
               f"{value['start']:.1f}-{value['end']:.1f}s ...", flush=True)
 
-    run = engine.transcribe_sections(audio, sections, progress=progress)
+    lyrics_source = None
+    if args.lrc:
+        from sheetsage2_webui.asr import read_lrc
+        lyrics_source = _drop_credits(read_lrc(args.lrc))
+    run = engine.transcribe_sections(audio, sections, progress=progress,
+                                     lyrics_source=lyrics_source)
     engine.release()
 
     print(f"\n耗时 {run.elapsed_seconds:.1f}s   切片 {run.slices}/{len(sections)}   "
