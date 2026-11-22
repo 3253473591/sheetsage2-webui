@@ -23,7 +23,10 @@ SAMPLES = PROJECT / "samples"
 
 
 CREDIT_HINTS = ("lyrics by", "composed by", "written by", "arranged by",
-                "produced by", "作词", "作曲", "编曲", "制作", "混音", "母带")
+                "produced by", "directed by", "performed by", "recorded by",
+                "mixed by", "engineered", "mastered", "background vocals",
+                "digital editing", "vocal directed", "作词", "作曲", "编曲",
+                "制作", "混音", "母带", "词：", "曲：")
 
 
 def _drop_credits(text: str) -> str:

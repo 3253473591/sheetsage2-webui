@@ -222,8 +222,8 @@ def chosen_repos(manifest: dict, mode: str, with_17b: bool,
                  with_ja: bool = False) -> list[str]:
     """按档位给出要下的仓库。
 
-    **对齐器不再默认下**：TIFA 随包带，中/粤/英都用它；只有日语还需要
-    Qwen3-ForcedAligner（TIFA 1.0 没有日语的离线 G2P），所以它挪进了可选，
+    **对齐器不再默认下**：TIFA 随包带，中/粤/英都用它；只有日语/韩语还需要
+    Qwen3-ForcedAligner（TIFA 1.0 没有日语/韩语的离线 G2P），所以它挪进了可选，
     用 `--with-ja` 才下。
     """
     models = manifest["models"]
@@ -378,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--with-1.7b", dest="with_17b", action="store_true",
                         help="在最小集之外**额外**下 1.7B 识别模型（+4.5 GB，专有名词更准）")
     parser.add_argument("--with-ja", dest="with_ja", action="store_true",
-                        help="额外下 Qwen 对齐器（+1.7 GB）：只在唱**日语**歌时需要，"
+                        help="额外下 Qwen 对齐器（+1.7 GB）：只在唱**日语/韩语**歌时需要，"
                              "中/粤/英用随包的 TIFA")
     parser.add_argument("--check", action="store_true", help="只体检，什么都不下")
     parser.add_argument("--dry-run", action="store_true", help="只打印要做的事")
@@ -410,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             say()
             say("  这次要下载哪一套？（说明见 README）")
             say("    1  默认（中/粤/英）                  约 4.3 GB  —— 默认")
-            say("    2  日语特供                                +1.7 GB")
+            say("    2  日语/韩语特供（Qwen 对齐器）               +1.7 GB")
             say("    3  提高歌词识别精度（适合大显存）          +4.5 GB")
             say("    4  暂不下载（下次启动还会再问）")
             answer = input("  选一个 1/2/3/4（回车 = 1）: ").strip() or "1"

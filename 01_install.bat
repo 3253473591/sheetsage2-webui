@@ -13,7 +13,7 @@ rem    - install torch / torchaudio from the manifest (resumable)
 rem    - pip install the project + deps (Tsinghua mirror)
 rem    - download the models: it ASKS which set to fetch
 rem        1  default (zh / yue / en)     ~4.3 GB  <- recommended
-rem        2  Japanese extra              +1.7 GB
+rem        2  Japanese/Korean extra      +1.7 GB   (Qwen aligner)
 rem        3  higher ASR accuracy         +4.5 GB
 rem        4  not now (00_start will remind you next time)
 rem
@@ -21,6 +21,9 @@ rem  Usage:
 rem    01_install.bat              interactive (asks 1-4)
 rem    01_install.bat --check      report only, download nothing
 rem    01_install.bat --models full  everything (~10.4 GB)
+rem
+rem  NOTE: Japanese and Korean lyrics need the optional Qwen forced
+rem  aligner (menu entry 2). The bundled TIFA has no ja/ko G2P.
 rem
 rem  Power users can still pass --with-1.7b / --with-ja instead of
 rem  picking a menu entry; testers should just pick 1-4.

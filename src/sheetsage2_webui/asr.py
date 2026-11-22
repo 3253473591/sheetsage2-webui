@@ -719,6 +719,67 @@ class AsrEngine:
             units = [unit.strip('.,;:!?"\'()[]{}') for unit in units]
         return units if len(units) == len(spans) else []
 
+    def _align_lines_with_qwen_aligner(
+        self,
+        audio: str | Path,
+        lines: Sequence[LyricLine],
+        *,
+        language: str | None,
+        sections: Sequence[Section] = (),
+        workdir: str | Path | None = None,
+    ) -> AsrRun:
+        """日语/韩语 LRC：用 Qwen 强制对齐器逐行对官方词（TIFA 没有 ja/ko G2P）。
+
+        每行取 `[本行起点 − 0.2s, 下一行起点 + 0.2s]` 的音频窗口单独对齐，
+        比整段对齐准；切出来的 clip 用完即删。
+        """
+        import tempfile as _tempfile
+
+        name = "日语" if str(language or "").startswith("Jap") else "韩语"
+        # 先看配置里有没有对齐器，避免为了报个错还去加载 ASR 模型。
+        if not self._qwen_aligner_ready():
+            raise JaAlignerMissing(
+                f"歌词 LRC 是**{name}**，但没装{name}对齐器（随包的 TIFA 不支持{name} G2P）。"
+                "双击 02_models.bat，选 2（日语/韩语特供）补下模型，再重跑「识别歌词」。")
+        self.load()
+        aligner = getattr(self._model, "forced_aligner", None)
+        if aligner is None:
+            raise JaAlignerMissing(
+                f"歌词 LRC 是**{name}**，但没装{name}对齐器（随包的 TIFA 不支持{name} G2P）。"
+                "双击 02_models.bat，选 2（日语/韩语特供）补下模型，再重跑「识别歌词」。")
+
+        started = time.monotonic()
+        work = Path(workdir) if workdir else Path(_tempfile.mkdtemp(prefix=ASR_WORK_PREFIX))
+        work.mkdir(parents=True, exist_ok=True)
+        target_language = "Japanese" if name == "日语" else "Korean"
+        run = AsrRun(text="\n".join(line.text for line in lines), language=language,
+                     sections=[s.as_dict() for s in sections])
+        chars: list[AlignedChar] = []
+        for index, line in enumerate(lines):
+            text = str(line.text or "").strip()
+            if not text:
+                continue
+            end = (lines[index + 1].start if index + 1 < len(lines)
+                   else line.start + 12.0)
+            window = Section(max(0.0, line.start - 0.2), max(line.start + 0.2, end + 0.2))
+            clip = self._extract(audio, window, work / f"l{index:03d}.wav", tifa=False)
+            try:
+                results = aligner.align(str(clip), text, [target_language])
+            except Exception as exc:              # noqa: BLE001 - 单行失败不拖垮整首
+                run.warnings.append(f"第 {index + 1} 行对齐失败：{type(exc).__name__}: {exc}")
+                results = []
+            finally:
+                clip.unlink(missing_ok=True)
+            for item in (results[0].items if results else ()):
+                chars.append(AlignedChar(str(item.text), window.start + float(item.start_time),
+                                         window.start + float(item.end_time)))
+        run.chars = chars
+        run.elapsed_seconds = time.monotonic() - started
+        run.zero_length_chars = sum(1 for c in chars if c.end <= c.start + 1e-9)
+        if run.zero_length_chars:
+            run.chars, run.repaired_chars = interpolate_degenerate(run.chars)
+        return run
+
     def _transcribe_with_lrc(
         self,
         audio: str | Path,
@@ -748,11 +809,11 @@ class AsrEngine:
         if sticky == "zh" and script != "zh":
             sticky = script
         if sticky in ("ja", "ko"):
-            name = "日语" if sticky == "ja" else "韩语"
-            raise JaAlignerMissing(
-                f"歌词 LRC 是**{name}**，但随包的 TIFA 不支持{name} G2P，LRC 对齐走不了。"
-                "双击 02_models.bat，选 2（日语特供）补下模型也不行——那是识别用的；"
-                "日语歌请走普通识别（Qwen 对齐器）。")
+            # TIFA 1.0 没有日语/韩语 G2P；改用 Qwen 强制对齐器（支持 ja/ko）。
+            return self._align_lines_with_qwen_aligner(
+                audio, lines,
+                language=wanted_language or ("Japanese" if sticky == "ja" else "Korean"),
+                sections=sections, workdir=workdir)
         run = AsrRun(sections=[s.as_dict() for s in sections],
                      language=TIFA_TO_LANGUAGE.get(sticky), text=joined)
         if lines[0].start >= 0:

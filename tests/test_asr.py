@@ -246,7 +246,7 @@ def test_tifa_language_mapping_falls_back_to_chinese():
     assert MAX_ALIGN_SECONDS == 50.0
     assert tifa_language("Chinese") == "zh"
     assert tifa_language("Japanese") == "ja"
-    assert tifa_language("Cantonese") == "yue"
+    assert tifa_language("Cantonese") == "zh"   # yue 覆盖太差，默认走中文 G2P
     assert tifa_language("English") == "en"
     # TIFA 1.0 没有韩语：映射成 `ko`，由路由层转 Qwen 对齐器。
     # （以前这里返回 "zh"，韩文会被中文 G2P 处理，一个时间戳都出不来）

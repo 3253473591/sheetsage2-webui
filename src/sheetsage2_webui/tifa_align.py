@@ -31,7 +31,9 @@ LANGUAGE_TO_TIFA = {
     "Chinese": "zh",
     "English": "en",
     "Japanese": "ja",
-    "Cantonese": "yue",
+    # 粤语：TIFA 的 yue 模型实测覆盖很差（《你唔爱我啦》LRC 只出 227/439 字），
+    # 而粤语歌词本来就是汉字，用中文 G2P 反而 370 字。默认走 zh。
+    "Cantonese": "zh",
     # TIFA 1.0 **没有韩语**：这里映射成 `ko`，让调用方能识别“TIFA 不支持、
     # 要走 Qwen 对齐器”。不映射的话 `tifa_language("Korean")` 会静默落回 `zh`，
     # 韩文被中文 G2P 处理 → 一个时间戳都出不来。

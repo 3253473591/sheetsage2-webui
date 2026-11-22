@@ -4,7 +4,8 @@ rem  SheetSage2 Studio - add models later
 rem
 rem  Run this when you want to add a model set to an existing
 rem  install, for example:
-rem    - Japanese songs (the bundled aligner cannot do Japanese)
+rem    - Japanese / Korean songs (the bundled TIFA aligner has no
+rem      ja/ko G2P, so the optional Qwen aligner is required)
 rem    - higher lyric accuracy (bigger ASR model, needs VRAM)
 rem
 rem  It asks the same 1-4 menu as 01_install.bat and only touches
