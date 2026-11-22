@@ -169,7 +169,8 @@ def main(argv: list[str] | None = None) -> int:
     if not main_rows:
         print("（主指标为空：全部样本都在 stress 或文本不一致里）")
 
-    stats = _print_summary("TOTAL", main_rows) if main_rows else summarize([])
+    label = f"TOTAL[{Path(args.root).name}]"
+    stats = _print_summary(label, main_rows) if main_rows else summarize([])
 
     if args.diagnose and main_rows:
         _print_diagnosis(main_rows)
