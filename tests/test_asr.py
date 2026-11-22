@@ -248,10 +248,13 @@ def test_tifa_language_mapping_falls_back_to_chinese():
     assert tifa_language("Japanese") == "ja"
     assert tifa_language("Cantonese") == "yue"
     assert tifa_language("English") == "en"
-    assert tifa_language("Korean") == "zh"      # TIFA 1.0 没有韩语
+    # TIFA 1.0 没有韩语：映射成 `ko`，由路由层转 Qwen 对齐器。
+    # （以前这里返回 "zh"，韩文会被中文 G2P 处理，一个时间戳都出不来）
+    assert tifa_language("Korean") == "ko"
     assert tifa_language(None) == "zh"
     # 文字兜底：假名 -> ja，拉丁为主 -> en，其余 -> zh
     assert guess_language("君が僕の心臓じゃない") == "ja"
+    assert guess_language("사랑해요 그대") == "ko"
     assert guess_language("The Wellerman came across the sea") == "en"
     assert guess_language("阳光在身上流转") == "zh"
 
@@ -417,3 +420,25 @@ def test_read_lrc_strips_speaker_prefix(tmp_path):
     text = read_lrc(path)
     assert "男：" not in text and "合：" not in text
     assert "One two three" in text and "一起唱" in text
+
+def test_pick_align_mode_routes_korean_to_qwen():
+    """韩文不能被当成中文交给 TIFA。"""
+    from sheetsage2_webui.asr import AsrEngine
+
+    assert AsrEngine._pick_align_mode("사랑해요") == "ko"
+    assert AsrEngine._pick_align_mode("君が僕") == "ja"
+    assert AsrEngine._pick_align_mode("你好世界") == "tifa"
+
+def test_lrc_mode_refuses_korean_instead_of_using_chinese():
+    """韩文 LRC 不能退化成"按中文 G2P 跑"——必须报错让用户走 Qwen 对齐器。"""
+    from sheetsage2_webui.asr import (AsrConfig, AsrEngine, JaAlignerMissing,
+                                      LyricLine, Section)
+
+    engine = AsrEngine(AsrConfig(asr_model="x", aligner_model=None, language="Korean"))
+    try:
+        engine._transcribe_with_lrc(Path("x.wav"), [Section(0.0, 10.0)],
+                                    [LyricLine(0.0, "사랑해")], language="Korean")
+    except JaAlignerMissing as exc:
+        assert "韩语" in str(exc)
+    else:
+        raise AssertionError("韩语 LRC 应该抛 JaAlignerMissing")

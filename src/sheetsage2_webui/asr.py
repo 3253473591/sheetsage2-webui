@@ -98,7 +98,8 @@ class LyricLine:
 
 
 #: TIFA 语言代码 -> 我们的语言名（LRC 模式写进 lyrics.json 的 language_used 用）。
-TIFA_TO_LANGUAGE = {"zh": "Chinese", "en": "English", "ja": "Japanese", "yue": "Cantonese"}
+TIFA_TO_LANGUAGE = {"zh": "Chinese", "en": "English", "ja": "Japanese",
+                    "yue": "Cantonese", "ko": "Korean"}
 
 
 def parse_lrc(text: str) -> list[LyricLine]:
@@ -630,7 +631,10 @@ class AsrEngine:
         """
         from .tifa_align import guess_language
 
-        return "ja" if guess_language(text) == "ja" else "tifa"
+        script = guess_language(text)
+        if script in ("ja", "ko"):
+            return script
+        return "tifa"
 
     def _qwen_aligner_ready(self) -> bool:
         """Qwen 对齐器权重在不在。它只有日语要用，所以默认档位下通常没有。"""
@@ -743,9 +747,10 @@ class AsrEngine:
         script = guess_language(joined)
         if sticky == "zh" and script != "zh":
             sticky = script
-        if sticky == "ja":
+        if sticky in ("ja", "ko"):
+            name = "日语" if sticky == "ja" else "韩语"
             raise JaAlignerMissing(
-                "歌词 LRC 是**日语**，但随包的 TIFA 不支持日语 G2P，LRC 对齐走不了。"
+                f"歌词 LRC 是**{name}**，但随包的 TIFA 不支持{name} G2P，LRC 对齐走不了。"
                 "双击 02_models.bat，选 2（日语特供）补下模型也不行——那是识别用的；"
                 "日语歌请走普通识别（Qwen 对齐器）。")
         run = AsrRun(sections=[s.as_dict() for s in sections],
@@ -885,15 +890,16 @@ class AsrEngine:
                 # 缺可选模型不能把整条链路做死：退回 Qwen，并让用户在详情里看到原因
                 run.warnings.append(reason)
                 tifa_mode = False
-        # **日语专用**：TIFA 1.0 没有日语的离线 G2P，日文歌只能走 Qwen 对齐器。
-        # 显式指定了日语就提前判，省得白跑一遍识别；没装对齐器直接停，别产出半套歌词。
-        if tifa_mode and wanted_language == "Japanese":
+        # **日语/韩语专用**：TIFA 1.0 没有日语/韩语的离线 G2P，这两种歌只能走 Qwen 对齐器。
+        # 显式指定了就提前判，省得白跑一遍识别；没装对齐器直接停，别产出半套歌词。
+        if tifa_mode and wanted_language in ("Japanese", "Korean"):
+            name = "日语" if wanted_language == "Japanese" else "韩语"
             if not self._qwen_aligner_ready():
                 raise JaAlignerMissing(
-                    "这首歌指定为日语，但没装日语对齐器（随包的 TIFA 不支持日语）。"
+                    f"这首歌指定为{name}，但没装{name}对齐器（随包的 TIFA 不支持{name}）。"
                     "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
             tifa_mode = False
-            run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
+            run.warnings.append(f"{name}：TIFA 不支持{name} G2P，这次用 Qwen 对齐器")
         #: 逐段对齐：`unknown` → 还没遇到带文字的切片；`tifa` 边走边出；
         #: `ja` 等最后用 Qwen 时间戳（TIFA 没有日语 G2P）。
         mode = "unknown"
@@ -947,14 +953,15 @@ class AsrEngine:
                     # 攒齐再跑一样，但界面可以在每段结束后就显示这一段的歌词。
                     if mode == "unknown":
                         mode = self._pick_align_mode(text)   # 首次出现文字时定语种
-                    if mode == "ja":
-                        # 日语：TIFA 没有 G2P，等最后用 Qwen 时间戳一次性拼
+                    if mode in ("ja", "ko"):
+                        # 日语/韩语：TIFA 没有 G2P，等最后用 Qwen 时间戳一次性拼
+                        name = "日语" if mode == "ja" else "韩语"
                         if not self._qwen_aligner_ready():
                             raise JaAlignerMissing(
-                                "识别出来是**日语**，但没装日语对齐器（随包的 TIFA 不支持日语）。"
+                                f"识别出来是**{name}**，但没装{name}对齐器（随包的 TIFA 不支持{name}）。"
                                 "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
-                        if not run.warnings or "日语：" not in "".join(run.warnings):
-                            run.warnings.append("日语：TIFA 不支持日语 G2P，这次用 Qwen 对齐器")
+                        if not run.warnings or f"{name}：" not in "".join(run.warnings):
+                            run.warnings.append(f"{name}：TIFA 不支持{name} G2P，这次用 Qwen 对齐器")
                     else:
                         if sticky_lang is None:
                             # 整首曲定一次语种，避免"一句英文把整段判成 en"
@@ -976,7 +983,7 @@ class AsrEngine:
             if on_slice is not None:
                 on_slice(run, index + 1, len(sections))
 
-        if tifa_mode and mode == "ja" and stamped:
+        if tifa_mode and mode in ("ja", "ko") and stamped:
             # 日语走 Qwen 时间戳：前面每段都没往 run.chars 里放东西，这里一次补齐
             run.chars = self._chars_from_stamped(stamped)
 

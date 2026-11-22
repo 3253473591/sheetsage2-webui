@@ -32,6 +32,10 @@ LANGUAGE_TO_TIFA = {
     "English": "en",
     "Japanese": "ja",
     "Cantonese": "yue",
+    # TIFA 1.0 **没有韩语**：这里映射成 `ko`，让调用方能识别“TIFA 不支持、
+    # 要走 Qwen 对齐器”。不映射的话 `tifa_language("Korean")` 会静默落回 `zh`，
+    # 韩文被中文 G2P 处理 → 一个时间戳都出不来。
+    "Korean": "ko",
 }
 
 _VENDOR = Path(__file__).resolve().parent / "vendor" / "tifa"
@@ -86,6 +90,9 @@ def guess_language(text: str) -> str:
     假名 / 拉丁字母能靠字符集认出来；粤语不行（和普通话一样是汉字，只能靠用户选）。
     """
     text = text or ""
+    if any("\uac00" <= char <= "\ud7a3" or "\u1100" <= char <= "\u11ff"
+           or "\u3130" <= char <= "\u318f" for char in text):
+        return "ko"
     if any("\u3040" <= char <= "\u30ff" for char in text):
         return "ja"
     latin = sum(1 for char in text if char.isascii() and char.isalpha())
