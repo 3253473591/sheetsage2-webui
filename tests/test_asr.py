@@ -406,3 +406,14 @@ def test_ja_without_the_aligner_maps_to_an_actionable_error():
     error = describe(JaAlignerMissing("识别出来是日语，但没装日语对齐器"))
     assert error.code == "E_JA_ALIGNER"
     assert "02_models" in error.action
+
+def test_read_lrc_strips_speaker_prefix(tmp_path):
+    """LRC 行内的 `男：/合：` 不能当歌词挂在音符上。"""
+    from sheetsage2_webui.asr import read_lrc
+
+    path = tmp_path / "x.lrc"
+    path.write_text("[00:07.95]男：One two three\n[00:10.00]合：一起唱\n",
+                    encoding="utf-8")
+    text = read_lrc(path)
+    assert "男：" not in text and "合：" not in text
+    assert "One two three" in text and "一起唱" in text

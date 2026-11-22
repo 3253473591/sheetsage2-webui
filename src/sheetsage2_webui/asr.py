@@ -149,15 +149,27 @@ def parse_lyric_text(text: str) -> list[LyricLine]:
     return rows
 
 
+#: LRC 行内的说话人前缀：`[00:07.95]男：One two three` 里的 `男：`。
+#: 不剥掉会被当成歌词挂在音符上（对唱/合唱的 LRC 很常见）。
+_SPEAKER_PREFIX = re.compile(
+    r"^((?:\s*\[[^\]]*\])*)\s*(?:男|女|合|对唱|合唱|男声|女声|男/女)\s*[：:]\s*")
+
+
+def strip_speaker_prefix(text: str) -> str:
+    """去掉每行开头的 `男：/女：/合：` 这类说话人标注。"""
+    # 保留行首的 `[00:07.95]` 时间戳，只删它后面的说话人标注。
+    return "\n".join(_SPEAKER_PREFIX.sub(r"\1", line) for line in text.splitlines())
+
+
 def read_lrc(path: str | Path) -> str:
     """读 LRC 文件，按候选编码试（中文圈的 LRC 常见 GBK）。"""
     raw = Path(path).read_bytes()
     for enc in ("utf-8-sig", "gbk", "big5", "shift_jis", "utf-16"):
         try:
-            return raw.decode(enc)
+            return strip_speaker_prefix(raw.decode(enc))
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace")
+    return strip_speaker_prefix(raw.decode("utf-8", errors="replace"))
 
 
 @dataclass
