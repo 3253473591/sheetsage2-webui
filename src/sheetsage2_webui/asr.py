@@ -660,9 +660,10 @@ class AsrEngine:
             start = float(getattr(item, "start_time", 0.0))
             end = float(getattr(item, "end_time", 0.0))
             latin = any("a" <= ch.lower() <= "z" for ch in text)
-            if len(text) > 1 and not latin:
-                step = (end - start) / len(text)
-                for index, char in enumerate(text):
+            letters = [ch for ch in text if not ch.isspace()]
+            if len(letters) > 1 and not latin:
+                step = (end - start) / len(letters)
+                for index, char in enumerate(letters):
                     out.append((char, start + index * step, start + (index + 1) * step))
             else:
                 out.append((text, start, end))
