@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -72,6 +73,18 @@ def use_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (ValueError, OSError):
             pass
+
+
+def is_elevated() -> bool:
+    """是不是以管理员身份在跑。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:                    # noqa: BLE001 - 拿不到就当普通权限
+        return False
 
 
 def can_bind(port: int, host: str = "127.0.0.1") -> bool:
@@ -161,14 +174,53 @@ def ask_profile(arg: str | None) -> str:
     return choice if choice in PROFILES else "1"
 
 
-def open_browser_later(url: str) -> None:
-    """服务本身秒起（模型是懒加载的，要等第一个任务才加载），等几秒再开页面就够。"""
-    def open_it() -> None:
+def open_url(url: str) -> None:
+    """开浏览器。
+
+    **不要直接 `webbrowser.open`**：从"以管理员身份运行"的 .bat 里起浏览器时，
+    Edge/Chrome 会弹「现有实例正在以提升的权限运行，是否用普通权限重启」——
+    因为新进程继承了管理员令牌。交给 `explorer.exe` 打开，它会用当前登录会话的
+    普通权限去启动浏览器，用户就看不到那个提示了。
+    """
+    if os.name == "nt":
         try:
-            webbrowser.open(url)
-        except Exception:
+            subprocess.Popen(["explorer.exe", url], close_fds=True)
+            return
+        except OSError:
             pass
-    threading.Timer(4.0, open_it).start()
+    try:
+        webbrowser.open(url)
+    except Exception:                    # noqa: BLE001 - 开不了浏览器不影响服务
+        pass
+
+
+def wait_until_ready(port: int, *, timeout: float = 120.0,
+                     host: str = "127.0.0.1") -> bool:
+    """等到端口真的能连上（服务开始 listen）再返回 True。
+
+    beta3 的反馈：4 秒定时器在慢机器上不够，浏览器比服务先到，页面报
+    "Failed to fetch / 连不上后台"。改成轮询端口，服务没起来就不开页。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+def open_browser_when_ready(url: str, port: int, *, timeout: float = 120.0) -> None:
+    """后台等端口就绪再开浏览器；超时就不开，让用户手动点地址。"""
+    def worker() -> None:
+        if wait_until_ready(port, timeout=timeout):
+            open_url(url)
+        else:
+            print("  ! 等服务就绪超时了，没有自动打开浏览器。")
+            print(f"    服务起来后手动打开：{url}")
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def data_root_for_lock() -> Path:
@@ -198,10 +250,7 @@ def stop_if_already_running() -> int | None:
               + (f"（PID {info.get('pid')}）" if info.get("pid") else ""))
         print("  想重启就先关掉那个窗口（或结束那个进程），再双击一次。")
         if os.environ.get("SHEETSAGE_NO_BROWSER") != "1":
-            try:
-                webbrowser.open(url)
-            except Exception:                # noqa: BLE001 - 开不了浏览器不影响提示
-                pass
+            open_url(url)
     else:
         print(f"  它的地址还没写进锁文件：{lock.path}")
         print("  可以先在任务管理器里结束上一个 python 进程，再重试。")
@@ -226,6 +275,9 @@ def main(argv: list[str]) -> int:
         return already
 
     print(f"  [1/3] 解释器 OK        {PYTHON.relative_to(ROOT)}")
+    if is_elevated():
+        print("        ^ 提醒：当前是「以管理员身份运行」。这个工具不需要管理员，")
+        print("          用普通权限双击更稳；浏览器会用普通权限打开（不会弹 Edge 提示）。")
     if not ensure_frontend():
         return 1
 
@@ -249,7 +301,7 @@ def main(argv: list[str]) -> int:
     print()
 
     if os.environ.get("SHEETSAGE_NO_BROWSER") != "1":
-        open_browser_later(url)
+        open_browser_when_ready(url, port)
 
     command = [str(PYTHON), "-m", "sheetsage2_webui.webui", "--port", str(port), *options]
     try:
