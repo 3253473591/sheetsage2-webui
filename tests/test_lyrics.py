@@ -267,12 +267,16 @@ def test_a_following_char_is_not_eaten_by_the_previous_melisma():
 
 
 def test_melisma_stops_at_the_next_char():
-    """转音只延伸到下一个字的头为止，不会越过它。"""
+    """转音延伸到**下一个字的头**为止，不会越过它。
+
+    窗口终点用下一个字的起点而不是本字的 `end`：TIFA 对一部分字给出接近零的
+    时长（实测粤语"系" 0.02s），按 end 截断会把延音全丢掉（marker 0/72）。
+    """
     notes = spans((0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8))
     chars = [Char("长", 0.0, 0.4), Char("短", 0.6, 0.8)]
     fill = assign_lyrics(notes, chars, tolerance=0.0)
-    # 长 -> note0 为头；note1 落在 [0, 0.4) 内且早于"短"的头(note3) -> 转音
-    assert fill.lyrics == ["长", MELISMA, "", "短"]
+    # 长 -> note0 为头；note1、note2 都在"短"的头(note3)之前 -> 都是转音
+    assert fill.lyrics == ["长", MELISMA, MELISMA, "短"]
 
 
 def test_continuation_marker_picks_by_script():

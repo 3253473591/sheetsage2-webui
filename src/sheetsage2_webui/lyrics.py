@@ -983,11 +983,19 @@ def assign_lyrics(
                            if position + 1 < len(ordered_heads)
                            and _is_latin(ordered_heads[position + 1][1][0]) else None)
         # 先把"属于这个词的延音音"挑出来，再决定哪些写 `+`。
+        # 窗口终点：CJK 用**下一个字的起点**，而不是这个字自己的 end。
+        # TIFA 对一部分字给出接近零的时长（实测粤语《你唔爱我啦》"系" 0.02s），
+        # 按 end 截断会让一个字后面的延音全丢（marker 0/72）。字一直唱到下一个字
+        # 开唱为止，所以用 next_start 才是对的。
+        next_start = (ordered_heads[position + 1][1][1]
+                      if position + 1 < len(ordered_heads) else None)
+        window_end = (next_start if (next_start is not None and not _is_latin(text))
+                      else end)
         candidates: list[int] = []
         for note in order:
             if note <= head or note >= limit or note in taken:
                 continue
-            if spans[note][0] >= end:
+            if spans[note][0] >= window_end:
                 break     # 转音必须落在字的时间窗内；容差只用来找"头"，不放大窗口
             if (next_word_start is not None
                     and spans[note][0] >= next_word_start):
