@@ -9,7 +9,8 @@
  * 5. `lanes` —— 音轨/波形/播放头；
  * 6. `stages` —— 流水线、阶段卡、耗时预估、参数面板；
  * 7. `results` —— 结果面板与卷帘里的歌词/和弦；
- * 8. `panels` —— 日志抽屉、拖拽提示、删除确认/回收站弹层、阶段失败说明、歌词源抽屉。
+ * 8. `panels` —— 日志抽屉、拖拽提示、删除确认/回收站弹层、阶段失败说明、歌词源抽屉；
+ * 9. `batch` —— 批量导入弹层、批次视图与明细表（只用到上面定义的 tokens）。
  *
  * 改样式时：颜色/尺寸**只改 `tokens.css`**；组件样式别写全局选择器。
  * 原文件没有 `@media` 查询，所以这里没有 `responsive.css`——真要加窄屏规则，
@@ -24,3 +25,4 @@
 @import './styles/stages.css';
 @import './styles/results.css';
 @import './styles/panels.css';
+@import './styles/batch.css';

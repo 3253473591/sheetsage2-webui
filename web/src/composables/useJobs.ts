@@ -8,7 +8,7 @@
 
 import { computed, ref } from 'vue'
 import * as api from '@/api'
-import type { JobSnapshot, Lanes, Peaks } from '@/types'
+import type { JobRow, JobSnapshot, Lanes, Peaks, PhaseKey } from '@/types'
 
 export interface JobListDeps {
   /** 出错时交给上层显示：这里不抛，界面别炸。 */
@@ -98,8 +98,35 @@ export function useJobs(deps: JobListDeps) {
   }
 
   /** 清掉"当前工程"的媒体数据（切工程/删工程时别让上一份糊在新工程上）。 */
-  function clearMedia(): void {
-    lanes.value = null
+  function applyRows(rows: JobRow[]): void {
+    /** 用批次轮询拿到的**轻量行**原地更新列表里的状态（不复制出第二份状态）。
+
+    批量视图只轮询批次明细；侧栏的进度/小标签必须跟着它走，否则组头会一直停在
+    "0/4"（`jobs` 只在建工程时拉过一次）。这里只合并"画界面需要的字段"。
+    */
+    const byId = new Map(rows.map((row) => [row.id, row]))
+    jobs.value = jobs.value.map((job) => {
+      const row = byId.get(job.id)
+      if (!row) return job
+      const stages = { ...job.stages }
+      for (const phase of ['transcribe', 'lyrics'] as PhaseKey[]) {
+        const next = row.stages?.[phase]
+        const current = stages[phase]
+        if (!next || !current) continue
+        stages[phase] = {
+          ...current,
+          state: next.state as typeof current.state,
+          progress: next.progress,
+          step: next.step,
+          error: next.error,
+          elapsed_seconds: next.elapsed_seconds,
+        }
+      }
+      return { ...job, state: row.state, stages, elapsed_seconds: row.elapsed_seconds }
+    })
+  }
+
+  function clearMedia(): void {    lanes.value = null
     peaks.value = null
     stemPeaks.value = null
   }
@@ -121,6 +148,7 @@ export function useJobs(deps: JobListDeps) {
     find,
     reload,
     refreshArtifacts,
+    applyRows,
     loadLanes,
     loadPeaks,
     clearMedia,

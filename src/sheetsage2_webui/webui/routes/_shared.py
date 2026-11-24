@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, BinaryIO
@@ -47,6 +48,14 @@ def require_job(deps: ApiDeps, job_id: str) -> Job:
     if job is None:
         raise HTTPException(status_code=404, detail="没有这个工程")
     return job
+
+
+def cleanup_dir(path: Path) -> None:
+    """下载完删掉临时文件所在的目录（备份包 / 批量包可能几十上百 MB，不能一直留着）。
+
+    约定：调用方把文件建在 `tempfile.mkdtemp()` 里，走 `BackgroundTask(cleanup_dir, path)`。
+    """
+    shutil.rmtree(Path(path).parent, ignore_errors=True)
 
 
 def sse_frame(payload: dict[str, Any]) -> bytes:

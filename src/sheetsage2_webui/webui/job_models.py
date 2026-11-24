@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .errors import describe as describe_error
 from .job_errors import JobCancelled
@@ -173,6 +173,9 @@ class Job:
     canceled_at: float | None = None
     #: `output/` 里本来就有的产物目录（不是 WebUI 建的）——只读。
     imported: bool = False
+    #: 批量导入的归属：`{"id", "title"}`。单曲是 `None`。
+    #: **批次不是实体**：列表与统计都从工程的这个字段派生（见 `jobs.batch_of`）。
+    batch: dict[str, Any] | None = None
     #: **墓碑**：这个工程已经从列表里删掉了。收尾线程（`_finish` 之后的写盘）可能还在跑，
     #: 而原子写会 `mkdir(parents=True)`——不认这个标记就会把刚删掉的目录重新建出来。
     #: 只影响写盘，不进快照 / `job.json`。
@@ -291,6 +294,8 @@ class Job:
                 "cancel_requested": self.cancel_requested,
                 # `output/` 里本来就有的产物：只读（不能重跑、不能改参数）
                 "imported": self.imported,
+                # 批量归属（单曲是 null）：分组、批次统计都靠它
+                "batch": dict(self.batch) if self.batch else None,
             }
 
     def metadata(self) -> dict[str, Any]:
@@ -299,6 +304,61 @@ class Job:
         data["output_dir"] = str(self.out_dir)
         data["upload"] = str(self.upload)
         return data
+
+    def row(self) -> dict[str, Any]:
+        """**轻量投影**：列表 / 批量表只需要这些（40 首轮询不能带 `options` 里的 LRC 全文）。
+
+        判据是"侧栏和批量表会不会用到"：状态、进度、错误、时长、批次归属。
+        产物清单、高亮、完整参数一律不给——要看就 `GET /api/jobs/{id}` 拿全量快照。
+        """
+        with self.lock:
+            return {
+                "id": self.id,
+                "name": self.name,
+                "audio": self.audio,
+                "state": self.state,
+                "stage": self.stage,
+                "rev": self.rev,
+                "artifacts_rev": self.artifacts_rev,
+                "created_at": self.created_at,
+                "elapsed_seconds": round(self.elapsed_seconds, 2),
+                "imported": self.imported,
+                "batch": dict(self.batch) if self.batch else None,
+                "duplicate_of": self.duplicate_of,
+                "cancel_requested": self.cancel_requested,
+                "audio_seconds": self._audio_seconds,
+                # 有没有官方歌词（只看有没有，不解析全文——40 行表每秒轮询不起）
+                "has_lrc": bool(str(self.options.get("lyrics_lrc") or "").strip()),
+                "stages": {
+                    key: {
+                        "state": run.state,
+                        "progress": round(run.progress, 4),
+                        "step": run.step,
+                        "error": run.error,
+                        "error_code": run.error_code,
+                        "error_action": run.error_action,
+                        "started_at": run.started_at,
+                        "finished_at": run.finished_at,
+                        "elapsed_seconds": round(run.elapsed_seconds, 2),
+                        "label": run.label,
+                    }
+                    for key, run in self.stages.items()
+                },
+            }
+
+    @property
+    def _audio_seconds(self) -> float | None:
+        """音频多长（秒）：优先体检结果，其次产物摘要。批量表用它算剩余时间。"""
+        for source in (self.audio_info, self.summary, self.highlights):
+            if not isinstance(source, Mapping):
+                continue
+            try:
+                value = float(source.get("duration_seconds") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
 
 
 # --------------------------------------------------------------------- 进度
@@ -382,3 +442,35 @@ class Progress:
 
 
 StageRunner = Callable[[Job, Progress], dict[str, Any]]
+
+
+def batches_of(jobs: Iterable["Job"]) -> list[dict[str, Any]]:
+    """按 `job.batch` 把工程聚成批次（**派生**，没有第二套状态机）。
+
+    一个工程只属于一个批次；没有 `batch` 的是单曲，不出现这里。顺序按批次的
+    `created_at` 倒序（新的在前），行内按创建时间正序（= 文件夹里的顺序）。
+    """
+    groups: dict[str, list[Job]] = {}
+    for job in jobs:
+        if job.batch and job.batch.get("id"):
+            groups.setdefault(str(job.batch["id"]), []).append(job)
+    out: list[dict[str, Any]] = []
+    for batch_id, members in groups.items():
+        # 有 `index`（= 扫描时的文件夹顺序）就按它，老批次退回创建时间。
+        members.sort(key=lambda job: ((job.batch or {}).get("index", 1 << 30), job.created_at))
+        meta = dict(members[0].batch or {})
+        states = [job.state for job in members]
+        out.append({
+            "id": batch_id,
+            "title": str(meta.get("title") or batch_id),
+            "folder": meta.get("folder"),
+            "created_at": min(job.created_at for job in members),
+            "total": len(members),
+            "done": states.count("done"),
+            "failed": states.count("failed"),
+            "running": states.count("running"),
+            "pending": sum(1 for state in states if state in ("queued", DRAFT_STATE)),
+            "job_ids": [job.id for job in members],
+        })
+    out.sort(key=lambda batch: batch["created_at"], reverse=True)
+    return out

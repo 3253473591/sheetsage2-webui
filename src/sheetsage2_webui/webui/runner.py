@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from ..asr import (AsrConfig, normalize_language, parse_lyric_text,
+from ..asr import (AsrConfig, AsrEngine, normalize_language, parse_lyric_text,
                    read_lrc, parsed_sections, sections_from_lab, widen_to_vocals)
 from ..engine import EngineConfig
 from ..fsutil import write_text_atomic
@@ -336,10 +336,7 @@ class RunnerSession:
                      + ("；已按段落跳过前奏/间奏/尾奏" if skipped else ""))
 
         progress.step(*LYRIC_LOAD)
-        if self.free_between_stages and self.engine.loaded:
-            self.engine.release()
-        progress.log(f"识别模型：{Path(str(asr_config.asr_model)).name}")
-        engine = self.asr.get(progress, asr_config)
+        engine = self._lyrics_engine(progress, asr_config, lyrics_source, language)
 
         progress.step(*LYRIC_ASR)
         state: dict[str, Any] = {"lines": 0}
@@ -433,9 +430,39 @@ class RunnerSession:
         progress.detail(**detail)
         return {"detail": detail}
 
+    # ------------------------------------------------- 歌词阶段用哪个引擎
+    def _lyrics_engine(self, progress: Progress, asr_config: AsrConfig,
+                       lyrics_source: Sequence[Any] | None,
+                       language: str | None) -> AsrEngine:
+        """歌词阶段的引擎：**LRC + TIFA 时不加载识别模型**。
 
+        为什么值得单独一支：批量导入通常每首都有 LRC，此时中/英/粤只要随包的 TIFA
+        （40M）逐行对齐，识别模型完全用不上。以前这里无条件 `asr.get()`，等于每首白等
+        一次 6.3G 加载（还顺手把扒谱模型 `release()` 掉，下一首要重新加载 ~15s）。
+        日/韩 LRC 走的 Qwen 对齐器**挂在 ASR 模型里**，所以那两种照常加载。
+        """
+        spare = self._align_only_engine(lyrics_source, asr_config, language)
+        if spare is not None:
+            progress.log("歌词源是 LRC：只用 TIFA 逐行对齐，不加载识别模型"
+                         "（也保住扒谱模型，下一首直接接着跑）")
+            return spare
+        if self.free_between_stages and self.engine.loaded:
+            self.engine.release()
+        progress.log(f"识别模型：{Path(str(asr_config.asr_model)).name}")
+        return self.asr.get(progress, asr_config)
 
-
+    @staticmethod
+    def _align_only_engine(lyrics_source: Sequence[Any] | None, asr_config: AsrConfig,
+                           language: str | None) -> AsrEngine | None:
+        """能只靠 TIFA 对齐就返回一个**没加载**的 `AsrEngine`，否则 `None`。"""
+        if not lyrics_source:
+            return None
+        text = "\n".join(str(getattr(line, "text", "") or "") for line in lyrics_source)
+        spare = AsrEngine(asr_config)
+        if spare.lrc_aligner_kind(text, language) != "tifa":
+            return None
+        ready, _reason = spare.alignment_ready()
+        return spare if ready else None
 
 
 def default_runners(**options: Any) -> dict[str, StageRunner]:

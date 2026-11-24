@@ -42,6 +42,15 @@
   display: block;
   margin-bottom: 6px;
 }
+/* 正文按段落排：`<b>` 是块级，混在正文里会把一句话拆成好几行 */
+.empty-hint p {
+  margin: 0;
+}
+.empty-hint em {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text);
+}
 
 .proj-head {
   display: flex;

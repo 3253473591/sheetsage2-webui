@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SheetSage2 Studio · 批量页交互原型</title>
+<!--
+  批量页交互原型（静态页面，数据是假的）
+
+  要看的三件事：
+  1. 批次是「容器」、工程仍是「原子」—— 侧栏分组 + 主区批次视图，点行进现有工程页；
+  2. 「新建批量」弹层只回答一个问题：这 40 首里哪些有词、哪些没词、哪些会出问题；
+  3. 进度不撒谎 —— 总进度 = 完成首数/总数，不用加权平均百分比。
+
+  交互（都是真的）：
+  - 扫描 → 预览表 → 开始 40 首 → 自动一首接一首跑（串行）；
+  - 暂停 / 继续 / 停止；失败行重试；批量下载（含包内清单预览）；
+  - 侧栏批次组可折叠；右上角「◐」切深色。
+-->
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif; }
+  :root {
+    --bg: #f3f4f6; --card: #fff; --line: #e5e7eb; --line-soft: #f3f4f6;
+    --primary: #2563eb; --primary-l: #eff6ff; --primary-b: #bfdbfe;
+    --ok: #059669; --ok-l: #ecfdf5;
+    --warn: #d97706; --warn-l: #fffbeb;
+    --danger: #dc2626; --danger-l: #fef2f2;
+    --text: #1f2937; --muted: #6b7280; --light: #9ca3af;
+    --shadow: 0 1px 2px rgba(0,0,0,.05);
+  }
+  [data-theme="dark"] {
+    --bg: #111827; --card: #1f2937; --line: #374151; --line-soft: #2b3648;
+    --primary: #60a5fa; --primary-l: #1e3a5f; --primary-b: #2563eb;
+    --ok: #34d399; --ok-l: #064e3b;
+    --warn: #fbbf24; --warn-l: #4a3410;
+    --danger: #f87171; --danger-l: #4a1d1d;
+    --text: #e5e7eb; --muted: #9ca3af; --light: #6b7280;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--text); font-size: 13px;
+         display: flex; flex-direction: column; overflow: hidden; }
+  button { font: inherit; cursor: pointer; color: inherit; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+
+  /* ===== 导航 ===== */
+  .navbar { flex: 0 0 48px; display: grid; grid-template-columns: 1fr auto 1fr;
+            align-items: center; background: var(--card); border-bottom: 1px solid var(--line); padding: 0 16px; }
+  .logo { font-weight: 700; font-size: 15px; }
+  .logo span { color: var(--primary); }
+  .nav-tabs { display: flex; background: var(--bg); border-radius: 4px; padding: 2px; }
+  .nav-tab { padding: 4px 12px; border-radius: 3px; font-size: 12px; color: var(--muted);
+             border: none; background: none; }
+  .nav-tab.active { background: var(--card); color: var(--primary); font-weight: 600; box-shadow: var(--shadow); }
+  .nav-right { justify-self: end; display: flex; gap: 8px; align-items: center; }
+  .nav-meta { font-size: 11px; color: var(--light); display: flex; gap: 10px; }
+  .theme-toggle { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
+                  background: var(--card); color: var(--muted); }
+  .proto-badge { font-size: 10.5px; padding: 2px 7px; border-radius: 10px;
+                 background: var(--warn-l); color: var(--warn); border: 1px solid transparent; }
+
+  /* ===== 骨架 ===== */
+  .app { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px 1fr; }
+  .sidebar { background: var(--card); border-right: 1px solid var(--line);
+             display: flex; flex-direction: column; min-height: 0; }
+  .sb-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px 8px; }
+  .sb-title { font-weight: 700; }
+  .sb-title span { color: var(--light); font-weight: normal; font-size: 11px; margin-left: 4px; }
+  .btn-new { background: var(--primary); color: #fff; border: none; border-radius: 4px;
+             padding: 4px 10px; font-size: 12px; }
+  .sb-drop { margin: 0 14px 10px; border: 1px dashed var(--line); border-radius: 6px; padding: 9px;
+             text-align: center; font-size: 11px; color: var(--light); background: var(--bg); line-height: 1.5; }
+  .sb-drop button { background: none; border: none; color: var(--primary); font-size: 11px; padding: 0; }
+  .proj-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 12px; }
+
+  /* 批次分组（侧栏） */
+  .sb-group { margin-bottom: 6px; }
+  .sb-group-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 5px;
+                   cursor: pointer; user-select: none; }
+  .sb-group-head:hover { background: var(--line-soft); }
+  .sb-caret { font-size: 9px; color: var(--light); width: 10px; }
+  .sb-group-name { font-size: 11.5px; font-weight: 700; color: var(--muted);
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .sb-group-count { font-size: 10px; color: var(--light); }
+  .sb-mini { width: 44px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; display: flex; }
+  .sb-mini i { display: block; height: 100%; }
+  .sb-mini i.ok { background: var(--ok); }
+  .sb-mini i.bad { background: var(--danger); }
+  .sb-group-body { display: flex; flex-direction: column; }
+  .sb-group.collapsed .sb-group-body { display: none; }
+
+  .proj-item { padding: 6px 10px; border-radius: 6px; margin-bottom: 1px; border: 1px solid transparent;
+               cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .proj-item:hover { background: var(--line-soft); }
+  .proj-item.active { background: var(--primary-l); border-color: var(--primary-b); }
+  .pi-no { font-size: 9.5px; color: var(--light); width: 16px; text-align: right; flex: 0 0 auto; }
+  .pi-name { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden;
+             text-overflow: ellipsis; flex: 1; }
+  .pi-lrc { font-size: 9px; color: var(--light); flex: 0 0 auto; }
+  .pi-lrc.on { color: var(--primary); }
+  .st { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--line-soft);
+        color: var(--light); white-space: nowrap; flex: 0 0 auto; }
+  .st.ok { background: var(--ok-l); color: var(--ok); }
+  .st.run { background: var(--primary-l); color: var(--primary); }
+  .st.bad { background: var(--danger-l); color: var(--danger); }
+  .sb-sub { font-size: 10px; color: var(--light); padding: 8px 10px 4px; letter-spacing: .5px; }
+
+  /* ===== 主区 ===== */
+  .main { min-height: 0; display: flex; flex-direction: column; }
+  .workspace { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px; }
+  .ws-inner { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 6px; }
+  .btn-primary { background: var(--primary); color: #fff; border: none; border-radius: 4px;
+                 padding: 6px 14px; font-size: 12px; font-weight: 500; }
+  .btn-secondary { background: var(--card); border: 1px solid var(--line); border-radius: 4px;
+                   padding: 6px 12px; font-size: 12px; color: var(--text); }
+  .btn-secondary.ghost { border-color: transparent; color: var(--muted); }
+  .btn-secondary.danger { color: var(--danger); border-color: var(--danger); }
+  .link { background: none; border: none; color: var(--primary); font-size: 11px; padding: 0; }
+  .link.muted { color: var(--muted); }
+
+  /* 批次头卡 */
+  .batch-head { padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 10px; }
+  .bh-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .bh-title { font-size: 16px; font-weight: 700; }
+  .bh-sub { font-size: 11px; color: var(--light); }
+  .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line);
+          color: var(--muted); background: var(--bg); }
+  .chip.blue { color: var(--primary); background: var(--primary-l); border-color: transparent; }
+  .bh-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+
+  .segbar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; display: flex; }
+  .segbar i { display: block; height: 100%; transition: width .3s; }
+  .segbar i.ok { background: var(--ok); }
+  .segbar i.bad { background: var(--danger); }
+  .segbar i.cur { background: var(--primary); background-image: repeating-linear-gradient(
+      -45deg, rgba(255,255,255,.28) 0 6px, rgba(255,255,255,0) 6px 12px); }
+  .bh-stats { display: flex; gap: 16px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+  .bh-stats b { color: var(--text); font-size: 12.5px; }
+  .bh-note { font-size: 11px; color: var(--muted); }
+
+  .banner { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border-radius: 5px;
+            font-size: 11.5px; line-height: 1.55; border: 1px solid transparent; }
+  .banner.warn { background: var(--warn-l); color: var(--warn); }
+  .banner.info { background: var(--primary-l); color: var(--primary); }
+  .banner b { font-weight: 600; }
+
+  /* 明细表 */
+  .btable { overflow: hidden; }
+  .btable-head, .brow { display: grid;
+      grid-template-columns: 34px minmax(170px,1fr) 56px 108px 108px 56px 76px;
+      align-items: center; gap: 8px; padding: 0 12px; }
+  .btable-head { height: 30px; font-size: 10.5px; color: var(--light); background: var(--bg);
+                 border-bottom: 1px solid var(--line); letter-spacing: .4px; }
+  .btable-body { max-height: 52vh; overflow-y: auto; }
+  .brow { height: 34px; border-bottom: 1px solid var(--line-soft); cursor: pointer; position: relative; }
+  .brow:hover { background: var(--line-soft); }
+  .brow.cur { background: var(--primary-l); }
+  .brow.cur::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--primary); }
+  .brow.fail { background: var(--danger-l); }
+  .brow .no { font-size: 10px; color: var(--light); text-align: right; }
+  .brow .nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+              display: flex; align-items: center; gap: 7px; }
+  .brow .nm span.t { overflow: hidden; text-overflow: ellipsis; }
+  .brow .nm small { color: var(--danger); font-size: 10px; flex: 0 0 auto; }
+  .lrcchip { font-size: 9.5px; padding: 0 5px; border-radius: 8px; flex: 0 0 auto;
+             border: 1px solid transparent; line-height: 15px; }
+  .lrcchip.on { color: var(--primary); background: var(--primary-l); }
+  .lrcchip.off { color: var(--light); background: var(--line-soft); }
+  .lrcchip.warn { color: var(--warn); background: var(--warn-l); }
+  .brow .ph { font-size: 10.5px; color: var(--light); display: flex; align-items: center; gap: 5px; }
+  .brow .ph.done { color: var(--ok); }
+  .brow .ph.bad { color: var(--danger); }
+  .minibar { width: 34px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .minibar i { display: block; height: 100%; background: var(--primary); transition: width .4s; }
+  .brow .tm { font-size: 10.5px; color: var(--light); text-align: right; }
+  .brow .op { text-align: right; }
+  .brow .op button { background: none; border: none; font-size: 10.5px; color: var(--primary); }
+
+  /* 完成小结 */
+  .summary { padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .summary .big { font-size: 13px; font-weight: 600; }
+  .summary .sub { font-size: 11px; color: var(--light); }
+  .summary .acts { margin-left: auto; display: flex; gap: 8px; }
+
+  /* ===== 弹层 ===== */
+  .overlay { position: fixed; inset: 0; background: rgba(17,24,39,.55); display: none;
+             align-items: center; justify-content: center; z-index: 40; padding: 24px; }
+  .overlay.on { display: flex; }
+  .dialog { background: var(--card); border-radius: 8px; width: min(920px, 100%); max-height: 90vh;
+            display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
+  .dlg-head { display: flex; align-items: center; padding: 14px 18px 10px; }
+  .dlg-title { font-size: 14px; font-weight: 700; }
+  .dlg-close { margin-left: auto; background: none; border: none; color: var(--light); font-size: 16px; }
+  .dlg-body { padding: 0 18px 8px; overflow-y: auto; }
+  .dlg-foot { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; gap: 8px;
+              align-items: center; background: var(--bg); }
+  .dlg-foot .spacer { flex: 1; }
+
+  .path-row { display: flex; gap: 8px; align-items: center; }
+  .path-input { flex: 1; background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+                padding: 7px 10px; font-size: 12px; color: var(--text); }
+  .recent { margin-top: 6px; font-size: 10.5px; color: var(--light); }
+  .recent button { background: none; border: none; color: var(--muted); text-decoration: underline;
+                   font-size: 10.5px; padding: 0 4px; }
+  .scan-summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted);
+                  padding: 10px 0 8px; }
+  .scan-summary b { color: var(--text); }
+  .ptable { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .ptable-head, .prow { display: grid; grid-template-columns: 30px minmax(120px,1fr) 70px 56px 120px;
+                        gap: 8px; align-items: center; padding: 0 10px; }
+  .ptable-head { height: 28px; background: var(--bg); font-size: 10.5px; color: var(--light);
+                 border-bottom: 1px solid var(--line); }
+  .ptable-body { max-height: 32vh; overflow-y: auto; }
+  .prow { height: 30px; font-size: 11.5px; border-bottom: 1px solid var(--line-soft); }
+  .prow:last-child { border-bottom: none; }
+  .prow .no { color: var(--light); font-size: 10px; text-align: right; }
+  .prow .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prow .sz, .prow .du { color: var(--light); font-size: 10.5px; }
+
+  .dlg-params { margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  .dlg-params summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+  .prow2 { display: grid; grid-template-columns: 52px 1fr; gap: 6px 10px; align-items: center;
+           font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .btn-group { display: flex; gap: 4px; flex-wrap: wrap; }
+  .tag-btn { padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); background: var(--card);
+             font-size: 11px; color: var(--muted); }
+  .tag-btn.active { background: var(--primary-l); border-color: var(--primary-b); color: var(--primary); font-weight: 500; }
+  .ro { font-size: 11px; color: var(--muted); background: var(--bg); border: 1px dashed var(--line);
+        border-radius: 4px; padding: 3px 8px; display: inline-block; }
+
+  /* ===== 下载弹层 ===== */
+  .zip-preview { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; }
+  .zip-row { display: flex; gap: 8px; padding: 5px 10px; font-size: 11.5px; border-bottom: 1px solid var(--line-soft); }
+  .zip-row:last-child { border-bottom: none; }
+  .zip-row .ic { width: 14px; color: var(--primary); }
+  .zip-row .sz { margin-left: auto; color: var(--light); font-size: 10.5px; }
+  .zip-row.skipped { color: var(--danger); background: var(--danger-l); }
+  .zip-row.skipped .ic { color: var(--danger); }
+
+  /* ===== 吐司 ===== */
+  .toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column;
+            gap: 8px; z-index: 60; }
+  .toast { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--primary);
+           border-radius: 5px; padding: 9px 12px; font-size: 11.5px; box-shadow: 0 6px 20px rgba(0,0,0,.12);
+           animation: slide .18s ease-out; max-width: 320px; }
+  .toast.ok { border-left-color: var(--ok); }
+  .toast.warn { border-left-color: var(--warn); }
+  @keyframes slide { from { transform: translateY(6px); opacity: 0; } }
+
+  .proto-note { font-size: 10.5px; color: var(--light); padding: 0 2px 2px; }
+</style>
+</head>
+<body>
+
+<header class="navbar">
+  <div class="logo">SheetSage2 <span>Studio</span></div>
+  <div class="nav-tabs">
+    <button class="nav-tab active">工作台</button>
+    <button class="nav-tab" disabled title="编辑器还没做">编辑</button>
+  </div>
+  <div class="nav-right">
+    <span class="proto-badge">交互原型 · 数据是假的</span>
+    <div class="nav-meta">
+      <span>扒谱 SheetSage2</span>
+      <span>歌词 Qwen3-ASR-1.7B</span>
+      <span id="nav-queue">排队 28</span>
+      <span>剩余 312.4 GB</span>
+    </div>
+    <button class="theme-toggle" id="theme" title="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="app">
+  <!-- ================= 侧栏 ================= -->
+  <aside class="sidebar">
+    <div class="sb-head">
+      <div class="sb-title">工程<span id="sb-count">42</span></div>
+      <button class="btn-new">+ 新建</button>
+    </div>
+    <div class="sb-drop">
+      拖入音频即新建工程<br>
+      wav / mp3 / flac · 用混音原曲<br>
+      <button id="open-import">批量导入文件夹…</button>
+    </div>
+
+    <div class="proj-list" id="sb-list"><!-- 由脚本渲染 --></div>
+  </aside>
+
+  <!-- ================= 主区 ================= -->
+  <main class="main">
+    <div class="workspace">
+      <div class="ws-inner">
+        <div class="proto-note">
+          原型说明：静态页面，数据是假的。① 点「批量导入文件夹…」看弹层 → 扫描 → 开始；
+          ② 跑起来后点「暂停/继续」；③ 跑完点「打包下载」。
+        </div>
+
+        <!-- 批次头卡 -->
+        <section class="card batch-head" id="batch-head">
+          <div class="bh-top">
+            <div class="bh-title" id="bh-title">11-24 批量 · 40 首</div>
+            <span class="chip blue" id="bh-mode" title="一台显卡同时跑两首只会一起变慢，P1 固定串行">串行</span>
+            <span class="chip" id="bh-dir">D:\音乐\2026-11</span>
+            <div class="bh-actions" id="bh-actions"></div>
+          </div>
+          <div class="segbar" id="bh-bar">
+            <i class="ok" style="width:0%"></i><i class="bad" style="width:0%"></i><i class="cur" style="width:0%"></i>
+          </div>
+          <div class="bh-stats" id="bh-stats"></div>
+          <div class="banner warn" id="bh-warn" style="display:none"></div>
+        </section>
+
+        <!-- 明细表 -->
+        <section class="card btable">
+          <div class="btable-head">
+            <div style="text-align:right">#</div><div>歌名</div><div>时长</div>
+            <div>扒谱</div><div>歌词</div><div style="text-align:right">用时</div><div style="text-align:right">操作</div>
+          </div>
+          <div class="btable-body" id="btable-body"><!-- 由脚本渲染 --></div>
+        </section>
+
+        <!-- 完成小结 -->
+        <section class="card summary" id="summary" style="display:none"></section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ================= 批量导入弹层 ================= -->
+<div class="overlay" id="import-overlay">
+  <div class="dialog">
+    <div class="dlg-head">
+      <div class="dlg-title">批量导入</div>
+      <button class="dlg-close" data-close="import-overlay">✕</button>
+    </div>
+    <div class="dlg-body">
+      <div class="path-row">
+        <input class="path-input" id="path-input" value="D:\音乐\2026-11" spellcheck="false">
+        <button class="btn-secondary" id="browse-btn" title="本地工具：在服务进程里弹原生目录选择器；tkinter 不可用时置灰">浏览…</button>
+        <button class="btn-primary" id="scan-btn">扫描</button>
+      </div>
+      <div class="recent">
+        最近：<button data-path="D:\音乐\2026-10">D:\音乐\2026-10</button>
+        <button data-path="D:\音乐\2026-09">D:\音乐\2026-09</button>
+      </div>
+
+      <div id="scan-result" style="display:none">
+        <div class="scan-summary" id="scan-summary"></div>
+        <div class="banner warn" id="scan-warn" style="margin-bottom:8px"></div>
+        <div class="ptable">
+          <div class="ptable-head">
+            <div style="text-align:right">#</div><div>歌名</div><div>大小</div><div>时长</div><div>歌词源</div>
+          </div>
+          <div class="ptable-body" id="ptable-body"></div>
+        </div>
+
+        <details class="dlg-params" open>
+          <summary>参数（这批统一）</summary>
+          <div class="prow2">
+            <span>扒谱</span>
+            <div class="btn-group">
+              <button class="tag-btn active">BF16 快速</button><button class="tag-btn">FP32 精确</button>
+              <button class="tag-btn active">自动 · GPU</button><button class="tag-btn">CPU</button>
+              <button class="tag-btn active">整首</button><button class="tag-btn">前 30 秒</button>
+              <button class="tag-btn active">128 分三连音网格</button><button class="tag-btn">不量化</button>
+            </div>
+            <span>歌词</span>
+            <div class="btn-group">
+              <button class="tag-btn active">1.7B</button><button class="tag-btn">0.6B</button>
+              <button class="tag-btn active">干声（推荐）</button><button class="tag-btn">混音原曲</button>
+              <button class="tag-btn active">只跑唱段</button><button class="tag-btn">全部段落</button>
+            </div>
+            <span>歌词源</span>
+            <div><span class="ro" id="param-lrc">按文件夹里的同名 LRC（32/40）——这一行只读</span></div>
+          </div>
+        </details>
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <span class="proto-note" id="foot-note"></span>
+      <span class="spacer"></span>
+      <button class="btn-secondary" data-close="import-overlay">取消</button>
+      <button class="btn-primary" id="start-btn" disabled>开始 40 首</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 批量下载弹层 ================= -->
+<div class="overlay" id="zip-overlay">
+  <div class="dialog" style="width:min(620px,100%)">
+    <div class="dlg-head">
+      <div class="dlg-title" id="zip-title">打包下载</div>
+      <button class="dlg-close" data-close="zip-overlay">✕</button>
+    </div>
+    <div class="dlg-body">
+      <div class="scan-summary" style="padding-top:0" id="zip-summary"></div>
+      <div class="zip-preview" id="zip-preview"></div>
+    </div>
+    <div class="dlg-foot">
+      <span class="proto-note">解压后每首一个 .svp，直接拖进 Synthesizer V。</span>
+      <span class="spacer"></span>
+      <button class="btn-secondary" data-close="zip-overlay">取消</button>
+      <button class="btn-primary" id="zip-download">下载 zip</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+/* ------------------------------------------------------------------ 假数据
+   40 首：32 首带 LRC（含 1 首 TXT、1 首日语 LRC），8 首没有词。
+   顺序 = 文件夹里的顺序（按文件名排）。 */
+const NAMES = [
+  ['富士山下', 'flac', 'lrc', 252], ['爱情转移', 'flac', 'lrc', 242], ['皮囊', 'flac', 'none', 238],
+  ['君が僕の心臓じゃないせいで', 'flac', 'ja', 220], ['光芒', 'flac', 'lrc', 231], ['相思', 'flac', 'lrc', 268],
+  ['朋友的酒', 'flac', 'lrc', 254], ['壁上观', 'flac', 'lrc', 246], ['旷古回响', 'flac', 'lrc', 195],
+  ['将军行', 'flac', 'lrc', 233], ['巴拉莱卡', 'flac', 'lrc', 241], ['不由己', 'flac', 'lrc', 228],
+  ['爱x无限大', 'mp3', 'lrc', 214], ['我本将心向明月', 'flac', 'txt', 236], ['The Phoenix', 'flac', 'lrc', 245],
+  ['Oracle', 'flac', 'lrc', 219], ['Believer', 'flac', 'lrc', 204], ['Digital World', 'flac', 'lrc', 227],
+  ['My Love', 'flac', 'none', 240], ['Innocence', 'flac', 'lrc', 231], ['梦不落', 'mp3', 'lrc', 198],
+  ['快乐崇拜', 'flac', 'lrc', 226], ['使一颗心免于哀伤', 'flac', 'lrc', 222], ['希望有羽毛和翅膀', 'flac', 'lrc', 208],
+  ['妄语人间', 'flac', 'lrc', 249], ['新·与天齐', 'flac', 'none', 217], ['翦玉令', 'flac', 'lrc', 233],
+  ['堕', 'mp3', 'none', 196], ['Miss Americana', 'flac', 'lrc', 243], ['The Wellerman', 'flac', 'lrc', 232],
+  ['Poison', 'flac', 'none', 218], ['斯ロウリー', 'flac', 'none', 207], ['死にゆく季節のきみへ', 'flac', 'none', 264],
+  ['Late Night Talking', 'flac', 'lrc', 211], ['As It Was', 'flac', 'lrc', 203], ['Flowers', 'flac', 'none', 198],
+  ['Anti-Hero', 'flac', 'lrc', 224], ['Shivers', 'flac', 'lrc', 216], ['Bad Habits', 'flac', 'lrc', 229],
+  ['Perfect', 'flac', 'lrc', 258],
+];
+const LRC_LINES = { lrc: [48, 52, 44, 61, 39, 55], txt: 42, ja: 36 };
+
+/** 每条：{ name, sizeMB, dur, lrc, state, ph, p, elapsed, error } */
+const rows = NAMES.map(([name, ext, lrc, dur], index) => ({
+  index: index + 1,
+  name,
+  ext,
+  sizeMB: Math.round(dur * 0.115 * 10) / 10,
+  dur,
+  lrc,
+  state: 'pending',        // pending | running | done | failed
+  ph: 'transcribe',        // 当前阶段
+  p: 0,                    // 当前阶段进度 0..1
+  elapsed: 0,
+  error: '',
+}));
+
+/* 故意让第 19 首在歌词阶段失败（真实世界最常见的一种：干声对不上） */
+const FAIL_AT = 19;
+
+const state = { running: false, paused: false, done: false, tick: null, started: 0, expanded: true };
+
+/* ------------------------------------------------------------------ 工具 */
+const $ = (id) => document.getElementById(id);
+const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const fmtLeft = (s) => s >= 3600 ? `${(s / 3600).toFixed(1)} 小时` : `${Math.max(1, Math.round(s / 60))} 分钟`;
+/** 一段总时长（"63:49" 这种写法在批量里读不动，换成"1 小时 4 分"）。 */
+const fmtSpan = (s) => {
+  const minutes = Math.round(s / 60);
+  if (minutes < 60) return `${Math.max(1, minutes)} 分钟`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+};
+
+function lrcLabel(row) {
+  const lines = LRC_LINES.lrc[row.index % 6];
+  if (row.lrc === 'lrc') return { short: `LRC ${lines}`, text: `LRC ${lines} 行`, cls: 'on' };
+  if (row.lrc === 'txt') return { short: 'TXT', text: 'TXT · 无时间戳', cls: 'warn' };
+  if (row.lrc === 'ja') return { short: '日语', text: '日语 · 退回识别', cls: 'warn' };
+  return { short: '无词', text: '无 · 将走识别', cls: 'off' };
+}
+function stats() {
+  const done = rows.filter((r) => r.state === 'done').length;
+  const failed = rows.filter((r) => r.state === 'failed').length;
+  const running = rows.find((r) => r.state === 'running');
+  return { done, failed, running, total: rows.length, left: rows.length - done - failed };
+}
+const AVG_SECONDS = 78;   // 一首歌（串行）平均耗时，纯假数
+
+function toast(text, tone = '') {
+  const el = document.createElement('div');
+  el.className = `toast ${tone}`;
+  el.textContent = text;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+/* ------------------------------------------------------------------ 侧栏 */
+function renderSidebar() {
+  const s = stats();
+  const okWidth = (s.done / s.total) * 100;
+  const badWidth = (s.failed / s.total) * 100;
+  const expanded = state.expanded;
+
+  const members = rows.map((r) => `
+    <div class="proj-item" data-row="${r.index}" title="点开这个工程">
+      <span class="pi-no">${r.index}</span>
+      <span class="pi-name">${escapeHtml(r.name)}</span>
+      <span class="pi-lrc ${r.lrc === 'lrc' ? 'on' : ''}">${r.lrc === 'lrc' ? '词' : r.lrc === 'none' ? '' : '词!'}</span>
+      ${pillFor(r)}
+    </div>`).join('');
+
+  $('sb-list').innerHTML = `
+    <div class="sb-group ${expanded ? '' : 'collapsed'}" id="sb-group">
+      <div class="sb-group-head" id="sb-group-head">
+        <span class="sb-caret">${expanded ? '▾' : '▸'}</span>
+        <span class="sb-group-name">11-24 批量</span>
+        <span class="sb-group-count">${s.done}/${s.total}</span>
+        <span class="sb-mini"><i class="ok" style="width:${okWidth}%"></i><i class="bad" style="width:${badWidth}%"></i></span>
+      </div>
+      <div class="sb-group-body">${members}</div>
+    </div>
+    <div class="sb-sub">单曲</div>
+    <div class="proj-item"><span class="pi-no"></span><span class="pi-name">旷古回响（重跑）</span><span class="st ok">完成</span></div>
+    <div class="proj-item"><span class="pi-no"></span><span class="pi-name">测试 · 前 30 秒</span><span class="st">待开始</span></div>
+  `;
+  $('sb-count').textContent = String(42);
+  $('sb-group-head').onclick = () => {
+    state.expanded = !state.expanded;
+    renderSidebar();
+  };
+}
+
+function pillFor(row) {
+  if (row.state === 'done') return `<span class="st ok">✓</span>`;
+  if (row.state === 'failed') return `<span class="st bad">✗</span>`;
+  if (row.state === 'running') return `<span class="st run">${row.ph === 'transcribe' ? '扒谱' : '歌词'}</span>`;
+  return `<span class="st">待跑</span>`;
+}
+
+/* ------------------------------------------------------------------ 主区 */
+function renderHead() {
+  const s = stats();
+  const okWidth = (s.done / s.total) * 100;
+  const badWidth = (s.failed / s.total) * 100;
+  const curWidth = (1 / s.total) * 100;
+  const bars = $('bh-bar').children;
+  bars[0].style.width = `${okWidth}%`;
+  bars[1].style.width = `${badWidth}%`;
+  bars[2].style.width = s.running ? `${curWidth}%` : '0%';
+
+  const leftSeconds = s.left * AVG_SECONDS;
+  $('bh-stats').innerHTML = `
+    <span><b>${s.done}</b> / ${s.total} 完成</span>
+    ${s.failed ? `<span style="color:var(--danger)"><b>${s.failed}</b> 首失败</span>` : ''}
+    ${s.left ? `<span>剩 <b>${s.left}</b> 首</span>` : ''}
+    ${s.running ? `<span>当前：<b>${escapeHtml(s.running.name)}</b> · ${s.running.ph === 'transcribe' ? '扒谱' : '歌词'} ${Math.round(s.running.p * 100)}%</span>` : ''}
+    ${s.left ? `<span>预计还剩 <b>${fmtLeft(leftSeconds)}</b></span>` : ''}
+    <span>已用 <b>${fmtSpan(elapsedTotal())}</b></span>
+  `;
+
+  $('nav-queue').textContent = s.left ? `排队 ${s.left}` : '';
+
+  const actions = [];
+  if (!state.done) {
+    actions.push(`<button class="btn-secondary" id="act-pause">${state.paused ? '继续' : '暂停'}</button>`);
+    actions.push(`<button class="btn-secondary danger" id="act-stop">停止</button>`);
+  }
+  const failed = s.failed;
+  if (failed) actions.push(`<button class="btn-secondary" id="act-retry">重试失败的 ${failed} 首</button>`);
+  if (s.done || (state.done && s.done)) {
+    actions.push(`<button class="btn-primary" id="act-zip">打包下载 ${s.done} 个 SVP</button>`);
+  }
+  $('bh-actions').innerHTML = actions.join('');
+  if ($('act-pause')) $('act-pause').onclick = togglePause;
+  if ($('act-stop')) $('act-stop').onclick = stopAll;
+  if ($('act-retry')) $('act-retry').onclick = retryFailed;
+  if ($('act-zip')) $('act-zip').onclick = openZip;
+
+  const warn = $('bh-warn');
+  const noLrc = rows.filter((r) => r.lrc !== 'lrc').length;
+  if (state.done && s.failed) {
+    warn.style.display = '';
+    warn.className = 'banner warn';
+    warn.innerHTML = `<b>${s.failed} 首没跑完</b>：点「重试失败的」只重排这几首，已经好的不会重跑。`;
+  } else if (noLrc >= 8 && !state.done) {
+    warn.style.display = '';
+    warn.className = 'banner info';
+    warn.innerHTML = `<b>${noLrc} 首没有同名 LRC</b>：这些会走语音识别——比精确对齐慢，词也可能不对。`;
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+function elapsedTotal() {
+  return Math.round(rows.reduce((sum, r) => sum + r.elapsed, 0) / 1);
+}
+
+function renderTable() {
+  $('btable-body').innerHTML = rows.map((r) => {
+    const lrc = lrcLabel(r);
+    return `
+      <div class="brow ${r.state === 'running' ? 'cur' : ''} ${r.state === 'failed' ? 'fail' : ''}" data-row="${r.index}">
+        <div class="no">${r.index}</div>
+        <div class="nm">
+          <span class="t">${escapeHtml(r.name)}</span>
+          <span class="lrcchip ${lrc.cls}">${lrc.short}</span>
+          ${r.state === 'failed' ? `<small>${escapeHtml(r.error)}</small>` : ''}
+        </div>
+        <div class="tm" style="text-align:left;color:var(--muted)">${fmtTime(r.dur)}</div>
+        ${stageCell(r, 'transcribe')}
+        ${stageCell(r, 'lyrics')}
+        <div class="tm">${r.elapsed ? fmtTime(r.elapsed) : '—'}</div>
+        <div class="op">${r.state === 'failed' ? '<button data-retry="1">重试</button>' : '<button data-open="1">打开</button>'}</div>
+      </div>`;
+  }).join('');
+
+  [...$('btable-body').querySelectorAll('[data-retry]')].forEach((btn) => {
+    btn.onclick = (ev) => { ev.stopPropagation(); retryOne(Number(btn.closest('.brow').dataset.row)); };
+  });
+  [...$('btable-body').querySelectorAll('[data-open]')].forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      toast(`打开工程：${rows[Number(btn.closest('.brow').dataset.row) - 1].name}（现有工程页）`);
+    };
+  });
+  [...$('btable-body').querySelectorAll('.brow')].forEach((el) => {
+    el.onclick = () => toast(`打开工程：${rows[Number(el.dataset.row) - 1].name}（现有工程页）`);
+  });
+}
+
+function stageCell(row, phase) {
+  if (row.state === 'pending') return `<div class="ph">—</div>`;
+  if (row.state === 'done') return `<div class="ph done">✓ 完成</div>`;
+  if (row.state === 'failed') {
+    if (phase === 'transcribe') return `<div class="ph done">✓ 完成</div>`;
+    return `<div class="ph bad">✗ 失败</div>`;
+  }
+  const order = ['transcribe', 'lyrics'];
+  const mine = order.indexOf(phase);
+  const current = order.indexOf(row.ph);
+  if (mine < current) return `<div class="ph done">✓ 完成</div>`;
+  if (mine > current) return `<div class="ph">—</div>`;
+  return `<div class="ph"><span class="minibar"><i style="width:${Math.round(row.p * 100)}%"></i></span>${Math.round(row.p * 100)}%</div>`;
+}
+
+/* ------------------------------------------------------------------ 推进（假推理） */
+let cursor = 0;
+
+function nextPending() {
+  // 正在跑的那一首优先（否则每一拍都会新开一首，页面上一堆 14%）
+  const running = rows.findIndex((r) => r.state === 'running');
+  if (running >= 0) return running;
+  return rows.findIndex((r) => r.state === 'pending');
+}
+
+function tick() {
+  if (!state.running || state.paused) return;
+  const index = nextPending();
+  if (index < 0) {
+    finishAll();
+    return;
+  }
+  const row = rows[index];
+  if (row.state === 'pending') {
+    row.state = 'running';
+    row.ph = 'transcribe';
+    row.p = 0;
+  }
+  // 当前阶段推进：扒谱大约占 2/3 的时间
+  row.p = Math.min(1, row.p + (row.ph === 'transcribe' ? 0.14 : 0.24));
+  row.elapsed += 1.2;
+  if (row.p >= 1) {
+    if (row.ph === 'transcribe') {
+      row.ph = 'lyrics';
+      row.p = 0;
+    } else if (row.index === FAIL_AT) {
+      row.state = 'failed';
+      row.error = '没有拿到逐字时间戳';
+      toast(`第 ${row.index} 首失败：没有拿到逐字时间戳`, 'warn');
+      startNext();
+    } else {
+      row.state = 'done';
+      row.p = 1;
+      startNext();
+    }
+  }
+  render();
+  state.tick = setTimeout(tick, 420);
+}
+
+/** 一首跑完就立刻接上下一首（不留下"谁都没在跑"的空窗）。 */
+function startNext() {
+  const next = rows.find((r) => r.state === 'pending');
+  if (!next) return;
+  next.state = 'running';
+  next.ph = 'transcribe';
+  next.p = 0.02;
+  next.elapsed = 0;
+}
+
+function finishAll() {
+  state.running = false;
+  state.done = true;
+  clearTimeout(state.tick);
+  render();
+  renderSummary();
+  toast('40 首跑完了（39 成功 · 1 失败）', 'ok');
+}
+
+function renderSummary() {
+  const s = stats();
+  const box = $('summary');
+  box.style.display = '';
+  box.innerHTML = `
+    <div>
+      <div class="big">${s.done}/${s.total} 完成 · 用时 ${fmtSpan(elapsedTotal())}</div>
+      <div class="sub">${s.failed ? `其中 ${s.failed} 首失败（可以只重试这几首）` : '全部成功'}</div>
+    </div>
+    <div class="acts">
+      <button class="btn-primary" id="sum-zip">打包下载 ${s.done} 个 SVP</button>
+      ${s.failed ? `<button class="btn-secondary" id="sum-retry">只重试失败的 ${s.failed} 首</button>` : ''}
+      <button class="btn-secondary ghost" id="sum-back">打开工程列表</button>
+    </div>`;
+  if ($('sum-zip')) $('sum-zip').onclick = openZip;
+  if ($('sum-retry')) $('sum-retry').onclick = retryFailed;
+  if ($('sum-back')) $('sum-back').onclick = () => toast('回到工程列表（工作台默认视图）');
+}
+
+function render() {
+  renderSidebar();
+  renderHead();
+  renderTable();
+}
+
+/* ------------------------------------------------------------------ 动作 */
+function togglePause() {
+  state.paused = !state.paused;
+  toast(state.paused ? '已暂停：当前这首跑完就不再派发下一首' : '继续');
+  render();
+  if (!state.paused) state.tick = setTimeout(tick, 200);
+}
+
+function stopAll() {
+  state.running = false;
+  state.paused = false;
+  clearTimeout(state.tick);
+  rows.forEach((r) => { if (r.state === 'running') { r.state = 'pending'; r.p = 0; r.ph = 'transcribe'; } });
+  toast('已停止：当前这首已取消，排队的不再派发（跑完的保留）');
+  render();
+}
+
+function retryFailed() {
+  const failed = rows.filter((r) => r.state === 'failed');
+  if (!failed.length) return;
+  failed.forEach((r) => {
+    r.state = 'pending';
+    r.ph = 'transcribe';
+    r.p = 0;
+    r.error = '';
+  });
+  state.done = false;
+  state.paused = false;
+  state.running = true;
+  $('summary').style.display = 'none';
+  toast(`已重排 ${failed.length} 首失败项`);
+  render();
+  state.tick = setTimeout(tick, 200);
+}
+
+function retryOne(index) {
+  const row = rows[index - 1];
+  row.state = 'pending';
+  row.ph = 'transcribe';
+  row.p = 0;
+  row.error = '';
+  state.done = false;
+  state.running = true;
+  render();
+  state.tick = setTimeout(tick, 200);
+}
+
+/* ------------------------------------------------------------------ 导入弹层 */
+function openImport() {
+  $('import-overlay').classList.add('on');
+  if (!$('scan-result').dataset.done) {
+    $('scan-result').style.display = 'none';
+    $('start-btn').disabled = true;
+  }
+}
+
+function scan() {
+  const button = $('scan-btn');
+  button.disabled = true;
+  button.textContent = '扫描中…';
+  setTimeout(() => {
+    button.disabled = false;
+    button.textContent = '扫描';
+    const lrcCount = rows.filter((r) => r.lrc === 'lrc').length;
+    const noLrc = rows.length - lrcCount;
+    // 粗估：音频时长 × 0.55（GPU 串行）+ 每首 25 秒的模型加载/收尾
+    const hours = ((rows.reduce((sum, r) => sum + r.dur, 0) * 0.55 + rows.length * 25) / 3600).toFixed(1);
+    $('scan-summary').innerHTML = `
+      <span><b>${rows.length}</b> 首</span>
+      <span><b>${lrcCount}</b> 首带 LRC（逐行对齐）</span>
+      <span><b>${noLrc}</b> 首走语音识别</span>
+      <span>预计 <b>${hours}</b> 小时（串行）</span>
+      <span>磁盘可写 · 需要约 <b>4.6 GB</b></span>`;
+    $('scan-warn').innerHTML = `<b>${noLrc} 首没有同名 LRC</b>：会走语音识别，词可能不对。
+      其中 1 首的 LRC 是日语（TIFA 不支持日语 G2P），已自动退回识别。`;
+    $('ptable-body').innerHTML = rows.map((r) => {
+      const lrc = lrcLabel(r);
+      const tone = r.lrc === 'lrc' ? 'color:var(--primary)' : r.lrc === 'none' ? 'color:var(--light)' : 'color:var(--warn)';
+      return `<div class="prow">
+        <div class="no">${r.index}</div>
+        <div class="nm">${escapeHtml(r.name)}.${r.ext}</div>
+        <div class="sz">${r.sizeMB} MB</div>
+        <div class="du">${fmtTime(r.dur)}</div>
+        <div style="${tone}">${lrc.text}${r.lrc === 'ja' ? ' ⚠' : ''}</div>
+      </div>`;
+    }).join('');
+    $('param-lrc').textContent = `按文件夹里的同名 LRC（${lrcCount}/${rows.length}）——这一行只读`;
+    $('scan-result').style.display = '';
+    $('scan-result').dataset.done = '1';
+    $('foot-note').textContent = `扫描只读，不改文件夹；音频会复制进工程目录。`;
+    $('start-btn').disabled = false;
+  }, 700);
+}
+
+function startBatch() {
+  $('import-overlay').classList.remove('on');
+  state.running = true;
+  state.paused = false;
+  state.done = false;
+  toast('开始 40 首：串行跑，一首接一首', 'ok');
+  render();
+  state.tick = setTimeout(tick, 300);
+}
+
+/* ------------------------------------------------------------------ 下载弹层 */
+function openZip() {
+  const done = rows.filter((r) => r.state === 'done');
+  const failed = rows.filter((r) => r.state === 'failed');
+  const size = (done.length * 1.2).toFixed(0);
+  $('zip-preview').innerHTML = [
+    ...done.slice(0, 6).map((r) => `
+      <div class="zip-row"><span class="ic">♪</span>${escapeHtml(r.name)}.svp
+        <span class="sz">1.2 MB</span></div>`),
+    ...(done.length > 6 ? [`<div class="zip-row"><span class="ic">…</span>还有 ${done.length - 6} 个 .svp<span class="sz"></span></div>`] : []),
+    `<div class="zip-row"><span class="ic">{ }</span>_manifest.json<span class="sz">清单</span></div>`,
+    ...failed.map((r) => `
+      <div class="zip-row skipped"><span class="ic">✗</span>${escapeHtml(r.name)} · 跳过
+        <span class="sz">${escapeHtml(r.error)}</span></div>`),
+  ].join('');
+  $('zip-summary').innerHTML = `
+    <span><b>${done.length}</b> 个 SVP</span>
+    <span><b>${failed.length}</b> 首跳过</span>
+    <span>约 <b>${size} MB</b></span>
+    <span class="mono" style="color:var(--light)">_manifest.json 记着清单</span>`;
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+    + `-${pad(now.getHours())}${pad(now.getMinutes())}`;
+  $('zip-title').textContent = `打包下载 · 批量-SVP-${stamp}.zip`;
+  $('zip-overlay').classList.add('on');
+}
+
+/* ------------------------------------------------------------------ 其它 */
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+$('open-import').onclick = openImport;
+$('scan-btn').onclick = scan;
+$('start-btn').onclick = startBatch;
+$('path-input').onkeydown = (ev) => { if (ev.key === 'Enter') scan(); };
+[...document.querySelectorAll('.recent button')].forEach((btn) => {
+  btn.onclick = () => { $('path-input').value = btn.dataset.path; };
+});
+[...document.querySelectorAll('[data-close]')].forEach((btn) => {
+  btn.onclick = () => $(btn.dataset.close).classList.remove('on');
+});
+[...document.querySelectorAll('.overlay')].forEach((layer) => {
+  layer.onclick = (ev) => { if (ev.target === layer) layer.classList.remove('on'); };
+});
+$('zip-download').onclick = () => {
+  $('zip-overlay').classList.remove('on');
+  const done = rows.filter((r) => r.state === 'done').length;
+  toast(`下载 ${$('zip-title').textContent.replace('打包下载 · ', '')}（${done} 个 SVP）`, 'ok');
+};
+$('browse-btn').onclick = () => toast('服务端原生目录选择器（tkinter）；不可用时置灰，改手填路径');
+$('theme').onclick = () => {
+  const html = document.documentElement;
+  html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';
+};
+
+/* 初始态：跑了一小段，好让页面一打开就能看清"运行中"长什么样 */
+rows.slice(0, 12).forEach((r) => { r.state = 'done'; r.p = 1; r.elapsed = 96 + r.index * 7; });
+rows[12].state = 'running';
+rows[12].ph = 'lyrics';
+rows[12].p = 0.62;
+rows[12].elapsed = 121;
+state.running = true;
+render();
+state.tick = setTimeout(tick, 900);
+</script>
+</body>
+</html>

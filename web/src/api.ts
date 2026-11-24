@@ -12,10 +12,15 @@
 
 import type {
   BackupSummary,
+  BatchDetail,
+  BatchInfo,
+  BatchScan,
   EnvInfo,
   ExportOptions,
+  JobBatch,
   JobEvent,
   JobOptions,
+  JobRow,
   JobSnapshot,
   Lanes,
   Peaks,
@@ -341,6 +346,129 @@ export async function cleanupJob(id: string): Promise<{ freed: number }> {
                                          { method: 'POST' })
   if (!response.ok) throw new Error(await readError(response, '清理失败'))
   return (await response.json()) as { freed: number }
+}
+
+// ---------------------------------------------------------------- 批量导入
+async function postJson<T>(path: string, body: unknown,
+                           timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const response = await fetchWithTimeout(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, timeoutMs)
+  if (!response.ok) throw new Error(await readError(response, '请求失败'))
+  return (await response.json()) as T
+}
+
+/** 轻量列表（侧栏与批量表用：不带 LRC 全文、不带产物清单）。 */
+export async function listJobRows(): Promise<JobRow[]> {
+  const body = await getJson<{ jobs: JobRow[] }>('/jobs?view=rows')
+  return body.jobs
+}
+
+/** 扫一个文件夹（**只读预览**，不建工程）。目录扫描可能要一两秒（探时长），超时放宽。 */
+export function scanBatch(dir: string): Promise<BatchScan> {
+  return postJson<BatchScan>('/batches/scan', { dir }, 60_000)
+}
+
+/**
+ * 弹服务端的原生目录选择器（本机工具才有）。拿不到 tkinter / 没有桌面时后端回 501，
+ * 这里把 detail 原样抛出去，界面据此提示"手动粘贴路径"。
+ */
+export async function browseFolder(): Promise<string | null> {
+  const body = await postJson<{ dir: string | null }>('/batches/browse', {}, 120_000)
+  return body.dir
+}
+
+/**
+ * **拖文件夹**这条路的建工程接口：一次传一个文件，带上同一个 `batchId` 就归一批。
+ *
+ * 用 XHR 是为了拿单个文件的上传进度（几十 MB 的 flac 在慢盘上也要几秒）。
+ */
+export function uploadBatchFile(
+  file: File,
+  payload: { lyrics?: string; batchId?: string; title?: string; plan?: PhaseKey[] } = {},
+  onProgress?: (fraction: number) => void,
+): Promise<{ batch: JobBatch; jobs: JobRow[]; problems: string[] }> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    if (payload.lyrics) form.append('lyrics', payload.lyrics)
+    if (payload.batchId) form.append('batch_id', payload.batchId)
+    if (payload.title) form.append('title', payload.title)
+    if (payload.plan?.length) form.append('plan', payload.plan.join(','))
+    const request = new XMLHttpRequest()
+    request.open('POST', `${BASE}/batches/upload`)
+    request.responseType = 'text'
+    request.timeout = UPLOAD_TIMEOUT_MS
+    request.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total)
+    })
+    request.addEventListener('load', () => {
+      if (request.status >= 200 && request.status < 300) {
+        try {
+          resolve(JSON.parse(request.responseText) as {
+            batch: JobBatch
+            jobs: JobRow[]
+            problems: string[]
+          })
+        } catch {
+          reject(new Error('服务端返回的不是 JSON'))
+        }
+        return
+      }
+      let detail = `上传失败（HTTP ${request.status}）`
+      try {
+        const body = JSON.parse(request.responseText) as { detail?: unknown }
+        if (typeof body.detail === 'string' && body.detail) detail = body.detail
+      } catch {
+        /* 保持兜底文案 */
+      }
+      reject(new Error(detail))
+    })
+    request.addEventListener('error', () => reject(new Error('网络错误，上传失败')))
+    request.addEventListener('timeout', () => reject(new Error(
+      '上传超时：文件太大或后台服务卡住了，稍后重试；一直这样就重启一次服务')))
+    request.send(form)
+  })
+}
+
+/** 按文件夹建一批工程并排队（串行：一个跑完自动接下一个）。 */
+export function createBatch(payload: {
+  dir: string
+  options?: JobOptions
+  plan?: PhaseKey[]
+  link?: boolean
+}): Promise<{ batch: JobBatch; jobs: JobRow[]; problems: string[] }> {
+  return postJson('/batches', payload, UPLOAD_TIMEOUT_MS)
+}
+
+export async function listBatches(): Promise<BatchInfo[]> {
+  const body = await getJson<{ batches: BatchInfo[] }>('/batches')
+  return body.batches
+}
+
+export function getBatch(id: string): Promise<BatchDetail> {
+  return getJson<BatchDetail>(`/batches/${encodeURIComponent(id)}`)
+}
+
+/** 暂停派发（正在跑的那一首不打断）。 */
+export async function pauseQueue(): Promise<boolean> {
+  const body = await postJson<{ paused: boolean }>('/batches/pause', {})
+  return body.paused
+}
+
+export async function resumeQueue(): Promise<boolean> {
+  const body = await postJson<{ paused: boolean }>('/batches/resume', {})
+  return body.paused
+}
+
+/** 批量下载地址：一次把多个工程打成 zip（`_manifest.json` 里记着跳过的那几首）。 */
+export function batchExportUrl(ids: string[], kind: 'svp' | 'files' = 'svp',
+                               parts: string[] = []): string {
+  const query = new URLSearchParams({ ids: ids.join(','), kind })
+  if (parts.length) query.set('parts', parts.join(','))
+  return `${BASE}/exports/batch?${query.toString()}`
 }
 
 /** 诊断包下载地址（G12）。不传 id = 全部工程 + env + 日志。 */

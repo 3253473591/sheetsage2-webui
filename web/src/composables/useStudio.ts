@@ -24,6 +24,7 @@ import { useJobs } from './useJobs'
 import { useJobEvents } from './useJobEvents'
 import { useUploads } from './useUploads'
 import { useTrashBackup } from './useTrashBackup'
+import { useBatch } from './useBatch'
 import { useLogs } from './logs'
 
 export type { LogLine, LogTone } from './logs'
@@ -42,7 +43,7 @@ export function useStudio() {
   const jobsApi = useJobs({ onError })
   const {
     jobs, active, activeId, lanes, peaks, stemPeaks, lanesLoading,
-    upsert, find, reload, refreshArtifacts, loadPeaks, clearMedia, clearStemPeaks,
+    upsert, find, reload, refreshArtifacts, applyRows, loadPeaks, clearMedia, clearStemPeaks,
   } = jobsApi
 
   const events = useJobEvents({
@@ -76,6 +77,28 @@ export function useStudio() {
     onError,
   })
   const { trash, loadTrash, restoreTrash, purgeTrash, backupUrl, restoreBackup } = trashApi
+
+  // 批量：批次列表/明细由它持有；这里只负责"和单工程视图互斥"的编排。
+  const batchApi = useBatch({
+    onError,
+    onJobsChanged: () => { void reload() },
+    onRows: applyRows,
+    onOpenJob: (id) => void select(id),
+  })
+  const { batches, active: activeBatch } = batchApi
+
+  /** 打开某个批次：先退出单工程视图（两边不能同时占着主区）。 */
+  async function openBatch(batchId: string): Promise<void> {
+    events.detach()
+    activeId.value = null
+    clearMedia()
+    clearLogs()
+    await batchApi.open(batchId)
+  }
+
+  function closeBatch(): void {
+    batchApi.close()
+  }
 
   /** `/api/env` 回来了才算"服务端和参数表都在"（顶栏据此从"连接中"切到正常）。 */
   const pluginsReady = computed(() => Boolean(env.value))
@@ -116,6 +139,7 @@ export function useStudio() {
   // ---------------------------------------------------------------- 编排
   /** 切到某个工程：先把上一份的通道与数据全清掉，再按需补通道。 */
   async function select(id: string): Promise<void> {
+    batchApi.close()                 // 单工程与批次视图互斥
     events.detach()
     activeId.value = id
     events.reset()
@@ -142,6 +166,7 @@ export function useStudio() {
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     }
+    void batchApi.reload()
     const running = jobs.value.find((job) => job.state === 'running' || job.state === 'queued')
     const first = running ?? jobs.value[0]
     if (first) await select(first.id)
@@ -272,6 +297,7 @@ export function useStudio() {
   onUnmounted(() => {
     disposed = true
     events.dispose()
+    batchApi.dispose()
     stopHealthWatch()
     window.removeEventListener('visibilitychange', onVisible)
     window.removeEventListener('online', onOnline)
@@ -310,6 +336,12 @@ export function useStudio() {
     backupUrl,
     restoreBackup,
     reset,
+    // 批量：批次视图与单工程视图互斥（`select` / `openBatch` 各自清另一边）
+    batches,
+    activeBatch,
+    batch: batchApi,
+    openBatch,
+    closeBatch,
     dismissError: () => {
       error.value = null
     },

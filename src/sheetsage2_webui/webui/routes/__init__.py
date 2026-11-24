@@ -3,8 +3,9 @@
 | 模块 | 管什么 |
 |---|---|
 | `jobs` | 环境信息、工程增删改、阶段（重）跑、参数、音源、回收站、SSE |
+| `batches` | 批量：扫描预览、一次建一批工程、批次列表与明细（批次由工程的 `batch` 字段派生） |
 | `media` | 卷帘数据、歌词、波形、原音频 / 干声（Range） |
-| `exports` | 单个产物、整包 zip、SVP 工程 |
+| `exports` | 单个产物、整包 zip、SVP 工程、批量打包下载 |
 | `system` | 诊断包、整库备份与恢复 |
 
 所有 router 都靠 `ApiDeps` 拿依赖（见 `_shared`），**导入时不建线程、不加载模型**；
@@ -16,15 +17,16 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ._shared import ApiDeps
-from . import exports, jobs, media, system
+from . import batches, exports, jobs, media, system
 
 #: 挂载顺序即注册顺序（`/api/jobs/{id}/files/{path}` 这种带 path 转换的路由要排在后面）。
-BUILDERS = (jobs.build_router, media.build_router, exports.build_router, system.build_router)
+BUILDERS = (jobs.build_router, batches.build_router, media.build_router,
+            exports.build_router, system.build_router)
 
 
 def build_routers(deps: ApiDeps) -> list[APIRouter]:
-    """按固定顺序造好四组路由。"""
+    """按固定顺序造好五组路由。"""
     return [build(deps) for build in BUILDERS]
 
 
-__all__ = ["ApiDeps", "build_routers", "exports", "jobs", "media", "system"]
+__all__ = ["ApiDeps", "build_routers", "batches", "exports", "jobs", "media", "system"]

@@ -162,6 +162,37 @@ output/<歌名>/.webui/input/<原音频>  stems/  peaks-*.json
 - 工程列表里点一个"**有扒谱但没填词**"的工程：按钮正常放开（判据就是所选工程的
   `stages.transcribe.state === 'done'`，与它是第几个工程无关）。
 
+### 批量导入（2026-11-24）
+
+把「一个文件夹」变成一个批次：里面放歌曲与**同名 LRC**（`.lrc`，没有就 `.txt`），
+扫描预览 → 一次设定参数 → 建 N 个工程并排进串行队列（一首跑完自动接下一首）。
+
+| 方法 | 路径 | 干什么 |
+|---|---|---|
+| POST | `/api/batches/browse` | 服务端弹**原生目录选择器**（本机工具才有；没有 tkinter/桌面回 501 + 一句人话） |
+| POST | `/api/batches/scan` | 预览：`{dir}` → 行（歌名/大小/时长/歌词源四态）+ `problems[]`（**只读，不建工程**） |
+| POST | `/api/batches` | 建批次：`{dir, options, plan, link}` → 轻量行 + `problems`（单首失败不中断整批） |
+| POST | `/api/batches/upload` | 拖文件夹用：multipart 一次一个文件，带 `batch_id` 就归同一批（`index` = 上传顺序） |
+| GET | `/api/batches` | 批次列表（**派生**：从工程的 `batch` 字段聚合，没有第二套状态机） |
+| GET | `/api/batches/{id}` | 明细：成员行 + 统计（完成/失败/运行/剩余） |
+| POST | `/api/batches/pause` · `/resume` | 派发闸门：不再派发新的，**正在跑的那一首不打断** |
+| GET | `/api/jobs?view=rows` | 轻量列表（侧栏/批量表用：不带 LRC 全文与产物清单） |
+| GET | `/api/exports/batch?ids=&kind=svp\|files` | 批量下载 zip（每首一个 `.svp` + `_manifest.json` 清单） |
+
+几条产品口径：
+
+- **两条入口**：填/选文件夹路径（服务端扫描，零上传）与**拖文件夹**（浏览器只能上传）。
+  拖拽时 `classifyDrop()` 判定：1 个音频 = 单曲、2 个 = 混音+干声（老规矩）、
+  ≥3 个 / 带 LRC / 文件夹 = 批量。
+- **批次不是实体**：`job.json` 里带 `{id, title, index}`，重启后分组自动还在；删掉某个工程
+  只是那一行少一首。
+- **排序靠 `index`**（扫描顺序 / 上传顺序），不靠 `created_at`：Windows 时钟粒度约 15ms，
+  一批工程会并列。
+- **LRC 以文本存进 `options.lyrics_lrc`**（和歌词抽屉同口径）：源目录以后被挪走也不影响重跑。
+- **失败即跳过**：某首的扒谱失败，它的歌词阶段标 `skipped`——不再白跑一遍、也不会拿旧谱面填词。
+- 界面：侧栏「批次分组」+ 主区批次视图（点行 = 现有工程页）；进度 = 完成首数/总数，
+  不用加权百分比。
+
 ### 参数面板：照着原型做，值挂在工程上
 
 版式与原型一致（每阶段一组标签按钮），改动立刻 `PATCH /api/jobs/{id}/options`：

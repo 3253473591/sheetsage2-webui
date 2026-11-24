@@ -38,7 +38,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..bootstrap import PROJECT_ROOT
 from ..fsutil import move_into, write_text_atomic
@@ -50,9 +50,9 @@ from .job_errors import (ImportedProject, JobCancelled, StageNotReady, StaleRevi
                          UploadRejected)
 from .job_files import (AUDIO_SUFFIXES, FILE_KINDS, INTERNAL_DIRNAME, STEM_KINDS,
                         STEM_LABELS, _UNSAFE, _check_audio, _kind_of, _write_stream,
-                        claim_project_dir, content_fingerprint, is_internal, iter_chunks,
-                        project_folder_name, safe_name, scan_files, unique_project_dir,
-                        unique_suffix)
+                        claim_project_dir, content_fingerprint, import_audio, is_internal,
+                        iter_chunks, project_folder_name, safe_name, scan_files,
+                        unique_project_dir, unique_suffix)
 from .job_models import (DEFAULT_PLAN, DRAFT_STATE, MANIFEST_NAME, MAX_EVENTS, PHASE_LABELS,
                          PHASES, STAGE_TERMINAL, TERMINAL_STATES, Event, Job, Progress,
                          StageRunner, StageRun)
@@ -264,6 +264,20 @@ class JobManager:
     def set_runners(self, runners: Mapping[str, StageRunner]) -> None:
         self._scheduler.set_runners(runners)
 
+    # ---------------------------------------------------------------- 暂停 / 继续
+    @property
+    def paused(self) -> bool:
+        return self._scheduler.paused
+
+    def pause(self) -> bool:
+        """不再派发新的工程（正在跑的那一首不打断）。批量页的「暂停」。"""
+        self._scheduler.pause()
+        return True
+
+    def resume(self) -> bool:
+        self._scheduler.resume()
+        return True
+
     @property
     def runners(self) -> Mapping[str, StageRunner]:
         return self._scheduler.runners
@@ -274,7 +288,8 @@ class JobManager:
             pending = sum(1 for j in self._jobs.values() if j.state == "queued")
             return {"data_root": str(self.root), "max_upload_mb": self.max_upload_mb,
                     "params_locked": self.lock_params,
-                    "queue": {"pending": pending, "running": running},
+                    "queue": {"pending": pending, "running": running,
+                              "paused": self.paused},
                     "disk": self.disk_info()}
 
     def disk_info(self) -> dict[str, int]:
@@ -340,7 +355,9 @@ class JobManager:
 
     # ---------------------------------------------------------------- 建任务
     def create(self, filename: str, stream: Any,
-               plan: Iterable[str] = DEFAULT_PLAN) -> Job:
+               plan: Iterable[str] = DEFAULT_PLAN, *,
+               options: Mapping[str, Any] | None = None,
+               batch: Mapping[str, Any] | None = None) -> Job:
         """把上传流写到 ``output/<歌名>/.webui/input/``，**默认什么都不排**。
 
         ``stream`` 只要有 ``read(n)`` 就行（`UploadFile.file` 就是）。超限会立刻中断并
@@ -348,9 +365,12 @@ class JobManager:
 
         ``plan`` 非空才排队（`/chain` 与显式 ``plan=`` 用得上）；空 plan 时工程停在
         :data:`DRAFT_STATE`，等用户在页面上选完参数点「开始扒谱」——这就是门禁。
+
+        ``options`` 是"建工程时就定好参数"（批量导入一次设定跟着走）；``batch`` 是批量
+        归属（`{"id", "title"}`），单曲不传。
         """
         audio = _check_audio(filename)
-        wanted = [phase for phase in plan if phase in PHASES]
+        wanted = self._plan_of(plan)
         job_id = uuid.uuid4().hex[:12]
         created = time.time()
         # 工程目录 = `output/<歌名>/`（和命令行一个形状；重名绝不覆盖）。
@@ -371,28 +391,88 @@ class JobManager:
             shutil.rmtree(root, ignore_errors=True)
             raise UploadRejected("上传的是空文件")
 
-        # 内容体检（G10）：ffmpeg 探一下"是不是能播的音频、是不是纯静音"。没 ffmpeg 就跳过。
-        audio_info: dict[str, Any] = {}
-        if self.probe_upload:
-            from .media import probe_audio
-
-            audio_info = probe_audio(upload) or {}
-            if audio_info.get("ok") is False:
-                reason = str(audio_info.get("reason") or "这个音频用不了")
-                shutil.rmtree(root, ignore_errors=True)
-                raise UploadRejected(reason)
+        audio_info = self._probe_audio(upload, root)
         fingerprint = content_fingerprint(upload)
 
         job = Job(id=job_id, name=Path(audio).stem or audio, audio=audio, root=root,
                   upload=upload, out_dir=root, created_at=created,
-                  plan=list(wanted), options=dict(self.option_defaults),
+                  plan=list(wanted),
+                  options=dict(self.option_defaults, **(options or {})),
+                  batch=dict(batch) if batch else None,
                   audio_info=audio_info, audio_fingerprint=fingerprint or None)
+        self._register(job, wanted, fingerprint)
+        return job
+
+    def create_from_path(self, source: str | Path,
+                         plan: Iterable[str] = DEFAULT_PLAN, *,
+                         options: Mapping[str, Any] | None = None,
+                         batch: Mapping[str, Any] | None = None,
+                         link: bool = True) -> Job:
+        """从**本机路径**建工程（批量导入用）：不经过上传流。
+
+        与 :meth:`create` 的差别只有"音频怎么进来"：校验（后缀 / 大小 / 体检）、工程目录
+        认领、去重、排队全都一样。``link=True`` 时同卷**硬链接**（一首 40MB 的歌不复制
+        第二份），跨卷或文件系统不支持时静默退化成复制；``link=False`` 强制复制。
+        """
+        source = Path(source)
+        if not source.is_file():
+            raise UploadRejected(f"找不到音频：{source}")
+        audio = _check_audio(source.name)
+        size = source.stat().st_size
+        limit = int(self.max_upload_mb * 1024 * 1024)
+        if size == 0:
+            raise UploadRejected(f"{audio} 是空文件")
+        if size > limit:
+            raise UploadRejected(f"{audio} 超过 {self.max_upload_mb:g} MB 上限")
+
+        wanted = self._plan_of(plan)
+        job_id = uuid.uuid4().hex[:12]
+        created = time.time()
+        root = claim_project_dir(self.root, project_folder_name(Path(audio).stem))
+        upload = root / INTERNAL_DIRNAME / "input" / f"{job_id}-{audio}"
+        try:
+            import_audio(source, upload, link=link)
+        except OSError as exc:
+            shutil.rmtree(root, ignore_errors=True)
+            raise UploadRejected(f"把 {audio} 放进工程失败：{exc}") from exc
+
+        audio_info = self._probe_audio(upload, root)
+        fingerprint = content_fingerprint(upload)
+
+        job = Job(id=job_id, name=Path(audio).stem or audio, audio=audio, root=root,
+                  upload=upload, out_dir=root, created_at=created,
+                  plan=list(wanted),
+                  options=dict(self.option_defaults, **(options or {})),
+                  batch=dict(batch) if batch else None,
+                  audio_info=audio_info, audio_fingerprint=fingerprint or None)
+        self._register(job, wanted, fingerprint)
+        return job
+
+    @staticmethod
+    def _plan_of(plan: Iterable[str]) -> list[str]:
+        return [phase for phase in plan if phase in PHASES]
+
+    def _probe_audio(self, upload: Path, root: Path) -> dict[str, Any]:
+        """内容体检（G10）：ffmpeg 探一下"是不是能播的音频、是不是纯静音"。没 ffmpeg 就跳过。"""
+        if not self.probe_upload:
+            return {}
+        from .media import probe_audio
+
+        audio_info = probe_audio(upload) or {}
+        if audio_info.get("ok") is False:
+            reason = str(audio_info.get("reason") or "这个音频用不了")
+            shutil.rmtree(root, ignore_errors=True)
+            raise UploadRejected(reason)
+        return audio_info
+
+    def _register(self, job: Job, wanted: Sequence[str], fingerprint: str) -> None:
+        """登记一个新工程：状态、去重、元数据、排队。上传与"从路径导入"共用。"""
         self._attach_eta(job)
         job.state = "queued" if wanted else DRAFT_STATE
         job.message = "等待开始" if wanted else "等待参数"
         for phase in wanted:
             job.stages[phase].state = "queued"
-        job.emit("log", phase=None, message=f"新建工程 · {audio}"
+        job.emit("log", phase=None, message=f"新建工程 · {job.audio}"
                  + ("" if wanted else "（选好参数后点「开始扒谱」）"))
         if fingerprint:
             with self._lock:
@@ -401,12 +481,11 @@ class JobManager:
                         job.duplicate_of = other.id
                         break
         with self._lock:
-            self._jobs[job_id] = job
-            self._order.insert(0, job_id)
+            self._jobs[job.id] = job
+            self._order.insert(0, job.id)
         self._write_metadata(job)
         if wanted:
-            self._scheduler.submit(job_id)
-        return job
+            self._scheduler.submit(job.id)
 
     def run_stage(self, job_id: str, phase: str, *, chain: bool = False) -> Job | None:
         """单独（重）跑一个阶段：清掉它的旧状态，塞回待跑队列。

@@ -136,6 +136,7 @@ class JobStore:
         job.decisions = meta.get("decisions")
         job.summary = meta.get("summary")
         job.warnings = list(meta.get("warnings") or [])
+        job.batch = dict(meta["batch"]) if isinstance(meta.get("batch"), dict) else None
         job.rev = int(meta.get("rev") or 1)
         job.artifacts_rev = int(meta.get("artifacts_rev") or 0)
         interrupted = any(run.message.startswith("上次运行被中断")

@@ -100,7 +100,7 @@ export interface EnvInfo {
   data_root: string
   static_ready: boolean
   max_upload_mb: number
-  queue: { pending: number; running: string | null }
+  queue: { pending: number; running: string | null; paused?: boolean }
   /** 数据根所在磁盘的剩余/总量（G11：顶栏显示"剩余 12.3 GB"）。 */
   disk: { free: number; total: number; used: number }
   /** 启动预检结果（G15）。 */
@@ -303,6 +303,8 @@ export interface JobSnapshot {
    * 界面据此显示「正在停止…」，别让人以为按钮没反应。
    */
   cancel_requested?: boolean
+  /** 批量归属（单曲是 null）：侧栏分组、批次统计都靠它。 */
+  batch?: JobBatch | null
 }
 
 /** SSE 事件。`seq` 单调递增，用来在断线重连时续传。 */
@@ -425,4 +427,109 @@ export function stageBadge(stage: StageSnapshot | undefined): {
     default:
       return { text: `${short} —`, tone: 'idle' }
   }
+}
+
+// ---------------------------------------------------------------- 批量
+// 批次**不是实体**：批次 id/标题写在工程的 `batch` 字段里，列表与统计都从工程派生。
+// 所以这里没有 "BatchStore" 之类的东西，只有投影类型。
+
+/** 工程所属的批量（单曲是 null）。 */
+export interface JobBatch {
+  id: string
+  title: string
+  folder?: string | null
+  /** 文件夹里的序号（批次内排序用它，不靠创建时间） */
+  index?: number
+}
+
+/** `GET /api/jobs?view=rows` 的一行：**轻量投影**（不含产物清单与 LRC 全文）。 */
+export interface JobRow {
+  id: string
+  name: string
+  audio: string
+  state: JobState
+  stage: PhaseKey | null
+  rev: number
+  artifacts_rev: number
+  created_at: number
+  elapsed_seconds: number
+  imported: boolean
+  batch: JobBatch | null
+  duplicate_of: string | null
+  cancel_requested: boolean
+  audio_seconds: number | null
+  /** 有没有官方歌词（只看有没有，不解析全文） */
+  has_lrc: boolean
+  stages: Record<PhaseKey, StageRow>
+}
+
+/** 轻量投影里的一个阶段（只够画"扒谱 ✓ / 歌词 62%"）。 */
+export interface StageRow {
+  state: StageState
+  progress: number
+  step: string
+  label: string
+  error: string | null
+  error_code: string | null
+  error_action: string | null
+  started_at: number | null
+  finished_at: number | null
+  elapsed_seconds: number
+}
+
+/** 歌词源的口径（扫描预览里那一列）。 */
+export type LrcKind = 'lrc' | 'lrc-ja' | 'lrc-ko' | 'txt' | 'none'
+
+/** 扫描预览的一行（`POST /api/batches/scan`）。 */
+export interface BatchScanItem {
+  name: string
+  audio: string
+  size: number
+  duration_seconds: number | null
+  lrc: string | null
+  lrc_kind: LrcKind
+  lrc_lines: number
+  /** 这一行自己的问题（界面标黄，不阻断建工程） */
+  problem: string | null
+}
+
+/** `POST /api/batches/scan` 的结果：预览表 + 整批的问题。 */
+export interface BatchScan {
+  folder: string
+  items: BatchScanItem[]
+  problems: string[]
+  with_lyrics: number
+  total_seconds: number
+}
+
+/** 批次列表里的一行（`GET /api/batches`，从工程派生）。 */
+export interface BatchInfo {
+  id: string
+  title: string
+  folder?: string | null
+  created_at: number
+  total: number
+  done: number
+  failed: number
+  running: number
+  pending: number
+  job_ids: string[]
+}
+
+/** 批次明细的统计（`GET /api/batches/{id}` 的 `stats`）。 */
+export interface BatchStats {
+  total: number
+  done: number
+  failed: number
+  running: number
+  pending: number
+  created_at: number
+  finished_at: number
+}
+
+/** `GET /api/batches/{id}`：成员行 + 统计。 */
+export interface BatchDetail {
+  batch: JobBatch
+  rows: JobRow[]
+  stats: BatchStats
 }

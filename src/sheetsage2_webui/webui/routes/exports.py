@@ -5,17 +5,20 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
+from ..batch_export import (KINDS, BatchExportError, ensure_svp, export_batch,
+                            normalize_parts)
 from ..job_files import is_internal, safe_name
 from ..job_models import Job
-from ...svp import (DEFAULT_PARTS, SVP_PARTS, SVP_VERSION, SvpUnavailable,
-                    available_parts, build_svp, cache_key, export_path, load_project)
-from ._shared import ApiDeps, require_job
+from ...svp import (SVP_VERSION, SvpUnavailable, available_parts, load_project)
+from ._shared import ApiDeps, cleanup_dir, require_job
 
 
 def build_router(deps: ApiDeps) -> APIRouter:
@@ -78,38 +81,73 @@ def build_router(deps: ApiDeps) -> APIRouter:
         }
 
     async def svp_download(job: Job, parts: str) -> FileResponse:
-        wanted = [item.strip() for item in parts.split(",") if item.strip()] \
-            or list(DEFAULT_PARTS)
-        unknown = [item for item in wanted if item not in SVP_PARTS]
-        if unknown:
-            raise HTTPException(status_code=400,
-                                detail=f"未知的导出内容 {unknown}；可选 {list(SVP_PARTS)}")
-        options = dict(job.options)
-        # 缓存键带上**产物版本戳**：重跑过就一定重新生成，不会把上一版发出去（G3）
-        target = export_path(job.internal_dir,
-                             cache_key(wanted, SVP_VERSION, options,
-                                       rev=job.artifacts_rev))
-        if not target.is_file():
-            try:
-                payload, svp_stats = await run_in_threadpool(
-                    build_svp, job.out_dir, parts=wanted, options=options,
-                    version=SVP_VERSION)
-            except SvpUnavailable as exc:
-                raise HTTPException(status_code=501, detail=str(exc)) from exc
-            except FileNotFoundError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            # 先写 .part 再改名：两个请求同时要同一份时不会读到半截文件
-            temp = target.with_name(target.name + ".part")
-            temp.write_bytes(payload)
-            temp.replace(target)
-            # 为了让 SVP 同轨不叠音而动过音符的话，日志里说一声（不然"怎么少了一个音"没法查）
-            for warning in svp_stats.get("warnings") or []:
-                job.emit("log", phase=None, message=f"导出 SVP：{warning}")
+        try:
+            wanted = normalize_parts(parts)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            # 缓存键带产物版本戳（G3）：重跑过就一定重新生成，不会把上一版发出去。
+            target, _stats = await run_in_threadpool(ensure_svp, job, wanted)
+        except SvpUnavailable as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         name = f"{safe_name(job.name or 'sheetsage2')}.svp"
         return FileResponse(target, filename=name,
                             media_type="application/octet-stream",
                             headers={"X-Artifact-Rev": str(job.artifacts_rev)})
+
+    @router.get("/exports/batch")
+    async def batch_download(ids: str = "", kind: str = "svp",
+                             parts: str = "") -> FileResponse:
+        """**批量下载**：一次把多个工程打成一个 zip。
+
+        `ids` 是逗号分隔的工程 id（顺序即包内顺序）。`kind=svp`（默认）每首一个
+        `<歌名>.svp`；`kind=files` 把每首的产物按 `<歌名>/<相对路径>` 摊开。
+        包里总有一份 `_manifest.json` 记着"导出了哪些、跳过了哪些（为什么）"。
+
+        单个工程导不出来（还没扒谱 / 没音符）**不算整批失败**，只进清单的 skipped；
+        只有一首都导不出来才回 409。id 不存在回 404——"少了三首"必须当场知道。
+        """
+        chosen: list[str] = []
+        for item in ids.split(","):
+            job_id = item.strip()
+            if job_id and job_id not in chosen:
+                chosen.append(job_id)
+        if not chosen:
+            raise HTTPException(status_code=400, detail="ids 不能为空（逗号分隔多个工程 id）")
+        if kind not in KINDS:
+            raise HTTPException(status_code=400,
+                                detail=f"未知的下载内容 {kind!r}；可选 {list(KINDS)}")
+        try:
+            wanted = normalize_parts(parts)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        missing = [job_id for job_id in chosen if manager.get(job_id) is None]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail="没有这些工程：" + "、".join(missing[:5])
+                + (f" 等 {len(missing)} 个" if len(missing) > 5 else ""))
+        jobs = [manager.get(job_id) for job_id in chosen]
+
+        try:
+            target, manifest = await run_in_threadpool(
+                export_batch, jobs, kind=kind, parts=wanted)
+        except BatchExportError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SvpUnavailable as exc:                 # 没装 libresvip
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+        label = "SVP" if kind == "svp" else "产物"
+        name = f"批量-{label}-{time.strftime('%Y%m%d-%H%M')}.zip"
+        return FileResponse(
+            target, filename=name, media_type="application/zip",
+            headers={"X-Batch-Exported": str(len(manifest["exported"])),
+                     "X-Batch-Skipped": str(len(manifest["skipped"]))},
+            background=BackgroundTask(cleanup_dir, target))
 
     return router

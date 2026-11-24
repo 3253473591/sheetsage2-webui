@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import AppSidebar from '@/components/AppSidebar.vue'
+import BatchDialog from '@/components/BatchDialog.vue'
+import BatchView from '@/components/BatchView.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import LogDrawer from '@/components/LogDrawer.vue'
 import LyricsDrawer from '@/components/LyricsDrawer.vue'
@@ -9,6 +11,8 @@ import ProjectHead from '@/components/ProjectHead.vue'
 import ResultsPanel from '@/components/ResultsPanel.vue'
 import TrackList from '@/components/TrackList.vue'
 import TrashDialog from '@/components/TrashDialog.vue'
+import { classifyDrop } from '@/batch'
+import { readDroppedFiles } from '@/drop'
 import { useAudioPlayer } from '@/composables/useAudio'
 import { useStudio } from '@/composables/useStudio'
 import { deleteWarning } from '@/confirm'
@@ -47,7 +51,29 @@ const {
   restoreBackup,
   reset,
   dismissError,
+  batches,
+  activeBatch,
+  batch,
+  openBatch,
+  closeBatch,
 } = useStudio()
+
+// 批量的细粒度状态与动作（`batch` 是 useBatch 的返回值，这里拆开用，模板里才好自动解包）
+const {
+  paused: batchPaused,
+  busy: batchBusy,
+  scanning: batchScanning,
+  scanResult: batchScanResult,
+  uploadProgress: batchUploadProgress,
+  togglePause: toggleBatchPause,
+  stop: stopBatch,
+  retryFailed: retryFailedBatch,
+  exportUrl: batchExportUrl,
+  openJob: openBatchJob,
+  scan: scanBatchDir,
+  start: startBatch,
+  uploadFiles: uploadBatchFiles,
+} = batch
 
 const player = useAudioPlayer()
 const theme = ref<'light' | 'dark'>('light')
@@ -57,6 +83,8 @@ const PHASES: PhaseKey[] = ['transcribe', 'lyrics']
 /** 等待确认的删除（G2：删除按钮不再单击即删）。 */
 const pendingDelete = ref<{ id: string; name: string; message: string } | null>(null)
 const showTrash = ref(false)
+/** 批量导入弹层（侧栏「批量导入文件夹…」或拖进文件夹时打开）。 */
+const showBatchDialog = ref(false)
 
 /** 导入备份（G22）：隐藏的 file input，点顶栏按钮时触发。 */
 const backupInput = ref<HTMLInputElement | null>(null)
@@ -118,6 +146,17 @@ function stopAll(): void {
   void cancel()
 }
 
+/** 弹层里的错误也走顶栏那条红条（统一一处提示）。 */
+function showError(message: string): void {
+  error.value = message
+}
+
+/** 打包下载整批（浏览器直接下 zip；文件名和清单由后端给）。 */
+function downloadBatch(): void {
+  const url = batchExportUrl()
+  if (url) window.location.href = url
+}
+
 function auto(): void {
   // 「自动提取」= 扒谱 → 歌词 一条龙（原型的排队链路）；走后端 /chain，不是两次 runStage
   void runChain()
@@ -162,12 +201,30 @@ function onDragLeave(): void {
   dragDepth = Math.max(0, dragDepth - 1)
   if (dragDepth === 0) dragOver.value = false
 }
-function onDrop(event: DragEvent): void {
+async function onDrop(event: DragEvent): Promise<void> {
   dragDepth = 0
   dragOver.value = false
-  // 一次拖两个也行：第一个当混音原曲、第二个当干声（认名字见 @/drop）
   const files = [...(event.dataTransfer?.files ?? [])]
-  if (files.length) void create(files)
+  if (!files.length) return
+  // 先判"拖进来的是哪一种"：1 个音频 / 混音+干声 / 批量（见 @/batch 的规则表）
+  const kind = classifyDrop(files)
+  if (kind === 'batch') {
+    // 拖文件夹：走上传路线（浏览器拿不到绝对路径，只能一个个传）。
+    // 拿不到目录树（浏览器不支持）才回退到"填路径"。
+    const collected = await readDroppedFiles(event.dataTransfer)
+    if (collected) {
+      await uploadBatchFiles(collected)
+      return
+    }
+    error.value = '这个浏览器拿不到文件夹内容：请用「批量导入文件夹…」填路径'
+    showBatchDialog.value = true
+    return
+  }
+  if (kind === 'unsupported') {
+    error.value = '没认出音频文件：支持 wav / mp3 / flac / m4a…'
+    return
+  }
+  void create(files)
 }
 
 onMounted(async () => {
@@ -246,12 +303,15 @@ function toggleTheme(): void {
     <div class="app">
       <AppSidebar
         :jobs="jobs"
+        :batches="batches"
         :active-id="activeId"
         :busy="busy"
         :phases="PHASES"
         @select="select"
         @remove="askRemove"
         @create="create"
+        @batch-open="openBatch"
+        @batch-import="showBatchDialog = true"
       />
 
       <main class="main">
@@ -270,10 +330,29 @@ function toggleTheme(): void {
               <button @click="dismissError()">×</button>
             </div>
 
-            <div v-if="!active" class="empty-hint">
+            <!-- 批次视图：和单工程视图互斥（选中批次时 activeId 被清空） -->
+            <template v-if="activeBatch">
+              <div class="batch-crumb">
+                <button class="link" @click="closeBatch()">← 返回工程列表</button>
+                <span class="dim">点任意一行 → 打开这个工程（卷帘 / 下载都在那边）</span>
+              </div>
+              <BatchView
+                :detail="activeBatch"
+                :paused="batchPaused"
+                :busy="batchBusy"
+                @open="(id) => openBatchJob(id)"
+                @toggle-pause="toggleBatchPause()"
+                @stop="stopBatch()"
+                @retry="retryFailedBatch()"
+                @export="downloadBatch"
+              />
+            </template>
+
+            <div v-else-if="!active" class="empty-hint">
               <b>拖入一首歌，开始识别</b>
-              拖进来只是新建工程——先选参数（精度 / 范围 / 量化 / 语言…），再点「开始扒谱」<br />
-              请用<b>含人声的完整混音</b>——伴奏版的中段网格会明显变差
+              <p>拖进来只是新建工程——先选参数（精度 / 范围 / 量化 / 语言…），再点「开始扒谱」</p>
+              <p>整批导入：侧栏「批量导入文件夹…」，里面放歌曲与<em>同名 LRC</em> 即可</p>
+              <p>请用<em>含人声的完整混音</em>——伴奏版的中段网格会明显变差</p>
             </div>
 
             <template v-else>
@@ -334,12 +413,37 @@ function toggleTheme(): void {
       正在上传 {{ Math.round(uploadProgress * 100) }}%
     </div>
     <div
-      v-if="anyRunning && !active"
+      v-if="batchUploadProgress"
+      class="drop-overlay"
+      style="background: rgba(37, 99, 235, 0.12)"
+    >
+      正在上传 {{ batchUploadProgress.done + 1 > batchUploadProgress.total
+        ? batchUploadProgress.total : batchUploadProgress.done + 1 }}/{{ batchUploadProgress.total }}
+      · {{ batchUploadProgress.name }}
+    </div>
+    <div
+      v-if="anyRunning && !active && !activeBatch"
       class="empty-hint"
       style="position: fixed; bottom: 40px; left: 0; right: 0"
     >
       有任务在后台运行
     </div>
+
+    <BatchDialog
+      v-if="showBatchDialog"
+      :env="env"
+      :scan="batchScanResult"
+      :scanning="batchScanning"
+      :busy="batchBusy"
+      :error="error"
+      @close="showBatchDialog = false"
+      @scan="(dir) => scanBatchDir(dir)"
+      @error="showError"
+      @start="async (payload) => {
+        const id = await startBatch(payload)
+        if (id) showBatchDialog = false
+      }"
+    />
 
     <ConfirmDialog
       v-if="pendingDelete"

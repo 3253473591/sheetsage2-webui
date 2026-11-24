@@ -5,7 +5,7 @@
  * pending**，用户只能刷新。这里用"永远不 resolve、只响应 abort 的 fetch"把这条件造出来。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchWithTimeout, describeNetworkError } from '../src/api'
+import { batchExportUrl, fetchWithTimeout, describeNetworkError } from '../src/api'
 
 function hangingFetch(_input: unknown, init?: RequestInit): Promise<Response> {
   return new Promise((_resolve, reject) => {
@@ -49,5 +49,21 @@ describe('异常翻译', () => {
 
   it('别的错误 -> 连不上后台服务', () => {
     expect(describeNetworkError(new Error('boom')).message).toContain('连不上后台服务')
+  })
+})
+
+describe('批量下载地址', () => {
+  it('ids 用逗号拼、默认导 SVP', () => {
+    const url = batchExportUrl(['a1', 'b2'])
+    expect(url.startsWith('/api/exports/batch?')).toBe(true)
+    expect(url).toContain('ids=a1%2Cb2')
+    expect(url).toContain('kind=svp')
+    expect(url).not.toContain('parts=')
+  })
+
+  it('产物口径与多轨要带进查询串', () => {
+    const url = batchExportUrl(['a1'], 'files', ['vocal', 'instrumental'])
+    expect(url).toContain('kind=files')
+    expect(url).toContain('parts=vocal%2Cinstrumental')
   })
 })

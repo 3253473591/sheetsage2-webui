@@ -454,3 +454,19 @@ def test_explode_cjk_items_splits_hangul_words():
     assert [text for text, _s, _e in out] == ["사", "랑", "해", "love"]
     assert out[0][1] == 1.0 and abs(out[2][2] - 2.5) < 1e-9
     assert out[3] == ("love", 3.0, 3.5)
+
+
+# --------------------------------------------------------------- LRC 走哪套对齐
+def test_lrc_aligner_kind_picks_tifa_for_chinese_and_english(tmp_path):
+    """中/英/粤的 LRC 走 TIFA（独立小模型），**不必加载 6.3G 的识别模型**。"""
+    engine = AsrEngine(AsrConfig(asr_model=tmp_path))
+    assert engine.lrc_aligner_kind("晚风停在旧站台", "Chinese") == "tifa"
+    assert engine.lrc_aligner_kind("The wind stops here", "English") == "tifa"
+
+
+def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path):
+    """日/韩没有 TIFA G2P，要对齐器（挂在 ASR 模型里）——这两种必须加载识别模型。"""
+    engine = AsrEngine(AsrConfig(asr_model=tmp_path))
+    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
+    # 用户显式指定日语时也要走对齐器（哪怕字面是汉字）
+    assert engine.lrc_aligner_kind("晚风停在旧站台", "Japanese") == "qwen"

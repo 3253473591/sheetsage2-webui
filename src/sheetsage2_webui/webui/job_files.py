@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -137,6 +139,26 @@ def _write_stream(target: Path, stream: Any, limit: int, limit_mb: float) -> int
                 raise UploadRejected(f"文件超过 {limit_mb:g} MB 上限")
             handle.write(chunk)
     return written
+
+
+def import_audio(source: str | Path, target: str | Path, *, link: bool = True) -> int:
+    """把源音频放进工程（批量导入用）。返回字节数。
+
+    **同卷优先硬链接**：一首 40MB 的 flac 复制一遍就是 40MB，40 首就是 1.6GB；
+    硬链接只多一个目录项，源目录照旧（删源文件也不影响工程）。
+    跨卷 / 文件系统不支持时静默退化成复制——失败策略只能是"能跑就行"。
+    """
+    source = Path(source)
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if link:
+        try:
+            os.link(source, target)
+            return target.stat().st_size
+        except (OSError, NotImplementedError):
+            pass                                     # 跨卷 / FAT32 / 没权限：退回复制
+    shutil.copy2(source, target)
+    return target.stat().st_size
 
 
 def scan_files(root: Path) -> list[dict[str, Any]]:

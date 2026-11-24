@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -18,12 +17,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from ..backup import BackupRejected
-from ._shared import ApiDeps, copy_upload, require_job
-
-
-def cleanup_temp_dir(path: Path) -> None:
-    """下载完把备份的临时目录删掉（包里可能有几百 MB，不能一直留着）。"""
-    shutil.rmtree(path.parent, ignore_errors=True)
+from ._shared import ApiDeps, cleanup_dir, copy_upload, require_job
 
 
 def build_router(deps: ApiDeps) -> APIRouter:
@@ -61,7 +55,7 @@ def build_router(deps: ApiDeps) -> APIRouter:
         return FileResponse(
             target, filename=target.name, media_type="application/zip",
             headers={"X-Backup-Projects": str(summary.get("projects") or 0)},
-            background=BackgroundTask(cleanup_temp_dir, target))
+            background=BackgroundTask(cleanup_dir, target))
 
     @router.post("/backup/restore", status_code=201)
     async def restore_backup(

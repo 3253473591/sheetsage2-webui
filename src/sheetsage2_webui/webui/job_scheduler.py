@@ -24,7 +24,7 @@ from ..meta import write_meta
 from .errors import StageFailure, describe as describe_error
 from .job_errors import JobCancelled
 from .job_files import scan_files
-from .job_models import PHASES, STAGE_TERMINAL, Job, Progress, StageRunner
+from .job_models import PHASE_LABELS, PHASES, STAGE_TERMINAL, Job, Progress, StageRunner
 from .job_storage import JobStore
 from .job_text import bytes_text as _bytes_text, duration_text as _duration_text
 
@@ -84,6 +84,21 @@ class Scheduler:
         self._watch: dict[tuple[str, str], _PhaseWatch] = {}
         self._watchdog: threading.Thread | None = None
         self._lock = threading.RLock()
+        #: 派发闸门（批量页的「暂停」）：**只挡"下一项"，不打断正在跑的那一项**。
+        #: 用 `cancel()` 实现暂停是不行的——它有 5 秒冷静期，而且会把 plan 清掉。
+        self._gate = threading.Event()
+        self._gate.set()
+
+    # ---------------------------------------------------------------- 暂停 / 继续
+    @property
+    def paused(self) -> bool:
+        return not self._gate.is_set()
+
+    def pause(self) -> None:
+        self._gate.clear()
+
+    def resume(self) -> None:
+        self._gate.set()
 
     # ---------------------------------------------------------------- 配置
     def set_runners(self, runners: Mapping[str, StageRunner]) -> None:
@@ -208,6 +223,8 @@ class Scheduler:
                 continue
             if job_id is None:
                 return
+            if not self._wait_gate():
+                return
             job = self._lookup(job_id)
             if job is None:
                 continue
@@ -215,6 +232,13 @@ class Scheduler:
                 self._run(job)
             except Exception as exc:  # 工作线程绝不能死掉
                 self._fail(job, exc)
+
+    def _wait_gate(self) -> bool:
+        """暂停时在派发前挡住；返回 `False` 表示服务在关停（线程该退出）。"""
+        while not self._gate.is_set():
+            if self._stop.wait(0.1):
+                return False
+        return True
     def _next_phase(self, job: Job) -> str | None:
         with job.lock:
             while job.plan:
@@ -237,7 +261,32 @@ class Scheduler:
             with job.lock:
                 if job.cancel_requested:
                     break
+                stopped = job.stages[phase].state in ("failed", "cancelled")
+            if stopped:
+                # 这一阶段没成功：**剩下的阶段一起跳过**（批量下否则 40 首变 80 次失败，
+                # 甚至拿上一版 project.json 把旧谱面填上新歌词）。
+                self._skip_rest(job, phase)
+                break
         self._finish(job)
+
+    def _skip_rest(self, job: Job, phase: str) -> None:
+        """把计划里还没跑的阶段标成 `skipped`（人话写在 message 上）。"""
+        with job.lock:
+            skipped = []
+            for rest in list(job.plan):
+                run = job.stages.get(rest)
+                if run is None or run.state in STAGE_TERMINAL:
+                    continue
+                run.state = "skipped"
+                run.message = f"{PHASE_LABELS.get(phase, phase)}没成功，这一项跳过了"
+                run.finished_at = time.time()
+                skipped.append(PHASE_LABELS.get(rest, rest))
+            job.plan.clear()
+        if skipped:
+            job.emit("log", phase=phase,
+                     message=f"{PHASE_LABELS.get(phase, phase)}没成功，"
+                             f"已跳过：{'、'.join(skipped)}")
+        self._store.write_metadata(job)
     def _run_phase(self, job: Job, phase: str) -> None:
         run = job.stages[phase]
         with job.lock:

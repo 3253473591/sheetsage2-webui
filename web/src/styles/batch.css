@@ -1,0 +1,528 @@
+/* SheetSage2 Studio —— 批量页
+ *
+ * 两块：批量导入弹层（`.batch-dialog` + `.ptable`）与批次视图（`.batch-head` + `.btable`）。
+ * 颜色只从 `tokens.css` 取；两类表格共用一套"行"的观感，但列宽各自定义。
+ */
+
+/* ===== 导入弹层 ===== */
+.batch-dialog {
+  width: 920px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 64px);
+  padding: 0;
+  overflow: hidden;
+}
+.batch-dlg-head {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px 10px;
+}
+.batch-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--light);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.batch-close:hover {
+  color: var(--text);
+}
+.batch-dlg-body {
+  padding: 0 20px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.path-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.path-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.scan-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 10px 0;
+}
+.scan-summary b {
+  color: var(--text);
+  font-size: 12.5px;
+}
+.scan-summary .dim,
+.dim {
+  color: var(--light);
+}
+
+/* 提示条：比 `.warn-box` 紧凑一号，用在弹层里 */
+.batch-banner {
+  border-radius: 5px;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin-bottom: 8px;
+}
+.batch-banner.warn {
+  background: var(--warn-l);
+  color: var(--warn);
+}
+.batch-banner.bad {
+  background: var(--ok-l);
+  color: var(--danger);
+}
+
+/* ===== 预览表 ===== */
+.ptable {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ptable-head,
+.ptable .prow {
+  display: grid;
+  grid-template-columns: 32px minmax(140px, 1fr) 74px 62px 112px;
+  gap: 8px;
+  align-items: center;
+  padding: 0 10px;
+}
+.ptable-head {
+  height: 28px;
+  background: var(--bg);
+  font-size: 10.5px;
+  color: var(--light);
+  border-bottom: 1px solid var(--line);
+}
+.ptable-body {
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.ptable .prow {
+  height: 30px;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ptable .prow:last-child {
+  border-bottom: none;
+}
+.ptable .no {
+  text-align: right;
+  color: var(--light);
+  font-size: 10px;
+}
+.ptable .nm {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ptable .prow .lrc {
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.lrc.ok {
+  color: var(--primary);
+}
+.lrc.warn {
+  color: var(--warn);
+}
+.lrc.idle {
+  color: var(--light);
+}
+.pi-warn {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  line-height: 13px;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--warn-l);
+  color: var(--warn);
+  font-size: 9px;
+  font-weight: 700;
+  margin-left: 3px;
+  vertical-align: 1px;
+}
+
+/* ===== 参数（这批统一） ===== */
+.params-block {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px 10px;
+}
+.param-grid {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 7px 10px;
+  align-items: center;
+  margin-top: 8px;
+}
+.p-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.ro {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+/* ===== 批次视图 ===== */
+.batch-crumb {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11px;
+  padding: 0 2px;
+}
+.batch-head {
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bh-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.bh-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+.chip {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--bg);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip.blue {
+  color: var(--primary);
+  background: var(--primary-l);
+  border-color: transparent;
+}
+.bh-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* 分段进度条：绿完成 / 红失败 / 蓝（条纹）当前 */
+.segbar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--line-soft);
+  overflow: hidden;
+  display: flex;
+}
+.segbar i {
+  display: block;
+  height: 100%;
+  transition: width 0.3s;
+}
+.segbar i.ok {
+  background: var(--ok);
+}
+.segbar i.bad {
+  background: var(--danger);
+}
+.segbar i.cur {
+  background: var(--primary);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255, 255, 255, 0.28) 0 6px,
+    rgba(255, 255, 255, 0) 6px 12px
+  );
+}
+.bh-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.bh-stats b {
+  color: var(--text);
+  font-size: 12.5px;
+}
+.bh-stats .bad-text b {
+  color: var(--danger);
+}
+
+/* ===== 批次明细表 ===== */
+.btable {
+  overflow: hidden;
+}
+.btable-head,
+.btable .brow {
+  display: grid;
+  grid-template-columns: 34px minmax(180px, 1fr) 64px 92px 92px 64px 72px;
+  gap: 8px;
+  align-items: center;
+  padding: 0 12px;
+}
+.btable-head {
+  height: 30px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--light);
+}
+.btable-body {
+  max-height: 56vh;
+  overflow-y: auto;
+}
+.btable .brow {
+  height: 34px;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  position: relative;
+}
+.btable .brow:hover {
+  background: var(--line-soft);
+}
+.btable .brow.cur {
+  background: var(--primary-l);
+}
+.btable .brow.cur::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--primary);
+}
+.btable .brow.fail {
+  background: var(--warn-l);
+}
+.btable .no {
+  text-align: right;
+  font-size: 10px;
+  color: var(--light);
+}
+.btable .nm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+.btable .nm .t {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btable .nm small {
+  color: var(--danger);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.btable .ph {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--light);
+}
+.btable .ph.ok {
+  color: var(--ok);
+}
+.btable .ph.run {
+  color: var(--primary);
+}
+.btable .ph.bad {
+  color: var(--danger);
+}
+.minibar {
+  width: 34px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.minibar i {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.4s;
+}
+.btable .right {
+  text-align: right;
+}
+.btable .link {
+  font-size: 10.5px;
+}
+.lrcchip {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  line-height: 15px;
+  padding: 0 5px;
+  border-radius: 8px;
+}
+.lrcchip.on {
+  color: var(--primary);
+  background: var(--primary-l);
+}
+
+/* 结束小结 */
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+}
+.summary .big {
+  font-size: 13px;
+  font-weight: 600;
+}
+.summary .sub {
+  font-size: 11px;
+  color: var(--light);
+  margin-top: 2px;
+}
+.summary .acts {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+/* ===== 侧栏：批次分组 ===== */
+.sb-batch-link {
+  margin-top: 4px;
+  border: none;
+  background: none;
+  color: var(--primary);
+  font-size: 11px;
+  padding: 0;
+}
+.sb-group {
+  margin-bottom: 4px;
+}
+.sb-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: 5px;
+}
+.sb-group-head:hover {
+  background: var(--line-soft);
+}
+.sb-caret {
+  border: none;
+  background: none;
+  color: var(--light);
+  font-size: 9px;
+  width: 12px;
+  padding: 0;
+  flex: 0 0 auto;
+}
+.sb-group-name {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0;
+}
+.sb-group-name:hover {
+  color: var(--primary);
+}
+.sb-group-count {
+  font-size: 10px;
+  color: var(--light);
+  flex: 0 0 auto;
+}
+.sb-mini {
+  display: flex;
+  width: 42px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.sb-mini i {
+  display: block;
+  height: 100%;
+}
+.sb-mini i.ok {
+  background: var(--ok);
+}
+.sb-mini i.bad {
+  background: var(--danger);
+}
+.sb-sub {
+  font-size: 10px;
+  color: var(--light);
+  padding: 8px 8px 4px;
+  letter-spacing: 0.5px;
+}
+.batch-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+}
+.batch-item .pi-no {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: right;
+  font-size: 9.5px;
+  color: var(--light);
+}
+.batch-item .pi-name {
+  flex: 1;
+  font-size: 12px;
+}
+.batch-item .pi-lrc {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  color: var(--primary);
+}
+.batch-item .st {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  padding: 0 4px;
+}

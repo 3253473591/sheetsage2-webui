@@ -796,6 +796,34 @@ class AsrEngine:
             run.chars, run.repaired_chars = interpolate_degenerate(run.chars)
         return run
 
+    # ------------------------------------------------------------------ LRC 路由
+    def _lrc_route(self, text: str, language: str | None) -> tuple[str, str]:
+        """带时间戳的 LRC 该走哪套对齐：`(kind, tifa 语言码)`。
+
+        `kind == "tifa"` 只要随包的小模型（40M）；`kind == "qwen"` 要对齐器，而它**挂在
+        ASR 模型里**（`_model.forced_aligner`）——所以这个判断决定了"要不要加载 6.3G"。
+        """
+        from .tifa_align import guess_language, tifa_language
+
+        wanted = normalize_language(self.config.language if language is None else language)
+        sticky = tifa_language(wanted or "zh")
+        script = guess_language(text or "")
+        if sticky == "zh" and script != "zh":
+            sticky = script
+        return ("qwen" if sticky in ("ja", "ko") else "tifa"), sticky
+
+    def lrc_aligner_kind(self, text: str, language: str | None = None) -> str:
+        """`"tifa"` / `"qwen"`：见 :meth:`_lrc_route`。
+
+        **给 runner 用**：中/英/粤的 LRC 不必加载识别模型（批量导入时每首省一次
+        6.3G 加载 + 一次卸载）；日/韩仍然要，因为对齐器在 ASR 模型里。
+        """
+        return self._lrc_route(text, language)[0]
+
+    def alignment_ready(self) -> tuple[bool, str]:
+        """TIFA（逐行对齐那个 40M 小模型）在不在；不在时给一句人话原因。"""
+        return self._tifa_ready()
+
     def _transcribe_with_lrc(
         self,
         audio: str | Path,
@@ -820,11 +848,8 @@ class AsrEngine:
         wanted_language = (normalize_language(self.config.language)
                            if language is None else normalize_language(language))
         joined = "\n".join(line.text for line in lines)
-        sticky = tifa_language(wanted_language or "zh")
-        script = guess_language(joined)
-        if sticky == "zh" and script != "zh":
-            sticky = script
-        if sticky in ("ja", "ko"):
+        kind, sticky = self._lrc_route(joined, language)
+        if kind == "qwen":
             # TIFA 1.0 没有日语/韩语 G2P；改用 Qwen 强制对齐器（支持 ja/ko）。
             return self._align_lines_with_qwen_aligner(
                 audio, lines,

@@ -69,7 +69,11 @@ def build_router(deps: ApiDeps) -> APIRouter:
 
     # ------------------------------------------------------------------ 工程
     @router.get("/jobs")
-    async def list_jobs() -> dict[str, Any]:
+    async def list_jobs(view: str = "") -> dict[str, Any]:
+        """工程列表。`view=rows` 是**轻量投影**（侧栏 / 批量表用：不带 `options` 里的 LRC
+        全文、不带产物清单），全量快照仍按 `GET /api/jobs/{id}` 取。"""
+        if view == "rows":
+            return {"jobs": [job.row() for job in manager.list()]}
         return {"jobs": [job.snapshot() for job in manager.list()]}
 
     @router.post("/jobs", status_code=201)
