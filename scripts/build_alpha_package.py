@@ -50,7 +50,8 @@ SEVEN_ZIP_CANDIDATES = (Path(r"D:\7-Zip\7z.exe"),
 COPY_DIRS = ("src", "scripts", "tools", "web", "docs", "tests")
 #: 单个文件带走。
 COPY_FILES = ("pyproject.toml", "downloads.json", "NOTICE", "README.md",
-              "00_start.bat", "01_install.bat", "02_models.bat", ".gitignore")
+              "00_start.bat", "01_install.bat", "02_models.bat", "unblock_files.bat",
+              ".gitignore")
 #: 目录里不要的东西。
 EXCLUDE_NAMES = {"__pycache__", ".pytest_cache", "node_modules", "dist", ".smoke",
                  ".venv", "models", "output", "tmp", "wheels", "runtime"}
