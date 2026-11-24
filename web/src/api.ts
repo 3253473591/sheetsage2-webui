@@ -387,7 +387,13 @@ export async function browseFolder(): Promise<string | null> {
  */
 export function uploadBatchFile(
   file: File,
-  payload: { lyrics?: string; batchId?: string; title?: string; plan?: PhaseKey[] } = {},
+  payload: {
+    lyrics?: string
+    batchId?: string
+    title?: string
+    plan?: PhaseKey[]
+    expectedTotal?: number
+  } = {},
   onProgress?: (fraction: number) => void,
 ): Promise<{ batch: JobBatch; jobs: JobRow[]; problems: string[] }> {
   return new Promise((resolve, reject) => {
@@ -397,6 +403,7 @@ export function uploadBatchFile(
     if (payload.batchId) form.append('batch_id', payload.batchId)
     if (payload.title) form.append('title', payload.title)
     if (payload.plan?.length) form.append('plan', payload.plan.join(','))
+    if (payload.expectedTotal) form.append('expected_total', String(payload.expectedTotal))
     const request = new XMLHttpRequest()
     request.open('POST', `${BASE}/batches/upload`)
     request.responseType = 'text'
@@ -469,6 +476,15 @@ export function batchExportUrl(ids: string[], kind: 'svp' | 'files' = 'svp',
   const query = new URLSearchParams({ ids: ids.join(','), kind })
   if (parts.length) query.set('parts', parts.join(','))
   return `${BASE}/exports/batch?${query.toString()}`
+}
+
+/** **继续剩余**：把这一批里没跑完的成员重新排队（已完成的绝不重跑）。 */
+export async function resumeBatch(id: string): Promise<{
+  resumed: number
+  job_ids: string[]
+  skipped: { id: string; name: string; reason: string }[]
+}> {
+  return postJson(`/batches/${encodeURIComponent(id)}/resume`, {})
 }
 
 /** 诊断包下载地址（G12）。不传 id = 全部工程 + env + 日志。 */

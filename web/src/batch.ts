@@ -160,6 +160,53 @@ export function formatSpan(seconds: number | null | undefined): string {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
 }
 
+// ---------------------------------------------------------------- 拖拽上传的续传
+/** 存在 localStorage 里的"上次没传完的批次"。 */
+export interface PendingUpload {
+  batchId: string
+  folderName: string
+  /** 这次拖进来一共几首（= 应传总数） */
+  expected: number
+  /** 已经传成功几首 */
+  done: number
+}
+
+/** 这次上传该往哪个批次写。 */
+export interface UploadTarget {
+  /** 复用上次的批次 id；新批次是 undefined（让服务端铸） */
+  batchId?: string
+  /** 声明总首数（服务端只在缺的时候记） */
+  expectedTotal: number
+  /** 是不是接着上次传 */
+  resume: boolean
+}
+
+/**
+ * 同名的文件夹再拖一次，就接着上次的批次传（服务端已经支持 `batch_id` 复用）。
+ *
+ * 三条规则：
+ * - 没有记录 / 换了文件夹 / 上次已经传够了 → 开新批次；
+ * - 同名文件夹且上次没传够 → 复用批次 id，总首数沿用上次的（用户可能只挑了剩下的几首传）；
+ * - 复用时不把 `expectedTotal` 改小，否则"还差几首"会算错。
+ */
+export function resolveUploadTarget(
+  stored: PendingUpload | null,
+  folderName: string,
+  total: number,
+): UploadTarget {
+  if (stored && stored.folderName === folderName && stored.done > 0
+    && stored.done < stored.expected) {
+    return { batchId: stored.batchId, expectedTotal: stored.expected, resume: true }
+  }
+  return { expectedTotal: Math.max(total, stored?.expected ?? 0), resume: false }
+}
+
+/** 还差几首（用于批次页提示）。没有 `expected_total` 就是 0。 */
+export function missingUploads(expected: number | undefined, total: number): number {
+  if (!expected || expected <= total) return 0
+  return expected - total
+}
+
 /** 预览表里"大小"那一列。 */
 export function formatSize(bytes: number): string {
   if (!bytes) return '—'

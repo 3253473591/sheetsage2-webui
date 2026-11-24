@@ -487,7 +487,8 @@ class JobManager:
         if wanted:
             self._scheduler.submit(job.id)
 
-    def run_stage(self, job_id: str, phase: str, *, chain: bool = False) -> Job | None:
+    def run_stage(self, job_id: str, phase: str, *, chain: bool = False,
+                  force: bool = False) -> Job | None:
         """单独（重）跑一个阶段：清掉它的旧状态，塞回待跑队列。
 
         工作流是 **扒谱 → 歌词**（原型也是这么写的），所以手动跑歌词**必须先有扒谱**：
@@ -495,6 +496,9 @@ class JobManager:
 
         ``chain=True`` 是例外——那是「⏵ 自动提取（扒谱 → 歌词）」：它**故意**在扒谱还没跑完时
         就把歌词排进队列，所以跳过前置检查（计划里本来就先跑扒谱）。
+
+        ``force=True`` 跳过"刚取消"的冷静期：批量的「继续剩余」是一次明确的批量动作，
+        不该被 5 秒墓碑挡住（手抖连点的保护仍然对单工程生效）。
         """
         job = self.get(job_id)
         if job is None:
@@ -510,11 +514,14 @@ class JobManager:
         with job.lock:
             # 重复入队去重（G14）：已经在排队 / 正在跑就不重新排，否则连点两次会把同一个
             # job_id 塞进队列两次（`--workers 2` 时甚至会并发跑两份）。
-            if job.stages[phase].state in ("queued", "running"):
+            # **但终态工程不算**：崩溃/取消可能留下"job 已 cancelled、某阶段还挂着 queued"
+            # 的僵尸组合——不重排的话「继续剩余」会空转（`run_stage` 每次都在这里早退）。
+            if (job.stages[phase].state in ("queued", "running")
+                    and job.state not in TERMINAL_STATES):
                 return job
             # 取消后的"墓碑"（G14）：刚取消又立刻点开始，多半是手抖——直接拒绝，
             # 别让"取消"被这次点击抹掉。
-            if job.canceled_at is not None and \
+            if not force and job.canceled_at is not None and \
                     time.time() - job.canceled_at < CANCEL_COOLDOWN_SECONDS:
                 raise RuntimeError("刚刚取消，稍等几秒再开始")
             run = job.stages[phase]
@@ -540,12 +547,12 @@ class JobManager:
         self._scheduler.submit(job_id)
         return job
 
-    def run_chain(self, job_id: str) -> Job | None:
+    def run_chain(self, job_id: str, *, force: bool = False) -> Job | None:
         """「自动提取」：扒谱 → 歌词，一条龙排进队列（两个都重跑）。"""
-        job = self.run_stage(job_id, "transcribe")
+        job = self.run_stage(job_id, "transcribe", force=force)
         if job is None:
             return None
-        return self.run_stage(job_id, "lyrics", chain=True)
+        return self.run_stage(job_id, "lyrics", chain=True, force=force)
 
     def _assert_transcribed(self, job: Job) -> None:
         """歌词识别的前置条件：扒谱已经完成。

@@ -13,11 +13,15 @@
 
 import { computed, ref, type Ref } from 'vue'
 import * as api from '@/api'
+import { resolveUploadTarget, type PendingUpload } from '@/batch'
 import { groupForUpload } from '@/drop'
 import type { BatchDetail, BatchInfo, BatchScan, JobOptions, JobRow, PhaseKey } from '@/types'
 
 /** 有行在跑时的轮询间隔。批量视图只是"看进度"，1.5s 足够。 */
 export const POLL_MS = 1500
+
+/** "上次没传完的批次"存在 localStorage 里，重开页面也能续传。 */
+const UPLOAD_KEY = 'sheetsage-batch-upload'
 
 export interface BatchDeps {
   onError: (message: string) => void
@@ -31,6 +35,34 @@ export interface BatchDeps {
 
 function message(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc)
+}
+
+// ---------------------------------------------------------------- 上传续传的存档
+function readPending(): PendingUpload | null {
+  try {
+    const raw = window.localStorage.getItem(UPLOAD_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw) as PendingUpload
+    return typeof data?.batchId === 'string' && typeof data?.folderName === 'string'
+      ? data : null
+  } catch {
+    return null
+  }
+}
+
+function writePending(pending: PendingUpload | null): void {
+  try {
+    if (!pending) window.localStorage.removeItem(UPLOAD_KEY)
+    else window.localStorage.setItem(UPLOAD_KEY, JSON.stringify(pending))
+  } catch {
+    /* 隐私模式禁用 localStorage 也不该让上传失败 */
+  }
+}
+
+/** 拖进来的文件夹名（Chrome 的 `webkitRelativePath` 形如 `专辑/01.flac`）。 */
+function folderNameOf(files: File[]): string {
+  const path = (files[0] as File & { webkitRelativePath?: string }).webkitRelativePath ?? ''
+  return path.split('/')[0] ?? ''
 }
 
 export function useBatch(deps: BatchDeps) {
@@ -68,6 +100,8 @@ export function useBatch(deps: BatchDeps) {
     try {
       const next = await api.getBatch(activeId.value)
       detail.value = next
+      // 闸门状态以服务端为准（磁盘满会自动暂停，客户端不一定点过暂停）
+      paused.value = Boolean(next.paused)
       // 侧栏与列表用的是同一份工程状态：把轻量行合并进去（不复制第二份）
       deps.onRows(next.rows)
       // 组头的 "12/40" 也要跟着走（`reload` 只在建完/停止时拉，不必每拍都请求）
@@ -161,9 +195,15 @@ export function useBatch(deps: BatchDeps) {
       deps.onError('这个文件夹里没有音频（wav / mp3 / flac / m4a…）')
       return null
     }
+    const folderName = folderNameOf(files)
+    const stored = readPending()
+    const target = resolveUploadTarget(stored, folderName, pairs.length)
     busy.value = true
     uploadProgress.value = { done: 0, total: pairs.length, name: pairs[0]!.name }
-    let batchId: string | null = null
+    let batchId: string | null = target.batchId ?? null
+    let done = target.resume ? (stored?.done ?? 0) : 0
+    const expected = target.expectedTotal
+    if (folderName) writePending({ batchId: batchId ?? '', folderName, expected, done })
     try {
       for (const [index, pair] of pairs.entries()) {
         uploadProgress.value = { done: index, total: pairs.length, name: pair.name }
@@ -171,10 +211,17 @@ export function useBatch(deps: BatchDeps) {
         const body = await api.uploadBatchFile(pair.audio, {
           lyrics,
           batchId: batchId ?? undefined,
-          title: `拖入的 ${pairs.length} 首`,
+          title: `拖入的 ${expected} 首`,
           plan: ['transcribe', 'lyrics'],
+          expectedTotal: expected,
         })
         batchId = body.batch.id
+        done += 1
+        if (folderName && done < expected) {
+          writePending({ batchId, folderName, expected, done })
+        } else if (done >= expected) {
+          writePending(null)                 // 传够了，别再续传
+        }
       }
       uploadProgress.value = { done: pairs.length, total: pairs.length, name: '正在建批次…' }
       await deps.onJobsChanged()
@@ -186,6 +233,27 @@ export function useBatch(deps: BatchDeps) {
       return null
     } finally {
       uploadProgress.value = null
+      busy.value = false
+    }
+  }
+
+  /** **继续剩余**：崩溃/断电/磁盘满之后，一次把没跑完的成员重新排队。 */
+  async function resumeRemaining(): Promise<number> {
+    if (!activeId.value) return 0
+    busy.value = true
+    try {
+      const body = await api.resumeBatch(activeId.value)
+      await deps.onJobsChanged()
+      await refresh()
+      if (hasWork.value) startPolling()
+      if (body.skipped.length) {
+        deps.onError(`${body.skipped.length} 首没能重排：${body.skipped[0]!.reason}`)
+      }
+      return body.resumed
+    } catch (exc) {
+      deps.onError(message(exc))
+      return 0
+    } finally {
       busy.value = false
     }
   }
@@ -279,6 +347,7 @@ export function useBatch(deps: BatchDeps) {
     scan,
     start,
     uploadFiles,
+    resumeRemaining,
     pause,
     resume,
     togglePause,

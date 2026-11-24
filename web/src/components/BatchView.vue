@@ -8,7 +8,7 @@
  * 2. 行内只放**一句人话**（失败原因）；点行进普通工程页看完整错误、卷帘、下载。
  */
 import { computed } from 'vue'
-import { batchStats, formatSpan } from '@/batch'
+import { batchStats, formatSpan, missingUploads } from '@/batch'
 import type { BatchDetail, JobRow, PhaseKey } from '@/types'
 
 const props = defineProps<{
@@ -22,6 +22,7 @@ const emit = defineEmits<{
   togglePause: []
   stop: []
   retry: []
+  resumeRemaining: []
   export: []
 }>()
 
@@ -31,6 +32,22 @@ const folder = computed(() => props.detail.batch.folder ?? '')
 
 const running = computed(() => stats.value.running > 0)
 const finished = computed(() => !running.value && stats.value.pending === 0)
+/** 队列里真有东西在动（queued/running）——`draft` 是"重启后没排上"，不算。 */
+const inFlight = computed(() => rows.value.some((row) => row.state === 'running'
+  || row.state === 'queued'))
+/** 没拿到结果的首数。判据和后端一致：**两个阶段都 done 才算完成**
+ *  （只扒了谱、歌词被跳过的，也算"还没跑完"——「继续剩余」会把它的歌词补上）。 */
+const remaining = computed(() => rows.value.filter((row) => {
+  const transcribe = row.stages?.transcribe?.state
+  const lyrics = row.stages?.lyrics?.state
+  return !(transcribe === 'done' && lyrics === 'done')
+}).length)
+/** 这一批里有没有磁盘满的失败（决定暂停的措辞）。 */
+const diskFull = computed(() => rows.value.some((row) => Object.values(row.stages ?? {})
+  .some((stage) => stage?.error_code === 'E_DISK_FULL')))
+/** 拖拽上传没传完（第一次带了 expected_total，服务端记着）。 */
+const missing = computed(() => missingUploads(props.detail.batch.expected_total,
+  props.detail.rows.length))
 
 const bar = computed(() => ({
   ok: `${stats.value.okRatio * 100}%`,
@@ -38,9 +55,17 @@ const bar = computed(() => ({
   cur: running.value ? `${(1 / Math.max(1, stats.value.total)) * 100}%` : '0%',
 }))
 
-/** 顶部那条提示：能解释"为什么慢 / 为什么停"的才出现。 */
+/** 顶部那条提示：能解释"为什么慢 / 为什么停 / 还差什么"的才出现。 */
 const banner = computed(() => {
-  if (props.paused) return '已暂停：当前这首跑完就不再派发下一首，点「继续」接着跑。'
+  if (diskFull.value && props.paused) {
+    return '磁盘空间不够，批次已自动暂停：清出空间后点「继续剩余」。'
+  }
+  if (missing.value) {
+    return `还差 ${missing.value} 首没上传：把同一个文件夹再拖一次，会接着这个批次传。`
+  }
+  if (props.paused) {
+    return '已暂停：当前这首跑完就不再派发下一首，点「继续」接着跑。'
+  }
   if (props.detail.stats.failed && finished.value) {
     return `${props.detail.stats.failed} 首没跑完：点「重试失败的」只重排这几首，已经好的不会重跑。`
   }
@@ -81,18 +106,23 @@ function elapsedTotal(): string {
       <span class="chip blue" title="一台显卡同时跑两首只会一起变慢，这一版固定串行">串行</span>
       <span v-if="folder" class="chip" :title="folder">{{ folder }}</span>
       <div class="bh-actions">
-        <button v-if="running || stats.pending" class="btn-secondary" :disabled="busy"
+        <button v-if="inFlight" class="btn-secondary" :disabled="busy"
                 @click="emit('togglePause')">
           {{ paused ? '继续' : '暂停' }}
         </button>
-        <button v-if="running || stats.pending" class="btn-secondary danger" :disabled="busy"
+        <button v-if="inFlight" class="btn-secondary danger" :disabled="busy"
                 @click="emit('stop')">
           停止
         </button>
         <button v-if="stats.failed" class="btn-secondary" :disabled="busy" @click="emit('retry')">
           重试失败的 {{ stats.failed }} 首
         </button>
-        <button v-if="stats.done" class="btn-primary" @click="emit('export')">
+        <!-- 崩溃/断电之后的主入口：一次把没跑完的全排上 -->
+        <button v-if="!inFlight && remaining" class="btn-primary" :disabled="busy"
+                @click="emit('resumeRemaining')">
+          继续剩余 {{ remaining }} 首
+        </button>
+        <button v-if="stats.done" class="btn-secondary" @click="emit('export')">
           打包下载 {{ stats.done }} 个 SVP
         </button>
       </div>
@@ -174,6 +204,10 @@ function elapsedTotal(): string {
     <div class="acts">
       <button v-if="stats.done" class="btn-primary" @click="emit('export')">
         打包下载 {{ stats.done }} 个 SVP
+      </button>
+      <button v-if="remaining" class="btn-secondary" :disabled="busy"
+              @click="emit('resumeRemaining')">
+        继续剩余 {{ remaining }} 首
       </button>
       <button v-if="stats.failed" class="btn-secondary" :disabled="busy" @click="emit('retry')">
         只重试失败的 {{ stats.failed }} 首

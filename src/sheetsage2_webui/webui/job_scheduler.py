@@ -259,15 +259,31 @@ class Scheduler:
                 break
             self._run_phase(job, phase)
             with job.lock:
-                if job.cancel_requested:
-                    break
+                cancelled = job.cancel_requested
                 stopped = job.stages[phase].state in ("failed", "cancelled")
+            if cancelled:
+                # 取消：剩下的阶段一起标 cancelled（否则会留下"工程已终态、阶段还 queued"
+                # 的僵尸，下次「继续剩余」会被去重条件挡住）。
+                self._cancel_rest(job, phase)
+                break
             if stopped:
                 # 这一阶段没成功：**剩下的阶段一起跳过**（批量下否则 40 首变 80 次失败，
                 # 甚至拿上一版 project.json 把旧谱面填上新歌词）。
                 self._skip_rest(job, phase)
                 break
         self._finish(job)
+
+    def _cancel_rest(self, job: Job, phase: str) -> None:
+        """取消后把计划里剩下的阶段标成 `cancelled` 并清空计划。"""
+        with job.lock:
+            for rest in list(job.plan):
+                run = job.stages.get(rest)
+                if run is None or run.state in STAGE_TERMINAL:
+                    continue
+                run.state = "cancelled"
+                run.message = "已取消"
+                run.finished_at = time.time()
+            job.plan.clear()
 
     def _skip_rest(self, job: Job, phase: str) -> None:
         """把计划里还没跑的阶段标成 `skipped`（人话写在 message 上）。"""
@@ -331,6 +347,12 @@ class Scheduler:
                     error = {"code": run.error_code, "message": run.error,
                              "action": run.error_action, "detail": run.error_detail}
                 job.emit("phase_error", phase=phase, **error)
+                # 磁盘不够是**整台机器**的状态，不是这一首的问题：批量里接着跑下一首
+                # 只会把同样的失败再演一遍（40 首 40 次），所以直接关上派发闸门。
+                if run.error_code == "E_DISK_FULL" and job.batch:
+                    self.pause()
+                    job.emit("log", phase=phase,
+                             message="磁盘空间不够，批次已暂停：清出空间后点「继续剩余」")
         else:
             detail = payload.get("detail") or {}
             if watch.fired:

@@ -8,7 +8,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  batchStats, classifyDrop, formatSize, formatSpan, lrcBadge,
+  batchStats, classifyDrop, formatSize, formatSpan, lrcBadge, missingUploads,
+  resolveUploadTarget,
   PER_AUDIO_SECOND, PER_SONG_OVERHEAD,
 } from '../src/batch'
 import type { JobRow, PhaseKey, StageRow } from '../src/types'
@@ -143,5 +144,37 @@ describe('歌词源与人话格式', () => {
     expect(formatSize(2048)).toBe('2 KB')
     expect(formatSize(28 * 1024 * 1024)).toBe('28.0 MB')
     expect(formatSize(300 * 1024 * 1024)).toBe('300 MB')
+  })
+})
+
+describe('拖拽上传的续传', () => {
+  it('没有记录 / 换了文件夹 → 开新批次', () => {
+    expect(resolveUploadTarget(null, '专辑A', 5)).toEqual({ expectedTotal: 5, resume: false })
+    const stored = { batchId: 'b1', folderName: '专辑A', expected: 5, done: 2 }
+    expect(resolveUploadTarget(stored, '专辑B', 3)).toMatchObject({ resume: false })
+  })
+
+  it('同名文件夹、上次没传够 → 复用批次，并沿用上次的总首数', () => {
+    const stored = { batchId: 'b1', folderName: '专辑A', expected: 40, done: 19 }
+    expect(resolveUploadTarget(stored, '专辑A', 21)).toEqual({
+      batchId: 'b1', expectedTotal: 40, resume: true,
+    })
+  })
+
+  it('上次已经传够 → 当作新的一批（不重复往老批次里塞）', () => {
+    const stored = { batchId: 'b1', folderName: '专辑A', expected: 5, done: 5 }
+    expect(resolveUploadTarget(stored, '专辑A', 5).resume).toBe(false)
+  })
+
+  it('一首都没成功过（done=0）也算新批次', () => {
+    const stored = { batchId: 'b1', folderName: '专辑A', expected: 5, done: 0 }
+    expect(resolveUploadTarget(stored, '专辑A', 5).resume).toBe(false)
+  })
+
+  it('「还差几首」只按 expected_total 算，传够了就是 0', () => {
+    expect(missingUploads(undefined, 3)).toBe(0)
+    expect(missingUploads(40, 19)).toBe(21)
+    expect(missingUploads(5, 5)).toBe(0)
+    expect(missingUploads(5, 6)).toBe(0)
   })
 })

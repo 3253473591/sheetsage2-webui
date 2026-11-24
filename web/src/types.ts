@@ -440,6 +440,8 @@ export interface JobBatch {
   folder?: string | null
   /** 文件夹里的序号（批次内排序用它，不靠创建时间） */
   index?: number
+  /** 拖文件夹上传时客户端声明的总首数：传了一半断掉，界面靠它说"还差 N 首" */
+  expected_total?: number
 }
 
 /** `GET /api/jobs?view=rows` 的一行：**轻量投影**（不含产物清单与 LRC 全文）。 */
@@ -532,4 +534,6 @@ export interface BatchDetail {
   batch: JobBatch
   rows: JobRow[]
   stats: BatchStats
+  /** 派发闸门当前是不是暂停（可能是用户点的，也可能是磁盘满自动暂停） */
+  paused?: boolean
 }

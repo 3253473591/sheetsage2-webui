@@ -144,6 +144,7 @@ def build_router(deps: ApiDeps) -> APIRouter:
         title: Annotated[str | None, Form()] = None,
         options: Annotated[str | None, Form()] = None,
         plan: Annotated[str | None, Form()] = None,
+        expected_total: Annotated[int | None, Form()] = None,
     ) -> dict[str, Any]:
         """**拖文件夹**这条路的建工程接口：一次一个文件，带同一个 `batch_id` 就归一批。
 
@@ -167,7 +168,7 @@ def build_router(deps: ApiDeps) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        batch = _ensure_batch(manager.list(), batch_id, title)
+        batch = _ensure_batch(manager.list(), batch_id, title, expected_total)
         # `index` = 批次里的序号（上传顺序）；`job.batch` 带着它，排序就不靠时钟
         members = [job for job in manager.list()
                    if (job.batch or {}).get("id") == batch["id"]]
@@ -208,7 +209,44 @@ def build_router(deps: ApiDeps) -> APIRouter:
             "batch": members[0].batch,
             "rows": [job.row() for job in members],
             "stats": _stats(members),
+            # 闸门可能是"用户点的暂停"，也可能是**磁盘满自动暂停**——界面要能分辨
+            "paused": manager.paused,
         }
+
+    @router.post("/batches/{batch_id}/resume")
+    async def resume_remaining(batch_id: str) -> dict[str, Any]:
+        """**继续剩余**：把这一批里没跑完的成员按顺序重新排队（已完成的绝不动）。
+
+        这是"崩溃/断电之后回来怎么办"的答案：重启后成员的阶段被标成 idle、工程退回 draft，
+        队列是空的——点这里一次就能接着跑，而不是手动点 28 次。
+
+        顺手解除派发闸门（磁盘满自动暂停之后，用户清理完点这个就能继续）。
+        """
+        members = _members(manager.list(), batch_id)
+        if not members:
+            raise HTTPException(status_code=404, detail="没有这个批次")
+        manager.resume()
+        resumed: list[str] = []
+        skipped: list[dict[str, Any]] = []
+        for job in members:
+            if job.imported:
+                skipped.append({"id": job.id, "name": job.name, "reason": "只读产物，不能重跑"})
+                continue
+            with job.lock:
+                transcribe_done = job.stages["transcribe"].state == "done"
+                lyrics_done = job.stages["lyrics"].state == "done"
+            if transcribe_done and lyrics_done:
+                continue
+            try:
+                if transcribe_done:
+                    manager.run_stage(job.id, "lyrics", force=True)
+                else:
+                    manager.run_chain(job.id, force=True)
+            except (ImportedProject, StageNotReady, RuntimeError, ValueError) as exc:
+                skipped.append({"id": job.id, "name": job.name, "reason": str(exc)})
+                continue
+            resumed.append(job.id)
+        return {"resumed": len(resumed), "job_ids": resumed, "skipped": skipped}
 
     return router
 
@@ -263,22 +301,32 @@ def _members(jobs: list[Job], batch_id: str) -> list[Job]:
     return members
 
 
-def _ensure_batch(jobs: list[Job], batch_id: str | None, title: str | None) -> dict[str, Any]:
-    """上传式批量的归属：给了 `batch_id` 就复用（标题不覆盖），否则铸一个新的。"""
+def _ensure_batch(jobs: list[Job], batch_id: str | None, title: str | None,
+                  expected_total: int | None = None) -> dict[str, Any]:
+    """上传式批量的归属：给了 `batch_id` 就复用（标题不覆盖），否则铸一个新的。
+
+    `expected_total` 只在**缺的时候**补上（客户端知道拖了几首）：传了一半断掉之后，
+    界面就靠它说"还差 N 首"。
+    """
     wanted = str(batch_id or "").strip()
     existing = next((job.batch for job in jobs
                      if wanted and (job.batch or {}).get("id") == wanted), None)
     if existing is not None:
         batch = dict(existing)
         batch.pop("index", None)                 # index 是每个工程的，不进批次头
+        if expected_total and not batch.get("expected_total"):
+            batch["expected_total"] = int(expected_total)
         return batch
     new_id = wanted or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
-    return {
+    batch = {
         "id": new_id,
         "title": (str(title).strip() if title and str(title).strip()
                   else f"拖入的 {time.strftime('%m-%d %H:%M')}"),
         "folder": None,
     }
+    if expected_total:
+        batch["expected_total"] = int(expected_total)
+    return batch
 
 
 def _stats(members: list[Job]) -> dict[str, Any]:

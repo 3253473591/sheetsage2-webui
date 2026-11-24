@@ -73,6 +73,7 @@ const {
   scan: scanBatchDir,
   start: startBatch,
   uploadFiles: uploadBatchFiles,
+  resumeRemaining: resumeBatchRemaining,
 } = batch
 
 const player = useAudioPlayer()
@@ -344,6 +345,7 @@ function toggleTheme(): void {
                 @toggle-pause="toggleBatchPause()"
                 @stop="stopBatch()"
                 @retry="retryFailedBatch()"
+                @resume-remaining="resumeBatchRemaining()"
                 @export="downloadBatch"
               />
             </template>

@@ -376,6 +376,136 @@ def test_upload_endpoint_rejects_bad_input(tmp_path):
         assert "唱词" in bad_lyrics.json()["detail"]
 
 
+# --------------------------------------------- 健壮性：磁盘满暂停 / 继续剩余
+def test_disk_full_pauses_the_batch(tmp_path, monkeypatch):
+    """磁盘不够是**整台机器**的状态：不能 40 首连着失败 40 次，要直接暂停批次。"""
+    import shutil
+    import types
+
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        monkeypatch.setattr(
+            shutil, "disk_usage",
+            lambda path: types.SimpleNamespace(total=10 ** 9, used=10 ** 9, free=0))
+        body = client.post("/api/batches", json={"dir": str(batch_folder(tmp_path))}).json()
+        batch_id = body["batch"]["id"]
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not any(
+                job.state == "failed" for job in manager.list()):
+            time.sleep(0.05)
+
+        assert any(job.state == "failed" for job in manager.list())
+        failed = next(job for job in manager.list() if job.state == "failed")
+        assert failed.snapshot()["stages"]["transcribe"]["error_code"] == "E_DISK_FULL"
+        assert manager.paused is True                     # 闸门被关上了
+        assert client.get(f"/api/batches/{batch_id}").json()["paused"] is True
+        # 第二首还停在 queued（没被拉起来再失败一遍）
+        states = [job.state for job in manager.list()]
+        assert "queued" in states or "draft" in states
+
+        # 清出磁盘、点「继续剩余」→ 剩下的能跑
+        monkeypatch.undo()
+        resumed = client.post(f"/api/batches/{batch_id}/resume").json()
+        assert resumed["resumed"] >= 1
+        for job in manager.list():
+            wait_for_state(client, job.id, {"done", "failed"})
+
+
+def test_batch_resume_queues_the_unfinished_members(tmp_path):
+    """重启后剩下的是 draft：一次请求把它们全部重新排队，已完成的绝不动。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        source = tmp_path / "src"
+        batch = {"id": "b-restart", "title": "重启后", "folder": None}
+        for index, name in enumerate(("01.wav", "02.wav", "03.wav")):
+            manager.create_from_path(write(source / name), plan=(),
+                                     batch={**batch, "index": index})
+        assert [job.state for job in manager.list()] == ["draft"] * 3
+
+        response = client.post("/api/batches/b-restart/resume")
+        assert response.status_code == 200, response.text
+        assert response.json()["resumed"] == 3
+        for job in manager.list():
+            wait_for_state(client, job.id, {"done"})
+
+        # 再点一次：都好了，不该重复排队
+        assert client.post("/api/batches/b-restart/resume").json()["resumed"] == 0
+
+
+def test_batch_resume_requeues_a_failed_member(tmp_path):
+    """失败的那首重排；已经成功的不重跑（用"第一次炸、第二次好"的假 runner 验）。"""
+    calls = {"n": 0}
+
+    def flaky(job, progress):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("第一次炸了")
+        write_artifacts(job.out_dir)
+        return {"detail": {}}
+
+    client, manager = make_client(tmp_path, {"transcribe": flaky, "lyrics": fake_lyrics})
+    with client:
+        batch = {"id": "b-flaky", "title": "偶尔炸", "folder": None}
+        job = manager.create_from_path(write(tmp_path / "src" / "甲.wav"), plan=("transcribe",),
+                                       batch={**batch, "index": 0})
+        body = wait_for_state(client, job.id, {"failed"})
+        assert body["stages"]["transcribe"]["state"] == "failed"
+
+        resumed = client.post("/api/batches/b-flaky/resume").json()
+        assert resumed["resumed"] == 1
+        final = wait_for_state(client, job.id, {"done", "failed"})
+        assert final["stages"]["transcribe"]["state"] == "done"
+
+
+def test_resume_of_unknown_batch_is_404(tmp_path):
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        assert client.post("/api/batches/没有这个/resume").status_code == 404
+
+
+def test_resume_recovers_a_zombie_queued_stage(tmp_path):
+    """崩溃/取消会留下"工程已终态、某阶段还挂着 queued"的僵尸：
+
+    这时 `run_stage` 的重复入队去重会直接早退，「继续剩余」看起来排上了、其实什么都没发生。
+    这条锁住"终态工程不算在飞"的判据。
+    """
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        batch = {"id": "b-zombie", "title": "僵尸", "folder": None}
+        job = manager.create_from_path(write(tmp_path / "src" / "甲.wav"),
+                                       plan=("transcribe",),
+                                       batch={**batch, "index": 0})
+        wait_for_state(client, job.id, {"done"})
+        with job.lock:                       # 人为造出僵尸组合
+            job.state = "cancelled"
+            job.stages["lyrics"].state = "queued"
+
+        resumed = client.post("/api/batches/b-zombie/resume").json()
+        assert resumed["resumed"] == 1
+        final = wait_for_state(client, job.id, {"done"})
+        assert final["stages"]["lyrics"]["state"] == "done"
+
+
+def test_upload_records_expected_total_for_continuation(tmp_path):
+    """拖 40 首只传了 19 首：批次里记着 expected_total，界面才能说"还差 21 首"。"""
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        first = client.post(
+            "/api/batches/upload",
+            files={"file": ("甲.wav", io.BytesIO(WAV_BYTES), "audio/wav")},
+            data={"expected_total": "40"}).json()
+        batch_id = first["batch"]["id"]
+        assert first["batch"]["expected_total"] == 40
+
+        second = client.post(
+            "/api/batches/upload",
+            files={"file": ("乙.wav", io.BytesIO(WAV_BYTES), "audio/wav")},
+            data={"batch_id": batch_id, "expected_total": "40"}).json()
+        assert second["batch"]["expected_total"] == 40
+        assert client.get(f"/api/batches/{batch_id}").json()["batch"]["expected_total"] == 40
+
+
 def test_batch_rows_keep_the_folder_order(tmp_path):
     """批次内的顺序 = 文件夹里的顺序。
 
