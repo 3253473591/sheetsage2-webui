@@ -175,19 +175,19 @@ def ask_profile(arg: str | None) -> str:
 
 
 def open_url(url: str) -> None:
-    """开浏览器。
+    """开浏览器，**避开两个坑**：
 
-    **不要直接 `webbrowser.open`**：从"以管理员身份运行"的 .bat 里起浏览器时，
-    Edge/Chrome 会弹「现有实例正在以提升的权限运行，是否用普通权限重启」——
-    因为新进程继承了管理员令牌。交给 `explorer.exe` 打开，它会用当前登录会话的
-    普通权限去启动浏览器，用户就看不到那个提示了。
+    1. 提权时浏览器会弹「现有实例正在以提升的权限运行，是否用普通权限重启」——
+       因为新进程继承了管理员令牌；
+    2. 想用 `explorer.exe` 降权打开也不稳：实测在部分机器上 explorer.exe 直接
+       `0xc0000142`（DLL 初始化失败），弹一个系统错误框，比不开还糟。
+
+    所以：**提权时干脆不自动开**，只把地址打出来让用户手动点；普通权限才自动开。
     """
-    if os.name == "nt":
-        try:
-            subprocess.Popen(["explorer.exe", url], close_fds=True)
-            return
-        except OSError:
-            pass
+    if is_elevated():
+        print(f"  ! 当前是管理员权限，浏览器没有自动打开。请手动打开：{url}")
+        print("    （用普通权限双击 00_start.bat 就能自动打开，也不会弹 Edge 提示）")
+        return
     try:
         webbrowser.open(url)
     except Exception:                    # noqa: BLE001 - 开不了浏览器不影响服务

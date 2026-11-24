@@ -31,3 +31,20 @@ def test_launch_waits_for_the_port_before_opening_a_browser(tmp_path, monkeypatc
     import time as _time
     _time.sleep(0.8)
     assert opened == []            # 端口已关，超时后不应该开
+
+def test_open_url_skips_browser_when_elevated(monkeypatch, capsys):
+    """提权时不自动开浏览器：explorer.exe 降权在部分机器上会 0xc0000142。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "sheetsage2_launch2", Path(__file__).resolve().parents[1] / "scripts" / "launch.py")
+    launch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launch)
+
+    called: list[str] = []
+    monkeypatch.setattr(launch, "is_elevated", lambda: True)
+    monkeypatch.setattr(launch.webbrowser, "open", lambda url: called.append(url))
+    launch.open_url("http://127.0.0.1:8000")
+    assert called == []
+    out = capsys.readouterr().out
+    assert "手动打开" in out

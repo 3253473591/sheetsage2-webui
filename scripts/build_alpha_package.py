@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -117,6 +119,10 @@ def copy_tree(source: Path, target: Path, *, label: str,
         destination = target / item.relative_to(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(item, destination)
+        try:                              # 别把源里的「只读」带进安装包
+            destination.chmod(0o666)
+        except OSError:
+            pass
         count += 1
         total += item.stat().st_size
     log.append((label, count, total))
@@ -187,9 +193,22 @@ def include_tifa(package: Path, log: list[tuple[str, int, int]]) -> None:
                 files, size))
 
 
+def _force_rmtree(path: Path) -> None:
+    """删目录：Windows 上只读文件会让 `rmtree` 报 Access denied（实测 docs/images 里
+    有一张只读 png，第二次打包就失败）。先清只读再删。"""
+    def on_error(func, target, _exc):     # noqa: ANN001 - shutil 约定签名
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=on_error)
+
+
 def build(package: Path, *, python_runtime: Path, ffmpeg: Path) -> list[tuple[str, int, int]]:
     if package.exists():
-        shutil.rmtree(package)
+        _force_rmtree(package)
     package.mkdir(parents=True)
     log: list[tuple[str, int, int]] = []
 
