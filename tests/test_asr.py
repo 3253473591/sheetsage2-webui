@@ -470,3 +470,14 @@ def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path):
     assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
     # 用户显式指定日语时也要走对齐器（哪怕字面是汉字）
     assert engine.lrc_aligner_kind("晚风停在旧站台", "Japanese") == "qwen"
+
+def test_read_lrc_decodes_html_entities(tmp_path):
+    """韩文 LRC 常把整行存成 &#45432; 这种数字实体，不解码会变成一串数字挂到音符上。"""
+    from sheetsage2_webui.asr import read_lrc
+
+    path = tmp_path / "k.lrc"
+    path.write_text("[00:10.00]&#45432;&#48124;&#51648; @ SM LVYIN Studio\n",
+                    encoding="utf-8")
+    text = read_lrc(path)
+    assert "노민지 @ SM LVYIN Studio" in text
+    assert "&#" not in text

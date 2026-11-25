@@ -26,7 +26,7 @@ CREDIT_HINTS = ("lyrics by", "composed by", "written by", "arranged by",
                 "produced by", "directed by", "performed by", "recorded by",
                 "mixed by", "engineered", "mastered", "background vocals",
                 "digital editing", "vocal directed", "作词", "作曲", "编曲",
-                "制作", "混音", "母带", "词：", "曲：")
+                "制作", "混音", "母带", "词：", "曲：", "studio", "lvyin", "@ sm")
 
 
 def _drop_credits(text: str) -> str:
@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     lyrics_source = None
     if args.lrc:
         from sheetsage2_webui.asr import read_lrc
-        lyrics_source = _drop_credits(read_lrc(args.lrc))
+        lyrics_source = _drop_credits(read_lrc(args.lrc, language=args.language))
     run = engine.transcribe_sections(audio, sections, progress=progress,
                                      lyrics_source=lyrics_source)
     engine.release()

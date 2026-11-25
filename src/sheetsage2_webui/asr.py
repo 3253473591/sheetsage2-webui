@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 import shutil
 import subprocess
@@ -162,15 +163,39 @@ def strip_speaker_prefix(text: str) -> str:
     return "\n".join(_SPEAKER_PREFIX.sub(r"\1", line) for line in text.splitlines())
 
 
-def read_lrc(path: str | Path) -> str:
-    """读 LRC 文件，按候选编码试（中文圈的 LRC 常见 GBK）。"""
+def _decode_entities(text: str) -> str:
+    """把 LRC 里的 HTML 实体解回来。
+
+    实测有的 LRC 资源站把整行存成 `&#45432;&#48124;&#51648; @ SM LVYIN Studio`
+    这种数字实体（韩文尤其常见），不解码就会当成一串数字挂到音符上。
+    """
+    if "&" not in text:
+        return text
+    return html.unescape(text)
+
+
+def read_lrc(path: str | Path, *, language: str | None = None) -> str:
+    """读 LRC 文件，按候选编码试。
+
+    - 中文圈：UTF-8 / GBK / BIG5（原行为）
+    - **韩文圈：CP949 / EUC-KR** —— 韩文 LRC 常是 CP949，不试的话会被 GBK 解成
+      `雮错拡鞚€` 这种乱码，整首歌词都对不上（实测 DAY BY DAY 文本一致率只有 73.5%）
+
+    `language` 只用来决定**优先顺序**（已知是韩语就先把 CP949 排前面），
+    不影响其他语言的现有行为。
+    """
     raw = Path(path).read_bytes()
-    for enc in ("utf-8-sig", "gbk", "big5", "shift_jis", "utf-16"):
+    korean = str(language or "").strip().lower().startswith(("korean", "ko"))
+    candidates = ["utf-8-sig"]
+    if korean:
+        candidates += ["cp949", "euc_kr"]
+    candidates += ["gbk", "big5", "shift_jis", "utf-16"]
+    for enc in candidates:
         try:
-            return strip_speaker_prefix(raw.decode(enc))
+            return strip_speaker_prefix(_decode_entities(raw.decode(enc)))
         except UnicodeDecodeError:
             continue
-    return strip_speaker_prefix(raw.decode("utf-8", errors="replace"))
+    return strip_speaker_prefix(_decode_entities(raw.decode("utf-8", errors="replace")))
 
 
 @dataclass

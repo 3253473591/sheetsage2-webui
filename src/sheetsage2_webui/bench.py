@@ -117,6 +117,17 @@ def read_svp_notes(path: Path) -> list[Note]:
     return notes
 
 
+def _fix_midi_text(text: str) -> str:
+    """MIDI 文本事件是 latin-1 解码的：韩文/日文会变成 `ë\x8b\x88` 这种乱码。
+
+    按 latin-1 编回字节再按 UTF-8 解；解不出来就原样返回（英文/ASCII 不受影响）。
+    """
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
 def read_midi_notes(path: Path) -> list[Note]:
     """从 `ref.mid` 读人工谱：音符时间 + 逐音歌词。
 
@@ -167,7 +178,7 @@ def read_midi_notes(path: Path) -> list[Note]:
                     start = stack.pop()
                     notes.append((start, message.note, track_index))
             elif message.type in ("lyrics", "text"):
-                lyric = str(message.text).strip()
+                lyric = _fix_midi_text(str(message.text).strip())
                 if lyric:
                     texts.append((when, lyric))
     if not notes:
