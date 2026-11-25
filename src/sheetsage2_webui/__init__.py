@@ -20,7 +20,9 @@ __all__ = [
     "environment",
 ]
 
-__version__ = "0.1.0"
+#: 包版本：**和 `pyproject.toml` / `downloads.json` 保持一致**（`/api/env.version`、
+#: FastAPI 的 `version`、备份包版本都读它）。发布前改这一处 + 那两处，别只改一个。
+__version__ = "2.0.0"
 
 
 def environment() -> dict[str, str | None]:

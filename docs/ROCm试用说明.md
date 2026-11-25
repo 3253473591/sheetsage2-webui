@@ -38,7 +38,7 @@ URL 前缀统一是 `https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/`，注
 
 ## 1. 装
 
-解压内测包，双击 **`01_install.bat rocm`**（注意后面有 `rocm` 这个参数）。
+解压内测包，双击 **`03_AMD_ROCm.bat`**（等价于在命令行跑 `01_install.bat rocm`）。
 它会：
 
 1. 复制现有 `.venv` → `.venv-rocm`（原环境不动，随时能回退）；
