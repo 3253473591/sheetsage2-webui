@@ -34,9 +34,7 @@ cd /d "%~dp0"
 
 set "PY=runtime\python\python.exe"
 
-rem ---- AMD cards: 01_install.bat rocm  ->  prepare .venv-rocm (ROCm torch)
-rem      Keeps .venv untouched; writes .env-backend so 00_start picks the right env.
-rem      (dev checkout without runtime\python\ falls back to .venv\Scripts\python.exe)
+rem ---- AMD cards: 01_install.bat rocm -> prepare .venv-rocm (ROCm torch); keeps .venv untouched and writes .env-backend so 00_start picks the right env (dev checkout without runtime\python\ falls back to .venv\Scripts\python.exe).
 if /i "%~1"=="rocm" goto rocm
 
 if not exist "%PY%" (

@@ -1,7 +1,6 @@
 # A 卡（ROCm）试用说明
 
-> 给帮忙测试的网友看的，一页就够。目标是**先跑通一首歌**，速度慢一点没关系。
-> 详细背景见 [`ROCm加速调研.md`](ROCm加速调研.md)。
+> 给帮忙测试的网友看的，一页就够。目标是**先跑通一首歌**，速度慢一点没关系。详细背景见 [`ROCm加速调研.md`](ROCm加速调研.md)。
 
 ## 0. 需要什么
 
@@ -13,15 +12,11 @@
 | 磁盘 | 额外约 6 GB（`.venv-rocm` 3.8 GB + AMD 轮子 1.8 GB，轮子装完可删） |
 | 网络 | 第一次要能连 `repo.radeon.com`（约 2 GB，可断点续传） |
 
-> **国内没有 `repo.radeon.com` 的镜像**：清华/中科大都没镜像它，南大镜像的是 PyTorch 官方
-> whl（其中的 rocm 轮子是 **Linux** 版，Windows 用不了）。所以这 2 GB 只能直连 AMD。
-> 太慢的话按下面的「手动下载」做。
+> **国内没有 `repo.radeon.com` 的镜像**：清华/中科大都没镜像它，南大镜像的是 PyTorch 官方 whl（其中的 rocm 轮子是 **Linux** 版，Windows 用不了）。所以这 2 GB 只能直连 AMD。太慢的话按下面的「手动下载」做。
 
 ### 下载太慢 / 总是断？
 
-脚本会把 4 个文件的 URL 打出来。拿别的工具（浏览器、IDM、或者能上外网的机器）下好，
-放进项目根的 `wheels-rocm\` 目录，文件名**照下面的写**，然后重跑 `01_install.bat rocm`
-——脚本会校验大小、跳过已下好的：
+脚本会把 4 个文件的 URL 打出来。拿别的工具（浏览器、IDM、或者能上外网的机器）下好，放进项目根的 `wheels-rocm\` 目录，文件名**照下面的写**，然后重跑 `01_install.bat rocm`——脚本会校验大小、跳过已下好的：
 
 ```
 rocm_sdk_core-7.2.1-py3-none-win_amd64.whl                    645 MB
@@ -30,24 +25,20 @@ torch-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl               821 MB
 torchaudio-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl          0.5 MB
 ```
 
-URL 前缀统一是 `https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/`，注意 URL 里的
-`+` 要写成 `%2B`（本地文件名用 `+`，别照抄 `%2B`）。
+URL 前缀统一是 `https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/`，注意 URL 里的 `+` 要写成 `%2B`（本地文件名用 `+`，别照抄 `%2B`）。
 
-> RDNA2 及更老的卡（RX 6000 系）官方不在列表里，**大概率跑不起来**；想试也可以，
-> 但失败是常态，别当成 bug。
+> RDNA2 及更老的卡（RX 6000 系）官方不在列表里，**大概率跑不起来**；想试也可以，但失败是常态，别当成 bug。
 
 ## 1. 装
 
-解压内测包，双击 **`03_AMD_ROCm.bat`**（等价于在命令行跑 `01_install.bat rocm`）。
-它会：
+解压内测包，双击 **`03_AMD_ROCm.bat`**（等价于在命令行跑 `01_install.bat rocm`）。它会：
 
 1. 复制现有 `.venv` → `.venv-rocm`（原环境不动，随时能回退）；
 2. 下载 AMD 的 4 个轮子（约 1.8 GB，断了重跑会接着下）；
 3. 把 CUDA 版 torch 换成 `torch 2.9.1+rocm7.2.1`；
 4. 自检并写 `.env-backend`。
 
-看到 `ROCm env ready` 就好了。**没装完也不要紧**：重跑同一条命令会继续；彻底乱了就删掉
-`.venv-rocm` 重来。
+看到 `ROCm step done` 就好了。**没装完也不要紧**：重跑同一条命令会继续；彻底乱了就删掉 `.venv-rocm` 重来。
 
 ## 2. 跑
 
@@ -86,5 +77,4 @@ URL 前缀统一是 `https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/`，注
 
 ## 5. 回退
 
-删掉 `.venv-rocm\` 和 `.env-backend` 两个东西，`00_start.bat` 就回到 `.venv`。
-或者临时 `set SHEETSAGE_BACKEND=cuda` 再启动。
+删掉 `.venv-rocm\` 和 `.env-backend` 两个东西，`00_start.bat` 就回到 `.venv`。或者临时 `set SHEETSAGE_BACKEND=cuda` 再启动。
