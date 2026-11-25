@@ -21,6 +21,7 @@ r"""内测包自检：把「每出一版都要跑一遍」的那套检查固化�
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -34,9 +35,10 @@ DIST = ROOT / "dist"
 
 #: 包里必须有的东西（相对包根）。
 REQUIRED = (
-    "00_start.bat", "01_install.bat", "02_models.bat", "downloads.json", "NOTICE",
+    "00_start.bat", "01_install.bat", "02_models.bat", "03_AMD_ROCm.bat",
+    "downloads.json", "NOTICE",
     "pyproject.toml",
-    "README-internal-test.md", "内测说明.md",
+    "README-internal-test.md",
     "runtime/python/python.exe",
     "runtime/ffmpeg/bin/ffmpeg.exe",
     "runtime/ffmpeg/LICENSE-ffmpeg.txt",
@@ -201,14 +203,14 @@ def check_python(package: Path) -> None:
     check("版本 3.12", "3.12" in out, out.strip())
 
 
-def check_bootstrap(package: Path) -> None:
+def check_bootstrap(package: Path, version: str) -> None:
     print("\n[7] tools/bootstrap.py --dry-run")
     code, out = run_capture(
         [str(package / "runtime/python/python.exe"), "tools/bootstrap.py", "--dry-run"],
         timeout=180, cwd=package)
     check("bootstrap --dry-run 能跑", code == 0, f"exit {code}")
-    check("报出了版本号", "alpha" in out, next((l for l in out.splitlines()
-                                                if "alpha" in l), "").strip())
+    check("报出了版本号", version in out, next((l for l in out.splitlines()
+                                               if version in l), "").strip())
     line = next((l for l in out.splitlines() if "随包 ffmpeg" in l), "")
     check("认出随包 ffmpeg", "随包 ffmpeg runtime" in line and "[!]" not in line,
           line.strip())
@@ -278,8 +280,10 @@ def main(argv: list[str] | None = None) -> int:
     if not package.is_dir():
         raise SystemExit(f"找不到包目录：{package}")
 
-    match = re.search(r"(alpha\d+)", package.name)
-    version = match.group(1) if match else "?"
+    # 版本串以包里的 downloads.json 为准（以前是从目录名正则抠 `alpha\d+`，
+    # 到了 V2.0.0 这种命名就抠不到了，会把所有版本检查变成"?"）。
+    manifest = json.loads((package / "downloads.json").read_text(encoding="utf-8"))
+    version = str(manifest.get("version") or "?")
     print(f"自检对象：{package}")
     print(f"版本串  ：{version}")
 
@@ -292,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         check_ffmpeg(package)
         check_python(package)
-        check_bootstrap(package)
+        check_bootstrap(package, version)
 
     print(f"\n合计：{ok_count} 项通过，{len(bad)} 项失败")
     for label in bad:
