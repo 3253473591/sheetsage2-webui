@@ -161,6 +161,34 @@ def test_zombie_running_state_is_reset_on_restart(tmp_path):
         again.shutdown()
 
 
+def test_hung_runner_marks_the_queue_stuck(tmp_path):
+    """看门狗判死之后 runner 还不回来 = 线程回收不了（单 worker 停摆）。
+
+    这时候界面必须能看到"队列停摆、请重启"，而不是停在 28% 装作在跑。
+    """
+    gate = GateRunner()
+    manager = JobManager(tmp_path / "output",
+                         runners={"transcribe": gate, "lyrics": fake_lyrics},
+                         stall_timeout=0.3, hard_timeout=3600.0,
+                         watchdog_interval=0.05, stuck_grace=0.3,
+                         probe_upload=False)
+    try:
+        job = manager.create("卡死.wav", io.BytesIO(b"x" * 1000), plan=["transcribe"])
+        assert gate.entered.wait(timeout=10)
+
+        deadline = time.monotonic() + 15
+        while manager._scheduler.stuck is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stuck = manager._scheduler.stuck
+        assert stuck is not None
+        assert stuck["job_id"] == job.id and stuck["phase"] == "transcribe"
+        assert manager.paused is True                     # 闸门关上，别再排队
+        assert manager.env()["queue"]["stuck"]["phase"] == "transcribe"
+    finally:
+        gate.gate.set()
+        manager.shutdown(timeout=1.0)
+
+
 def test_output_folders_created_elsewhere_show_up_readonly(tmp_path):
     """`output/` 里本来就有的产物（命令行跑的）要进列表，但**只读**。"""
     root = tmp_path / "output"

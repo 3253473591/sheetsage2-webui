@@ -65,7 +65,8 @@ from .job_storage import JobStore
 from .job_text import bytes_text as _bytes_text, duration_text as _duration_text
 from .job_trash import (TRASH_DIRNAME, TRASH_MAX_BYTES, TRASH_MAX_DAYS,
                         TRASH_PURGE_INTERVAL, TrashStore)
-from .job_scheduler import (CANCEL_COOLDOWN_SECONDS, HARD_TIMEOUT, STALL_TIMEOUT, Scheduler,
+from .job_scheduler import (CANCEL_COOLDOWN_SECONDS, HARD_TIMEOUT, STALL_TIMEOUT, STUCK_GRACE,
+                            Scheduler,
                             _per_phase, _PhaseWatch)
 
 # 兼容入口：这些名字过去都在 `webui.jobs` 里可直接导入（含 `_per_phase` / `_option_label`
@@ -101,6 +102,7 @@ class JobManager:
         stall_timeout: float | Mapping[str, float] | None = None,
         hard_timeout: float | Mapping[str, float] | None = None,
         watchdog_interval: float = 1.0,
+        stuck_grace: float = STUCK_GRACE,
         trash_max_days: float = TRASH_MAX_DAYS,
         trash_max_bytes: float = TRASH_MAX_BYTES,
         trash_purge_interval: float = TRASH_PURGE_INTERVAL,
@@ -142,7 +144,8 @@ class JobManager:
         self._scheduler = Scheduler(self.root, self._store, lookup=self.get,
                                     runners=runners, workers=workers,
                                     stall_timeout=stall_timeout, hard_timeout=hard_timeout,
-                                    watchdog_interval=watchdog_interval)
+                                    watchdog_interval=watchdog_interval,
+                                    stuck_grace=stuck_grace)
         #: 整库备份 / 恢复：归档格式在 `backup.py`，协调逻辑在 `job_backup.py`。
         self._backup = BackupService(self.root, list_jobs=self.list,
                                      audio_seconds=self.audio_seconds,
@@ -293,7 +296,9 @@ class JobManager:
                     # 决定了是"装成 CUDA 版了"还是"ROCm 跑起来了"。
                     "backend": detect_backend(),
                     "queue": {"pending": pending, "running": running,
-                              "paused": self.paused},
+                              "paused": self.paused,
+                              # 判死后线程还没回收：队列实际停摆，界面要提示重启
+                              "stuck": self._scheduler.stuck},
                     "disk": self.disk_info()}
 
     def disk_info(self) -> dict[str, int]:

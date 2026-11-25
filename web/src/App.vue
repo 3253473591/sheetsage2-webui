@@ -30,6 +30,9 @@ const {
   logs,
   error,
   serviceDown,
+  queuePaused,
+  queueStuck,
+  refreshEnv,
   uploadProgress,
   lanesLoading,
   trash,
@@ -147,6 +150,12 @@ const diskLow = computed(() => {
 
 function stopAll(): void {
   void cancel()
+}
+
+/** 横幅上的「继续」：恢复派发并立刻刷新 env，别等下一拍（12 秒）。 */
+async function resumeQueueFromBanner(): Promise<void> {
+  await resumeBatchQueue()
+  await refreshEnv()
 }
 
 /** 弹层里的错误也走顶栏那条红条（统一一处提示）。 */
@@ -338,10 +347,15 @@ function toggleTheme(): void {
       <main class="main">
         <div class="workspace">
           <div class="ws-inner">
-            <div v-if="batchPaused && !activeBatch" class="warn-box">
+            <div v-if="queueStuck" class="error-box" style="border-left-color: #dc2626">
+              <b>队列停摆了</b>：上一首（{{ queueStuck.phase === 'lyrics' ? '歌词识别' : '扒谱' }}）卡死后
+              没能中断线程（单 worker 只能等它返回，Python 杀不掉线程）。
+              请关闭本程序再重新启动，然后重跑那一首；重启后它会显示「上次运行被中断」。
+            </div>
+            <div v-if="queuePaused && !activeBatch" class="warn-box">
               <b>队列已暂停</b>：新任务不会开始（「暂停」是整条队列的，在批次页点过就会这样）。
               <button class="btn-secondary" :disabled="batchBusy"
-                      style="margin-left: 8px" @click="resumeBatchQueue()">
+                      style="margin-left: 8px" @click="resumeQueueFromBanner()">
                 继续
               </button>
             </div>

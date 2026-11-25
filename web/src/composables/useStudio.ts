@@ -34,6 +34,10 @@ export function useStudio() {
   const error = ref<string | null>(null)
   /** 后台服务是否已经停了（G16：红色横幅 + 阶段卡置灰）。 */
   const serviceDown = ref(false)
+  /** 队列被暂停（批次页点的，或者磁盘满自动暂停）。 */
+  const queuePaused = computed(() => Boolean(env.value?.queue?.paused))
+  /** 看门狗判死但线程没回收：队列停摆，只能重启服务。 */
+  const queueStuck = computed(() => env.value?.queue?.stuck ?? null)
 
   const onError = (message: string): void => {
     error.value = message || null
@@ -113,10 +117,25 @@ export function useStudio() {
     if (await api.pingHealth()) {
       healthFails = 0
       if (serviceDown.value) serviceDown.value = false
+      envTick += 1
+      // 每 4 拍（约 12 秒）顺带刷新一次环境：闸门被别人暂停、队列停摆这类状态
+      // 只能从 `/api/env` 看出来，光探活是看不见的。
+      if (envTick % 4 === 0) void refreshEnv()
       return
     }
     healthFails += 1
     if (healthFails >= 3) serviceDown.value = true
+  }
+
+  let envTick = 0
+
+  async function refreshEnv(): Promise<void> {
+    try {
+      env.value = await api.fetchEnv()
+      batchApi.paused.value = Boolean(env.value?.queue?.paused)
+    } catch {
+      /* 忽略：下一拍再来 */
+    }
   }
 
   /** 每 3 秒探一次存活：服务被关掉/崩溃后，30 秒内页面给出明确提示。 */
@@ -319,6 +338,9 @@ export function useStudio() {
     logs,
     error,
     serviceDown,
+    queuePaused,
+    queueStuck,
+    refreshEnv,
     uploadProgress,
     lanesLoading,
     pluginsReady,

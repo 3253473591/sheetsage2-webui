@@ -35,6 +35,9 @@ CANCEL_COOLDOWN_SECONDS = 5.0
 #: 实测：一首 4 分钟的歌 GPU 扒谱约 2~4 分钟、CPU 30~90 分钟——CPU 退路靠 HARD 兜。
 STALL_TIMEOUT = {"transcribe": 900.0, "lyrics": 600.0}
 HARD_TIMEOUT = {"transcribe": 7200.0, "lyrics": 3600.0}
+#: 看门狗判死之后，runner 还赖在里面多久就认定"线程回收不了"：Python 杀不掉线程，
+#: 单 worker 时整条队列就此停摆——必须让界面说出来，而不是停在 28% 装没事。
+STUCK_GRACE = 120.0
 
 @dataclass
 class _PhaseWatch:
@@ -48,6 +51,10 @@ class _PhaseWatch:
     phase: str
     started_at: float
     fired: bool = False
+    #: 看门狗判死的时刻（之后如果 runner 还不返回，就是"线程回收不了"）
+    aborted_at: float = 0.0
+    #: 已经因为"判死后仍不返回"报过停摆了（只报一次）
+    stuck: bool = False
 
 
 def _per_phase(value: float | Mapping[str, float] | None,
@@ -68,7 +75,8 @@ class Scheduler:
                  workers: int = 1,
                  stall_timeout: float | Mapping[str, float] | None = None,
                  hard_timeout: float | Mapping[str, float] | None = None,
-                 watchdog_interval: float = 1.0) -> None:
+                 watchdog_interval: float = 1.0,
+                 stuck_grace: float = STUCK_GRACE) -> None:
         self.root = Path(root)
         self._store = store
         self._lookup = lookup
@@ -81,6 +89,9 @@ class Scheduler:
         self.stall_timeout = _per_phase(stall_timeout, STALL_TIMEOUT)
         self.hard_timeout = _per_phase(hard_timeout, HARD_TIMEOUT)
         self.watchdog_interval = max(0.05, float(watchdog_interval))
+        self.stuck_grace = max(0.0, float(stuck_grace))
+        #: 判死后 runner 仍不返回 → `{"job_id", "phase", "since"}`（界面据此提示重启）
+        self._stuck: dict[str, object] | None = None
         self._watch: dict[tuple[str, str], _PhaseWatch] = {}
         self._watchdog: threading.Thread | None = None
         self._lock = threading.RLock()
@@ -152,7 +163,11 @@ class Scheduler:
         return watch
     def _watch_end(self, job: Job, phase: str) -> None:
         with self._lock:
-            self._watch.pop((job.id, phase), None)
+            watch = self._watch.pop((job.id, phase), None)
+            # 线程回来了：停摆状态解除（下次还能正常跑）
+            if watch is not None and self._stuck and \
+                    self._stuck.get("phase") == phase and self._stuck.get("job_id") == job.id:
+                self._stuck = None
     def _watch_stages(self) -> None:
         """每秒扫一遍在跑的阶段：**无进展**太久或总时长超上限就判失败（G6）。
 
@@ -166,6 +181,8 @@ class Scheduler:
                 watches = list(self._watch.values())
             for watch in watches:
                 if watch.fired:
+                    # 判死之后 runner 还没回来 = 线程卡在 C 调用里，回收不了
+                    self._maybe_mark_stuck(watch)
                     continue
                 job = self._lookup(watch.job_id)
                 if job is None:
@@ -193,6 +210,33 @@ class Scheduler:
                         f"这一阶段跑了 {_duration_text(elapsed)}，超过上限",
                         f"启动于 {_duration_text(elapsed)}前，最后一次进展 "
                         f"{_duration_text(idle)}前")
+    def _maybe_mark_stuck(self, watch: _PhaseWatch) -> None:
+        """判死了、但 runner 迟迟不返回：`stuck_grace` 之后报"停摆"，并关上闸门。
+
+        Python 没法杀线程，所以这里能做的只有**诚实**：把"队列已经不会动了"这个事实
+        摆到界面上（`/api/env.queue.stuck`），并挡住后续派发，别再让用户以为任务在排队。
+        """
+        if watch.stuck or not watch.aborted_at:
+            return
+        if time.time() - watch.aborted_at < self.stuck_grace:
+            return
+        watch.stuck = True
+        with self._lock:
+            self._stuck = {"job_id": watch.job_id, "phase": watch.phase,
+                           "since": watch.aborted_at}
+        self.pause()
+        job = self._lookup(watch.job_id)
+        if job is not None:
+            job.emit("log", phase=watch.phase,
+                     message="这一阶段卡死后没能中断线程（单 worker 已停摆）："
+                             "请关闭本程序再重新启动，然后重跑这一首")
+
+    @property
+    def stuck(self) -> dict[str, object] | None:
+        """`{"job_id", "phase", "since"}`：看门狗判死但线程没回收（队列已停摆）。"""
+        with self._lock:
+            return dict(self._stuck) if self._stuck else None
+
     def _abort_phase(self, watch: _PhaseWatch, code: str, message: str,
                      detail: str = "") -> None:
         """看门狗判死一个阶段：落失败态 → 发事件 → 让工作线程退出。"""
@@ -200,6 +244,7 @@ class Scheduler:
         if job is None:
             return
         watch.fired = True
+        watch.aborted_at = time.time()
         with job.lock:
             run = job.stages.get(watch.phase)
             if run is None or run.state != "running":
