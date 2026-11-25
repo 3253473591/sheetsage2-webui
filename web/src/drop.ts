@@ -129,10 +129,24 @@ export async function collectFiles(entries: DirEntryLike[]): Promise<File[]> {
 }
 
 /**
- * 一次拖拽 → 文件列表。**文件夹拖拽**在 Chrome/Edge 里只能从 `items[].webkitGetAsEntry()`
- * 拿到目录树；拿不到（浏览器不支持 / 拖的是普通文件）就返回 `null`，调用方回退到 `dt.files`。
+ * 一次拖拽 → 文件列表 + 顶层文件夹名（批量命名要用它）。
+ *
+ * **文件夹拖拽**在 Chrome/Edge 里只能从 `items[].webkitGetAsEntry()` 拿到目录树；
+ * 拿不到（浏览器不支持 / 拖的是普通文件）就返回 `null`，调用方回退到 `dt.files`。
  */
-export async function readDroppedFiles(transfer: DataTransfer | null): Promise<File[] | null> {
+export interface DroppedFolder {
+  files: File[]
+  /** 拖的是单个文件夹时的名字（用来给批次起名）；散文件是空串 */
+  folderName: string
+}
+
+/** 从顶层条目里认出"这是一个文件夹"的名字（纯函数，好测）。 */
+export function folderNameOfEntries(entries: DirEntryLike[]): string {
+  const dirs = entries.filter((entry) => entry.isDirectory)
+  return entries.length === 1 && dirs.length === 1 ? dirs[0]!.name : ''
+}
+
+export async function readDroppedFiles(transfer: DataTransfer | null): Promise<DroppedFolder | null> {
   if (!transfer?.items?.length) return null
   const entries: DirEntryLike[] = []
   for (const item of [...transfer.items]) {
@@ -142,5 +156,8 @@ export async function readDroppedFiles(transfer: DataTransfer | null): Promise<F
     if (entry) entries.push(entry)
   }
   if (!entries.length) return null
-  return collectFiles(entries)
+  return {
+    files: await collectFiles(entries),
+    folderName: folderNameOfEntries(entries),
+  }
 }

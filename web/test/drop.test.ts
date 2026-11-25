@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  collectFiles, groupForUpload, splitDroppedFiles, type DirEntryLike,
+  collectFiles, folderNameOfEntries, groupForUpload, splitDroppedFiles, type DirEntryLike,
 } from '../src/drop'
 
 function file(name: string): File {
@@ -104,5 +104,12 @@ describe('拖文件夹：整批文件 → 一首一首', () => {
     ]).then((files) => {
       expect(files.map((item) => item.name).sort()).toEqual(['01.flac', '02.flac', '02.lrc'])
     })
+  })
+
+  it('批次名取顶层文件夹名；散文件没有名字', () => {
+    expect(folderNameOfEntries([entry('专辑 A', [entry('01.flac')])])).toBe('专辑 A')
+    expect(folderNameOfEntries([entry('a.flac'), entry('b.flac')])).toBe('')
+    expect(folderNameOfEntries([entry('a.flac')])).toBe('')
+    expect(folderNameOfEntries([])).toBe('')
   })
 })

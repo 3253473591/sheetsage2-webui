@@ -71,6 +71,8 @@ const rows = computed<ParamRow[]>(() => {
 
 const items = computed(() => props.scan?.items ?? [])
 const total = computed(() => items.value.length)
+/** 单批上限（服务端 `/api/env.batch_max`；老服务端没有这个字段就按 100）。 */
+const batchMax = computed(() => props.env?.batch_max ?? 100)
 
 const withLyrics = computed(() => items.value.filter((item) => item.lrc_kind !== 'none').length)
 const withoutLyrics = computed(() => total.value - withLyrics.value)
@@ -132,6 +134,7 @@ function start(): void {
         </div>
         <p class="modal-note" style="margin-top: 6px">
           只读扫描，不改文件夹；音频会放进各自工程里（同盘硬链接，不占双份空间）。
+          一次最多 <b>{{ batchMax }}</b> 首（多了请分文件夹，分几批跑）。
         </p>
 
         <div v-if="error" class="error-box" style="margin-top: 8px">{{ error }}</div>

@@ -84,6 +84,7 @@ export function useStudio() {
     onJobsChanged: () => { void reload() },
     onRows: applyRows,
     onOpenJob: (id) => void select(id),
+    batchMax: () => env.value?.batch_max ?? 100,
   })
   const { batches, active: activeBatch } = batchApi
 

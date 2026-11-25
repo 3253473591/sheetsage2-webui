@@ -23,15 +23,12 @@ from starlette.concurrency import run_in_threadpool
 
 from ...asr import read_lrc
 from .. import batch_scan
-from ..batch_scan import scan_folder
-from ..job_errors import UploadRejected
-from ..job_models import Job, batches_of
+from ..batch_scan import MAX_BATCH, scan_folder
+from ..job_errors import ImportedProject, UploadRejected
+from ..job_models import TERMINAL_STATES, Job, batches_of
 from ..job_options import validate_options
 from ..preflight import ALIGNER_MODEL_DIR
 from ._shared import ApiDeps
-
-#: 一次批量最多几首（扫目录与建批次共用；再多就该分批了）。
-MAX_BATCH = 200
 
 #: 批量默认跑「扒谱 → 歌词」一条龙（串行，一个跑完自动接下一个）。
 BATCH_PLAN: tuple[str, ...] = ("transcribe", "lyrics")
@@ -106,7 +103,7 @@ def build_router(deps: ApiDeps) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         batch_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
-        title = f"{Path(scanned.folder).name or '批量'} · {time.strftime('%m-%d')}"
+        title = _batch_title(Path(scanned.folder).name or "批量", manager.list())
         batch = {"id": batch_id, "title": title, "folder": str(scanned.folder)}
 
         jobs: list[dict[str, Any]] = []
@@ -169,9 +166,15 @@ def build_router(deps: ApiDeps) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         batch = _ensure_batch(manager.list(), batch_id, title, expected_total)
-        # `index` = 批次里的序号（上传顺序）；`job.batch` 带着它，排序就不靠时钟
+        # 单批上限：**已经有多少首**比 `expected_total` 更可信（客户端可能撒谎/漏传）
         members = [job for job in manager.list()
                    if (job.batch or {}).get("id") == batch["id"]]
+        if len(members) >= MAX_BATCH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"这一批已经到 {MAX_BATCH} 首上限了：剩下的请分到另一个文件夹，"
+                       f"再拖一次就是新的一批")
+        # `index` = 批次里的序号（上传顺序）；`job.batch` 带着它，排序就不靠时钟
         entry = dict(batch, index=len(members))
         wanted = _plan_of({"plan": plan})
         try:
@@ -212,6 +215,34 @@ def build_router(deps: ApiDeps) -> APIRouter:
             # 闸门可能是"用户点的暂停"，也可能是**磁盘满自动暂停**——界面要能分辨
             "paused": manager.paused,
         }
+
+    @router.delete("/batches/{batch_id}")
+    async def delete_batch(batch_id: str, permanent: bool = False) -> dict[str, Any]:
+        """**整批删除**：成员全进回收站（`permanent=true` 才是真删）。
+
+        为什么不在跑的时候删：取消是协作式的，正在写的推理还在往工程目录里落文件；
+        等它停下来再删，才不会删到一半又长回来。所以这里回 409 让人先点「停止」。
+        """
+        members = _members(manager.list(), batch_id)
+        if not members:
+            raise HTTPException(status_code=404, detail="没有这个批次")
+        busy = [job for job in members if job.state not in TERMINAL_STATES]
+        if busy:
+            raise HTTPException(
+                status_code=409,
+                detail=f"这一批还有 {len(busy)} 首在跑或排队：先点「停止」，等它停下来再删")
+        deleted: list[str] = []
+        skipped: list[dict[str, Any]] = []
+        for job in members:
+            try:
+                if manager.delete(job.id, permanent=permanent):
+                    deleted.append(job.id)
+            except (ImportedProject, RuntimeError) as exc:
+                skipped.append({"id": job.id, "name": job.name, "reason": str(exc)})
+        if not deleted:
+            reason = skipped[0]["reason"] if skipped else "一首都没删掉"
+            raise HTTPException(status_code=409, detail=reason)
+        return {"deleted": len(deleted), "job_ids": deleted, "skipped": skipped}
 
     @router.post("/batches/{batch_id}/resume")
     async def resume_remaining(batch_id: str) -> dict[str, Any]:
@@ -301,6 +332,25 @@ def _members(jobs: list[Job], batch_id: str) -> list[Job]:
     return members
 
 
+def _batch_title(base: str, jobs: list[Job]) -> str:
+    """批次标题：`名字 · 月-日 时:分`。
+
+    - **用来源的名字**（扫描 = 文件夹名；拖拽 = 浏览器给的文件夹名），不要"拖入 N 首"——
+      那种名字过一夜就分不清是哪批；
+    - 带时分（不只日期）：同一个文件夹一天可能跑两批；
+    - 同一分钟又同名 → 加 `(2)`、`(3)`：侧栏里两个一模一样的组没法认。
+    """
+    name = (base or "").strip() or "未命名批次"
+    stamp = time.strftime("%m-%d %H:%M")
+    existing = {str((job.batch or {}).get("title") or "") for job in jobs}
+    title = f"{name} · {stamp}"
+    index = 2
+    while title in existing:
+        title = f"{name} · {stamp} ({index})"
+        index += 1
+    return title
+
+
 def _ensure_batch(jobs: list[Job], batch_id: str | None, title: str | None,
                   expected_total: int | None = None) -> dict[str, Any]:
     """上传式批量的归属：给了 `batch_id` 就复用（标题不覆盖），否则铸一个新的。
@@ -320,8 +370,8 @@ def _ensure_batch(jobs: list[Job], batch_id: str | None, title: str | None,
     new_id = wanted or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
     batch = {
         "id": new_id,
-        "title": (str(title).strip() if title and str(title).strip()
-                  else f"拖入的 {time.strftime('%m-%d %H:%M')}"),
+        "title": _batch_title(str(title).strip() if title and str(title).strip()
+                              else "拖入的文件", jobs),
         "folder": None,
     }
     if expected_total:

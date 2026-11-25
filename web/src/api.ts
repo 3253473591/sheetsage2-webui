@@ -487,6 +487,23 @@ export async function resumeBatch(id: string): Promise<{
   return postJson(`/batches/${encodeURIComponent(id)}/resume`, {})
 }
 
+/** **整批删除**：成员进回收站（还在跑的时候后端回 409，先停止再删）。 */
+export async function deleteBatch(id: string, permanent = false): Promise<{
+  deleted: number
+  job_ids: string[]
+  skipped: { id: string; name: string; reason: string }[]
+}> {
+  const query = permanent ? '?permanent=true' : ''
+  const response = await fetchWithTimeout(
+    `/batches/${encodeURIComponent(id)}${query}`, { method: 'DELETE' }, 120_000)
+  if (!response.ok) throw new Error(await readError(response, '删除批次失败'))
+  return (await response.json()) as {
+    deleted: number
+    job_ids: string[]
+    skipped: { id: string; name: string; reason: string }[]
+  }
+}
+
 /** 诊断包下载地址（G12）。不传 id = 全部工程 + env + 日志。 */
 export function diagnoseUrl(id?: string): string {
   return id ? `${BASE}/jobs/${encodeURIComponent(id)}/diagnose` : `${BASE}/diagnose`

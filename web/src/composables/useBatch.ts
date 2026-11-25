@@ -31,6 +31,8 @@ export interface BatchDeps {
   onRows: (rows: JobRow[]) => void
   /** 打开某个工程的详情页（`useStudio.select`）。 */
   onOpenJob: (jobId: string) => void
+  /** 单批最多几首（`/api/env.batch_max`；拿不到按 100 兜底）。 */
+  batchMax: () => number
 }
 
 function message(exc: unknown): string {
@@ -59,8 +61,10 @@ function writePending(pending: PendingUpload | null): void {
   }
 }
 
-/** 拖进来的文件夹名（Chrome 的 `webkitRelativePath` 形如 `专辑/01.flac`）。 */
-function folderNameOf(files: File[]): string {
+/** 拖进来的文件夹名：优先用 `readDroppedFiles` 给的名字（拖拽时 `webkitRelativePath`
+ *  不一定有值），没有就退回 `webkitRelativePath` 的第一段，再没有就是空串。 */
+function folderNameOf(files: File[], fallback: string): string {
+  if (fallback) return fallback
   const path = (files[0] as File & { webkitRelativePath?: string }).webkitRelativePath ?? ''
   return path.split('/')[0] ?? ''
 }
@@ -189,13 +193,20 @@ export function useBatch(deps: BatchDeps) {
    * 配对规则和扫描一致（`groupForUpload`：按 stem 同名、`.lrc` 优先）；第一个文件由后端
    * 铸一个批次 id，后面每个都带上它——上传顺序就是批次里的顺序。
    */
-  async function uploadFiles(files: File[]): Promise<string | null> {
+  async function uploadFiles(files: File[], folder: string = ''): Promise<string | null> {
     const pairs = groupForUpload(files)
     if (!pairs.length) {
       deps.onError('这个文件夹里没有音频（wav / mp3 / flac / m4a…）')
       return null
     }
-    const folderName = folderNameOf(files)
+    const limit = deps.batchMax()
+    if (pairs.length > limit) {
+      // 先拦：否则传到第 101 首才 400，用户会得到一个"半批"
+      deps.onError(`这次拖进来 ${pairs.length} 首，超过单批 ${limit} 首上限；`
+        + '请把文件夹拆成两份，分两次拖进来')
+      return null
+    }
+    const folderName = folderNameOf(files, folder)
     const stored = readPending()
     const target = resolveUploadTarget(stored, folderName, pairs.length)
     busy.value = true
@@ -211,7 +222,8 @@ export function useBatch(deps: BatchDeps) {
         const body = await api.uploadBatchFile(pair.audio, {
           lyrics,
           batchId: batchId ?? undefined,
-          title: `拖入的 ${expected} 首`,
+          // 标题由服务端拼「文件夹名 · 月-日 时:分」；没有文件夹名就落到"拖入的文件"
+          title: folderName,
           plan: ['transcribe', 'lyrics'],
           expectedTotal: expected,
         })
@@ -233,6 +245,24 @@ export function useBatch(deps: BatchDeps) {
       return null
     } finally {
       uploadProgress.value = null
+      busy.value = false
+    }
+  }
+
+  /** **整批删除**：成员进回收站（后端会拒绝"还在跑"的批次）。 */
+  async function deleteBatch(): Promise<number> {
+    if (!activeId.value) return 0
+    busy.value = true
+    try {
+      const body = await api.deleteBatch(activeId.value)
+      await deps.onJobsChanged()
+      close()
+      await reload()
+      return body.deleted
+    } catch (exc) {
+      deps.onError(message(exc))
+      return 0
+    } finally {
       busy.value = false
     }
   }
@@ -347,6 +377,7 @@ export function useBatch(deps: BatchDeps) {
     scan,
     start,
     uploadFiles,
+    deleteBatch,
     resumeRemaining,
     pause,
     resume,

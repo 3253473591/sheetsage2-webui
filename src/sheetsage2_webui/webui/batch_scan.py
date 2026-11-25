@@ -24,6 +24,11 @@ from .job_files import AUDIO_SUFFIXES
 #: 歌词文件的候选后缀（`.lrc` 优先）。
 LRC_SUFFIXES: tuple[str, ...] = (".lrc", ".txt")
 
+#: 单批最多几首。**扫描与拖拽上传共用这一个数**（前端从 `/api/env.batch_max` 读）。
+#: 100 是"一晚上跑得完"和"一次别错太多"之间的折中：一首 4 分钟的歌 GPU 上约 2~4 分钟，
+#: 100 首 ≈ 5~7 小时；再多就该拆成几批、分几个晚上跑。
+MAX_BATCH = 100
+
 
 @dataclass(frozen=True)
 class ScanItem:
@@ -120,7 +125,7 @@ def scan_folder(
     folder: str | Path,
     *,
     data_root: str | Path | None = None,
-    max_items: int = 200,
+    max_items: int = MAX_BATCH,
     max_bytes: int | None = 512 * 1024 * 1024,
     probe: Callable[[Path], Mapping[str, Any] | None] | None = None,
     aligner_available: bool | None = None,

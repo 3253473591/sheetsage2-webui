@@ -100,6 +100,8 @@ export interface EnvInfo {
   data_root: string
   static_ready: boolean
   max_upload_mb: number
+  /** 单批最多几首（批量导入弹层显示、拖拽上传提前拦） */
+  batch_max?: number
   queue: { pending: number; running: string | null; paused?: boolean }
   /** 数据根所在磁盘的剩余/总量（G11：顶栏显示"剩余 12.3 GB"）。 */
   disk: { free: number; total: number; used: number }

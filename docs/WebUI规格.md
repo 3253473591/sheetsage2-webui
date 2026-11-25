@@ -174,7 +174,9 @@ output/<歌名>/.webui/input/<原音频>  stems/  peaks-*.json
 | POST | `/api/batches` | 建批次：`{dir, options, plan, link}` → 轻量行 + `problems`（单首失败不中断整批） |
 | POST | `/api/batches/upload` | 拖文件夹用：multipart 一次一个文件，带 `batch_id` 就归同一批（`index` = 上传顺序） |
 | GET | `/api/batches` | 批次列表（**派生**：从工程的 `batch` 字段聚合，没有第二套状态机） |
-| GET | `/api/batches/{id}` | 明细：成员行 + 统计（完成/失败/运行/剩余） |
+| GET | `/api/batches/{id}` | 明细：成员行 + 统计（完成/失败/运行/剩余）+ 闸门 `paused` |
+| POST | `/api/batches/{id}/resume` | **继续剩余**：按 `index` 重排没跑完的成员（已完成的绝不动） |
+| DELETE | `/api/batches/{id}` | **整批删除**：成员进回收站；还有排队/在跑的回 409（先停止再删） |
 | POST | `/api/batches/pause` · `/resume` | 派发闸门：不再派发新的，**正在跑的那一首不打断** |
 | GET | `/api/jobs?view=rows` | 轻量列表（侧栏/批量表用：不带 LRC 全文与产物清单） |
 | GET | `/api/exports/batch?ids=&kind=svp\|files` | 批量下载 zip（每首一个 `.svp` + `_manifest.json` 清单） |
@@ -184,6 +186,12 @@ output/<歌名>/.webui/input/<原音频>  stems/  peaks-*.json
 - **两条入口**：填/选文件夹路径（服务端扫描，零上传）与**拖文件夹**（浏览器只能上传）。
   拖拽时 `classifyDrop()` 判定：1 个音频 = 单曲、2 个 = 混音+干声（老规矩）、
   ≥3 个 / 带 LRC / 文件夹 = 批量。
+- **单批上限 100 首**：扫描与上传共用 `MAX_BATCH`（`/api/env.batch_max`），拖拽在客户端先拦，
+  扫描在服务端 400；超过就让用户拆文件夹，不要产生"半批"。
+- **批次名**：`来源名 · 月-日 时:分`（来源 = 文件夹名；没有就是"拖入的文件"），
+  同一分钟同名追加 `(2)`。
+- **整批删除**：`DELETE /api/batches/{id}`，成员进回收站；批次还在跑/排队时回 409，
+  界面只在停下来的批次上露出「删除这一批」（二次确认）。
 - **批次不是实体**：`job.json` 里带 `{id, title, index}`，重启后分组自动还在；删掉某个工程
   只是那一行少一首。
 - **排序靠 `index`**（扫描顺序 / 上传顺序），不靠 `created_at`：Windows 时钟粒度约 15ms，

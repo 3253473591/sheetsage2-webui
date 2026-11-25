@@ -121,6 +121,67 @@ def test_scan_caps_the_number_of_items(tmp_path):
         batch_scan.scan_folder(folder, max_items=2)
 
 
+def test_scan_stops_at_the_per_batch_limit_by_default(tmp_path):
+    """单批上限 100 首：101 个音频要在扫描阶段就被挡住，别建到一半才发现。"""
+    folder = tmp_path / "batch"
+    for index in range(batch_scan.MAX_BATCH + 1):
+        write(folder / f"{index:03d}.wav")
+    with pytest.raises(ValueError, match=str(batch_scan.MAX_BATCH)):
+        batch_scan.scan_folder(folder)
+
+
+def test_batch_titles_name_the_folder_and_the_time(tmp_path):
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        title = client.post("/api/batches",
+                            json={"dir": str(batch_folder(tmp_path))}).json()["batch"]["title"]
+        assert title.startswith("专辑 · ")
+        assert len(title.split(" · ")[1]) >= 8      # 后面跟着 月-日 时:分
+
+
+def test_batch_titles_do_not_collide_within_the_same_minute(tmp_path):
+    """同一个文件夹连着跑两次：标题加 (2)，否则侧栏里两个组完全一样，没法认。"""
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        folder = str(batch_folder(tmp_path))
+        first = client.post("/api/batches", json={"dir": folder}).json()["batch"]["title"]
+        second = client.post("/api/batches", json={"dir": folder}).json()["batch"]["title"]
+        assert second == f"{first} (2)"
+
+
+def test_upload_titles_use_the_given_folder_name(tmp_path):
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        body = client.post(
+            "/api/batches/upload",
+            files={"file": ("甲.wav", io.BytesIO(WAV_BYTES), "audio/wav")},
+            data={"title": "我的专辑"}).json()
+        assert body["batch"]["title"].startswith("我的专辑 · ")
+
+
+def test_upload_stops_at_the_batch_limit(tmp_path, monkeypatch):
+    """拖 150 首：到第 101 首要 400，并且消息里说清楚上限（已传的留着，不删）。"""
+    from sheetsage2_webui.webui.routes import batches as batch_routes
+
+    monkeypatch.setattr(batch_routes, "MAX_BATCH", 3)
+    client, _ = make_client(tmp_path, fake_runners())
+    with client:
+        batch_id = ""
+        for index in range(3):
+            body = client.post(
+                "/api/batches/upload",
+                files={"file": (f"{index}.wav", io.BytesIO(WAV_BYTES), "audio/wav")},
+                data={"batch_id": batch_id}).json()
+            batch_id = body["batch"]["id"]
+        overflow = client.post(
+            "/api/batches/upload",
+            files={"file": ("4.wav", io.BytesIO(WAV_BYTES), "audio/wav")},
+            data={"batch_id": batch_id})
+        assert overflow.status_code == 400
+        assert "3" in overflow.json()["detail"]
+        assert client.get(f"/api/batches/{batch_id}").json()["stats"]["total"] == 3
+
+
 def test_scan_rejects_a_folder_without_audio(tmp_path):
     folder = tmp_path / "batch"
     write(folder / "readme.txt", b"nothing")
@@ -342,7 +403,7 @@ def test_upload_endpoint_creates_a_batch_and_reuses_it(tmp_path):
         assert first.status_code == 201, first.text
         body = first.json()
         batch_id = body["batch"]["id"]
-        assert body["batch"]["title"] == "拖入的 4 首"
+        assert body["batch"]["title"].startswith("拖入的 4 首 · ")   # 名字 + 时间
         job_id = body["jobs"][0]["id"]
         assert "晚风停在旧站台" in client.get(f"/api/jobs/{job_id}").json()["options"]["lyrics_lrc"]
 
@@ -353,7 +414,8 @@ def test_upload_endpoint_creates_a_batch_and_reuses_it(tmp_path):
         )
         assert second.status_code == 201
         assert second.json()["batch"]["id"] == batch_id
-        assert second.json()["batch"]["title"] == "拖入的 4 首"     # 复用首批次，不覆盖标题
+        # 复用首批次：标题不覆盖
+        assert second.json()["batch"]["title"] == body["batch"]["title"]
 
         listing = client.get("/api/batches").json()["batches"]
         assert [batch["id"] for batch in listing] == [batch_id]
@@ -462,6 +524,40 @@ def test_resume_of_unknown_batch_is_404(tmp_path):
     client, _ = make_client(tmp_path, fake_runners())
     with client:
         assert client.post("/api/batches/没有这个/resume").status_code == 404
+
+
+# ------------------------------------------------------------- 删除整个批次
+def test_delete_batch_removes_all_its_members(tmp_path):
+    """拖进来的批次也要能整批删：一个动作，成员进回收站（还能恢复）。"""
+    client, manager = make_client(tmp_path, fake_runners())
+    with client:
+        body = client.post("/api/batches", json={"dir": str(batch_folder(tmp_path))}).json()
+        batch_id = body["batch"]["id"]
+        for job in body["jobs"]:
+            wait_for_state(client, job["id"], {"done"})
+
+        response = client.delete(f"/api/batches/{batch_id}")
+        assert response.status_code == 200, response.text
+        assert response.json()["deleted"] == 2
+        assert manager.list() == []
+        assert client.get("/api/batches").json()["batches"] == []
+
+
+def test_delete_batch_refuses_while_something_is_running(tmp_path):
+    """运行中不能删（取消是协作式的）——先停止再删，别让目录在推理写盘时消失。"""
+    gate = GateRunner()
+    client, manager = make_client(tmp_path, {"transcribe": gate, "lyrics": fake_lyrics},
+                                  probe_upload=False)
+    with client:
+        batch = {"id": "b-run", "title": "在跑", "folder": None}
+        manager.create_from_path(write(tmp_path / "src" / "甲.wav"),
+                                 plan=("transcribe",), batch={**batch, "index": 0})
+        assert gate.entered.wait(timeout=5)
+
+        response = client.delete("/api/batches/b-run")
+        assert response.status_code == 409
+        assert "停止" in response.json()["detail"]
+        gate.gate.set()
 
 
 def test_resume_recovers_a_zombie_queued_stage(tmp_path):

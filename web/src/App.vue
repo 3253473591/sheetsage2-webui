@@ -74,6 +74,7 @@ const {
   start: startBatch,
   uploadFiles: uploadBatchFiles,
   resumeRemaining: resumeBatchRemaining,
+  deleteBatch: deleteBatchGroup,
 } = batch
 
 const player = useAudioPlayer()
@@ -182,6 +183,24 @@ async function confirmRemove(): Promise<void> {
   if (showTrash.value) await loadTrash()
 }
 
+/** 整批删除也要二次确认：一次动的是 N 个工程。 */
+const pendingBatchDelete = ref<{ id: string; title: string; count: number } | null>(null)
+
+function askRemoveBatch(): void {
+  if (!activeBatch.value) return
+  pendingBatchDelete.value = {
+    id: activeBatch.value.batch.id,
+    title: activeBatch.value.batch.title,
+    count: activeBatch.value.rows.length,
+  }
+}
+
+async function confirmRemoveBatch(): Promise<void> {
+  pendingBatchDelete.value = null
+  await deleteBatchGroup()
+  if (showTrash.value) await loadTrash()
+}
+
 async function openTrash(): Promise<void> {
   showTrash.value = true
   await loadTrash()
@@ -212,9 +231,9 @@ async function onDrop(event: DragEvent): Promise<void> {
   if (kind === 'batch') {
     // 拖文件夹：走上传路线（浏览器拿不到绝对路径，只能一个个传）。
     // 拿不到目录树（浏览器不支持）才回退到"填路径"。
-    const collected = await readDroppedFiles(event.dataTransfer)
-    if (collected) {
-      await uploadBatchFiles(collected)
+    const dropped = await readDroppedFiles(event.dataTransfer)
+    if (dropped) {
+      await uploadBatchFiles(dropped.files, dropped.folderName)
       return
     }
     error.value = '这个浏览器拿不到文件夹内容：请用「批量导入文件夹…」填路径'
@@ -346,6 +365,7 @@ function toggleTheme(): void {
                 @stop="stopBatch()"
                 @retry="retryFailedBatch()"
                 @resume-remaining="resumeBatchRemaining()"
+                @remove="askRemoveBatch"
                 @export="downloadBatch"
               />
             </template>
@@ -445,6 +465,16 @@ function toggleTheme(): void {
         const id = await startBatch(payload)
         if (id) showBatchDialog = false
       }"
+    />
+
+    <ConfirmDialog
+      v-if="pendingBatchDelete"
+      title="删除整批？"
+      :message="`「${pendingBatchDelete.title}」的 ${pendingBatchDelete.count} 个工程都会进回收站（产物和原音频一起），之后可以逐个恢复。`"
+      note="整批删除只在批次没有在跑/排队时可用；删掉之后这个批次就不在列表里了。"
+      confirm-label="删除整批"
+      @confirm="confirmRemoveBatch"
+      @cancel="pendingBatchDelete = null"
     />
 
     <ConfirmDialog

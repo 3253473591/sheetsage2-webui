@@ -23,6 +23,7 @@ const emit = defineEmits<{
   stop: []
   retry: []
   resumeRemaining: []
+  remove: []
   export: []
 }>()
 
@@ -124,6 +125,12 @@ function elapsedTotal(): string {
         </button>
         <button v-if="stats.done" class="btn-secondary" @click="emit('export')">
           打包下载 {{ stats.done }} 个 SVP
+        </button>
+        <!-- 整批删除：还在跑的时候后端会 409，所以这里只在不跑时露出来 -->
+        <button v-if="!inFlight" class="btn-secondary danger" :disabled="busy"
+                title="整批进回收站（还能逐个恢复）"
+                @click="emit('remove')">
+          删除这一批
         </button>
       </div>
     </div>
