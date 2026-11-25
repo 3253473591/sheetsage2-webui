@@ -18,10 +18,49 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 
 from sheetsage2_webui.webui.singleton import (  # noqa: E402
     AlreadyRunning,
+    GpuLock,
     InstanceLock,
     pid_alive,
     read_info_file,
 )
+
+
+def test_only_one_service_per_gpu(tmp_path, monkeypatch):
+    """数据根锁只管"同一个 output/"；显卡锁管的是**同一块卡**。
+
+    两个服务盯不同目录时，各自把识别模型搬上同一块 3080（各约 6 GB）——轻则 OOM，
+    重则驱动死锁、线程卡在 CUDA 里回不来（11-22 那次）。
+    """
+    monkeypatch.setattr("sheetsage2_webui.webui.singleton.tempfile.gettempdir",
+                        lambda: str(tmp_path))
+    first = GpuLock("cuda:0")
+    first.acquire(port=8000)
+    try:
+        second = GpuLock("cuda:0")
+        with pytest.raises(AlreadyRunning) as caught:
+            second.acquire(port=8001)
+        assert caught.value.info["port"] == 8000
+        # 另一张卡不冲突（多卡机器可以各跑一个）
+        other = GpuLock("cuda:1")
+        assert other.try_acquire() is True
+        other.release()
+    finally:
+        first.release()
+    # 释放之后同一个卡又能拿到
+    again = GpuLock("cuda:0")
+    assert again.try_acquire() is True
+    again.release()
+
+
+def test_gpu_lock_reports_who_holds_it(tmp_path, monkeypatch):
+    monkeypatch.setattr("sheetsage2_webui.webui.singleton.tempfile.gettempdir",
+                        lambda: str(tmp_path))
+    first = GpuLock("cuda:0")
+    first.acquire(url="http://127.0.0.1:8000")
+    try:
+        assert GpuLock("cuda:0").read_info()["url"] == "http://127.0.0.1:8000"
+    finally:
+        first.release()
 
 
 def test_second_instance_on_the_same_data_root_is_rejected(tmp_path):

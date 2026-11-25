@@ -27,7 +27,7 @@ from .logs import attach_uvicorn, install_crash_hook, setup_logging
 from .preflight import cuda_available
 from .runner import RunnerSession
 from .security import generate_pair_token
-from .singleton import AlreadyRunning, InstanceLock
+from .singleton import AlreadyRunning, GpuLock, InstanceLock
 
 DEFAULT_ASR_MODEL = "models/Qwen3-ASR-1.7B"
 DEFAULT_ALIGNER = "models/Qwen3-ForcedAligner-0.6B"
@@ -139,6 +139,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  注意：本次跳过了单实例检查（--no-singleton / SHEETSAGE_ALLOW_MULTI）")
 
+    # **显卡锁**：数据根锁挡不住"两个服务盯不同目录、抢同一块卡"——两边各加载一份识别
+    # 模型，轻则 OOM、重则驱动死锁（11-22 那次线程卡死就是这个组合）。只想同时跑两个
+    # 服务的话，给另一个加 `--device cpu` 即可。
+    gpu_lock: GpuLock | None = None
+    if not args.no_singleton and os.environ.get("SHEETSAGE_ALLOW_MULTI") != "1":
+        wants_gpu = str(args.device).startswith("cuda") or (
+            str(args.device) == "auto" and bool(cuda_available()))
+        if wants_gpu:
+            gpu_device = str(args.device) if ":" in str(args.device) else "cuda:0"
+            gpu_lock = GpuLock(gpu_device)
+            try:
+                gpu_lock.acquire(url=f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}")
+            except AlreadyRunning as exc:
+                print("同一块显卡上已经有另一个 SheetSage2 在跑了，这次不再启动第二个。")
+                if exc.info.get("url"):
+                    print(f"  正在跑的那个：{exc.info['url']}")
+                print("  两个服务都到了歌词阶段时会各自加载一份识别模型——显存会撞死（或驱动死锁）。")
+                print("  真要同时跑两个：给其中一个加 `--device cpu`，或者不同的卡用 --gpu 区分。")
+                lock.release()
+                return 0
+
     try:
         asr_options: dict[str, Any] = {}
         if args.asr_max_slice:
@@ -210,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
         return 0
     finally:
+        if gpu_lock is not None:
+            gpu_lock.release()
         lock.release()
 
 

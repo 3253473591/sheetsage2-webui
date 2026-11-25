@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -212,3 +213,21 @@ class InstanceLock:
 
     def __exit__(self, *exc_info: object) -> None:
         self.release()
+
+
+class GpuLock(InstanceLock):
+    """**同一块显卡只许一个服务在跑**（`InstanceLock` 只保护同一个数据目录）。
+
+    为什么还要这一层：数据根锁只能挡住"两个窗口盯同一个 `output/`"。可真正稀缺的是
+    **显存**——一个服务盯 `output/`、另一个盯别的目录（或者测试脚本自己起一个），两边
+    各自把 Qwen 识别模型 + 对齐器搬上同一块卡：轻则 OOM，重则驱动死锁、线程卡在
+    CUDA 调用里回不来（11-22 那次卡死就是这么来的：两个进程都到了歌词阶段）。
+
+    锁放在系统临时目录（不占数据根，换数据目录也照样互斥），按设备序号区分——真要多卡
+    并行跑两个服务，`--gpu 1` 各占一张卡也能过。
+    """
+
+    def __init__(self, device: str = "cuda:0") -> None:
+        index = device.split(":")[-1] if ":" in device else "0"
+        base = Path(tempfile.gettempdir()) / f"sheetsage2-gpu-{index}"
+        super().__init__(base)
