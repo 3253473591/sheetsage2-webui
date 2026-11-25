@@ -24,7 +24,21 @@ import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+def _pick_python() -> Path:
+    """用哪个解释器：`.env-backend` 说 rocm 就用 `.venv-rocm`，否则 `.venv`。
+
+    这层判断放在包里（`backend.venv_python`）是因为 `00_start.bat` 里也有一份同样的
+    逻辑（它得在启动 python 之前就知道该用哪个），两边规则必须一致。
+    """
+    try:
+        from sheetsage2_webui import backend as gpu_backend
+
+        return gpu_backend.venv_python(ROOT)
+    except Exception:                                   # noqa: BLE001 - 包没装好也别起不来
+        return ROOT / ".venv" / "Scripts" / "python.exe"
+
+
+PYTHON = _pick_python()
 STATIC = ROOT / "src" / "sheetsage2_webui" / "webui" / "static" / "index.html"
 DEFAULT_PORT = 8000
 
@@ -275,6 +289,15 @@ def main(argv: list[str]) -> int:
         return already
 
     print(f"  [1/3] 解释器 OK        {PYTHON.relative_to(ROOT)}")
+    try:
+        from sheetsage2_webui import backend as gpu_backend
+
+        info = gpu_backend.detect_backend()
+        if info["kind"] in ("cuda", "rocm"):
+            print(f"        GPU 后端：{gpu_backend.backend_label(info['kind'])}"
+                  f"（{info['name']}，hip={info['hip'] or '-'}）")
+    except Exception:                                   # noqa: BLE001 - 只为一行提示
+        pass
     if is_elevated():
         print("        ^ 提醒：当前是「以管理员身份运行」。这个工具不需要管理员，")
         print("          用普通权限双击更稳；浏览器会用普通权限打开（不会弹 Edge 提示）。")

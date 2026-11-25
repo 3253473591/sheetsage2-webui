@@ -33,6 +33,12 @@ setlocal
 cd /d "%~dp0"
 
 set "PY=runtime\python\python.exe"
+
+rem ---- AMD cards: 01_install.bat rocm  ->  prepare .venv-rocm (ROCm torch)
+rem      Keeps .venv untouched; writes .env-backend so 00_start picks the right env.
+rem      (dev checkout without runtime\python\ falls back to .venv\Scripts\python.exe)
+if /i "%~1"=="rocm" goto rocm
+
 if not exist "%PY%" (
     echo.
     echo   [x] %PY% not found - the package looks incomplete.
@@ -50,4 +56,24 @@ if not "%CODE%"=="0" (
     echo.
     pause
 )
+endlocal & exit /b %CODE%
+
+:rocm
+if exist "%PY%" goto rocm_run
+if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+:rocm_run
+if not exist "%PY%" (
+    echo.
+    echo   [x] No Python found: run 01_install.bat once first, then 01_install.bat rocm.
+    echo.
+    pause
+    exit /b 1
+)
+"%PY%" "tools\install_rocm.py" %2 %3 %4 %5
+set "CODE=%ERRORLEVEL%"
+echo.
+if "%CODE%"=="0" echo   ROCm step done. 00_start.bat picks .venv-rocm when .env-backend says rocm.
+if not "%CODE%"=="0" echo   ROCm install did not finish. Re-run 01_install.bat rocm - downloaded wheels are kept.
+echo.
+pause
 endlocal & exit /b %CODE%

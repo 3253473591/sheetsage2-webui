@@ -195,3 +195,44 @@ def gpu_backend() -> dict:   # {"kind": "cuda" | "rocm" | "cpu", "name": ...}
 2. 目标是"只想让 A 卡也能用"，还是"A 卡要达到 N 卡相当速度"？后者基本要走 Linux。
 3. 这台机器还要不要再跑 N 卡（决定 §1 的 B 还是 C）。
 4. 是否接受为了 Windows 把 torch 从 2.10 降到 2.9.1。
+
+---
+
+## 12. 实现记录（2026-11-25，双环境 / "A 卡能跑即可"）
+
+决策：**保留 N 卡路径 + 独立 `.venv-rocm`**（§1-B）。本机没有 A 卡，所以代码与安装链路已就绪，
+**运行时验收要在目标机器上做**（给测试的人看 [`ROCm试用说明.md`](ROCm试用说明.md)）。
+
+### 12.1 落地了什么
+
+| 位置 | 内容 |
+|---|---|
+| `src/sheetsage2_webui/backend.py`（新） | `detect_backend()`（`cuda`/`rocm`/`cpu`/`unknown`，认 `torch.version.hip`）、`bf16_supported()`、`effective_dtype()`、`.env-backend` 标记与 `venv_python()`（标记指向 rocm 但环境没装好时退回 `.venv`） |
+| `webui/preflight.py` | 横幅按后端写「NVIDIA CUDA」/「AMD ROCm」，并提示"这张卡不支持 bf16，会用 fp16"；`cuda_available()` 对 HIP 设备同样返回 True（ETA 系数不变） |
+| `engine.py` / `asr.py` | 计算/加载精度走 `effective_dtype()`：没有 bf16 的卡（RDNA2）自动落 fp16，不再硬报错 |
+| `webui/errors.py` | 补 `hip out of memory` / `hip error` / `miopen` / `hsa_status` 等关键词：AMD 上炸显存会归到「显存不足」而不是「未知错误」 |
+| `webui/jobs.py` + `routes/jobs.py` | `/api/env.backend` 与诊断包 `env.json.backend` 都带 `kind/name/hip/cuda` |
+| `scripts/verify.py` | 自检同时打 `cuda_version` 与 `hip_version` |
+| `tools/install_rocm.py`（新） | `01_install.bat rocm`：**复制 `.venv` → `.venv-rocm`，只换 torch**；下载 AMD 4 个轮子（可续传、验大小）；`--dry-run` 只打印命令；自检后写 `.env-backend=rocm` |
+| `00_start.bat` / `scripts/launch.py` | 按 `.env-backend` 挑解释器（`SHEETSAGE_BACKEND` 可覆盖），启动横幅多打一行 GPU 后端 |
+| `tests/test_backend.py` / `test_rocm_support.py` / `test_install_rocm.py` | 用假 torch 对象覆盖 A 卡分支：后端识别 14 条、HIP 错误归类与精度回落 8 条、安装命令顺序 5 条 |
+
+### 12.2 为什么是"复制环境 + 换 torch"
+
+从零建 `.venv-rocm` 要重下 transformers / qwen-asr / accelerate 那一堆，既慢又可能解析出别的小版本
+（`qwen-asr` 锁死了 `transformers==4.57.6`、`accelerate==1.12.0`）。复制一份再 `pip uninstall` +
+`--no-deps` 装 ROCm 轮子，**依赖树一个字节都不用变**，失败面只剩"下载"和"驱动"两件事。
+
+### 12.3 版本事实（2026-11-25 实测）
+
+- `repo.radeon.com/rocm/windows/` 只有 `6.4.4 / 7.1.1 / 7.2 / 7.2.1`，**最新 7.2.1**；
+- 轮子：`torch-2.9.1+rocm7.2.1-cp312`（821 MB）、`torchaudio-2.9.1`、`torchvision-0.24.1`、
+  `rocm_sdk_core`（645 MB）、`rocm_sdk_libraries_custom`（490 MB）、`rocm_sdk_devel`（233 MB，可选）；
+- **该目录不是 pip 索引**（`…/7.2.1/torch/` 是 404），只能按文件 URL 安装；
+- 所以"降一个小版本"在 Windows 上无法避免；不接受就只能走 Linux（§2.2）。
+
+### 12.4 还没验的
+
+- 真实 A 卡上的 `is_available()`、SDPA 速度、MIOpen autotune、4G 特供模式的 `max_memory`；
+- `rocm_sdk_*` 与 torch 2.9.1 的依赖声明会不会在安装时绕过 `--no-deps` 去 PyPI 找
+  （脚本已经全部 `--no-deps`；如果 AMD 轮子之间有版本约束，会在这一步报错——把那几行日志发回来即可）。

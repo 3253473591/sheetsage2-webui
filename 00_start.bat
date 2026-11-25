@@ -32,6 +32,14 @@ cd /d "%~dp0"
 set "PY=.venv\Scripts\python.exe"
 set "RUNTIME=runtime\python\python.exe"
 
+rem ---- pick the env: .env-backend says which GPU stack this machine uses.
+rem      (AMD users get .venv-rocm from 01_install.bat rocm; NVIDIA stays on .venv)
+rem      Order: default cuda -> marker file -> SHEETSAGE_BACKEND overrides both.
+set "BACKEND=cuda"
+if exist ".env-backend" set /p BACKEND=<.env-backend
+if defined SHEETSAGE_BACKEND set "BACKEND=%SHEETSAGE_BACKEND%"
+if /i "%BACKEND%"=="rocm" set "PY=.venv-rocm\Scripts\python.exe"
+
 if not exist "%PY%" goto need_install
 if not exist "models\.models-pending" goto launch
 

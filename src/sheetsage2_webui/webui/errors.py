@@ -161,15 +161,18 @@ def describe(exc: BaseException, *, phase: str | None = None) -> StudioError:
         return _catalog("E_PERMISSION", detail, text)
 
     # ---------------------------------------------------------- 显存 / 设备
+    # ROCm（A 卡）报的是 HIP/MIOpen 的字样：不认这些词，用户看到的会是「未知错误」。
     if any(marker in lowered for marker in
            ("cuda out of memory", "outofmemoryerror", "not enough memory",
-            "cuda error", "illegal memory access", "device-side assert")):
+            "cuda error", "illegal memory access", "device-side assert",
+            "hip out of memory", "hip error", "miopen", "hsa_status",
+            "hip failed", "rocm")):
         return _catalog("E_VRAM_OOM", detail, text)
     if "显存" in text and ("不够" in text or "不足" in text):
         return _catalog("E_VRAM_OOM", detail, text)
     if any(marker in lowered for marker in
            ("no cuda", "cuda is not available", "cuda unavailable", "device not found",
-            "target device")):
+            "target device", "no hip", "hip not available", "invalid device")):
         return _catalog("E_DEVICE", detail, text)
 
     # ---------------------------------------------------------- 音频解码

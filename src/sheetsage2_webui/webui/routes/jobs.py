@@ -16,6 +16,7 @@ from ...bootstrap import find_ffmpeg
 from ...meta import write_meta
 from ..job_errors import ImportedProject, StageNotReady, StaleRevision, UploadRejected
 from ..batch_scan import MAX_BATCH
+from ...backend import detect_backend
 from ..job_models import DEFAULT_PLAN, PHASE_LABELS, PHASES
 from ..job_options import param_choices
 from ..preflight import preflight
@@ -57,6 +58,8 @@ def build_router(deps: ApiDeps) -> APIRouter:
             "max_upload_mb": manager.max_upload_mb,
             # 单批上限：批量导入弹层用它画"一次最多 N 首"，拖拽上传也据此提前拦
             "batch_max": MAX_BATCH,
+            # 显卡后端（NVIDIA CUDA / AMD ROCm / CPU）：横幅文案与诊断包都看它
+            "backend": detect_backend(),
             "queue": info["queue"],
             "disk": info.get("disk", {"free": 0, "total": 0, "used": 0}),
             "preflight": preflight(manager.root),

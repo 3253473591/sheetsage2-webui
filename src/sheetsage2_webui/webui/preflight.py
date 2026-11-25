@@ -20,6 +20,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from ..backend import (BACKEND_CPU, BACKEND_UNKNOWN, backend_label, bf16_supported,
+                       detect_backend)
 from ..bootstrap import PROJECT_ROOT, find_ffmpeg
 
 #: 扒谱权重目录（`resolve_model_path` 优先认它）。缺了会自动退到 HuggingFace 仓库 id。
@@ -58,17 +60,16 @@ def asr_model_dirs() -> list[Path]:
 
 
 def cuda_available() -> bool | None:
-    """有没有可用的 CUDA。返回 None = 读不到（torch 没装/初始化失败），当"无显卡"处理。
+    """有没有可用的显卡（CUDA **或** ROCm）。返回 None = 读不到（torch 没装/初始化失败）。
 
     `JobManager` 拿它把「设备 = 自动」解析成实际口径，好让耗时预估（G20）的系数选对——
-    CPU 上扒谱的系数是显卡的十几倍，估错了那句话就没意义了。
+    CPU 上扒谱的系数是显卡的十几倍，估错了那句话就没意义了。A 卡走 ROCm 时这里同样
+    返回 True（HIP 设备在 torch 里也叫 `cuda`）。
     """
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except Exception:                                   # noqa: BLE001 - 预检不该崩
+    kind = detect_backend()["kind"]
+    if kind == BACKEND_UNKNOWN:
         return None
+    return kind != BACKEND_CPU
 
 
 def _disk_free(data_root: Path) -> int:

@@ -205,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
             "platform": platform.platform(),
             "torch": torch.__version__,
             "transformers": transformers.__version__,
+            # A 卡（ROCm）的构建里 `cuda` 是 None、`hip` 有值——两个都打出来，
+            # 否则用户发来的自检结果分不清他跑的是哪种后端。
+            "cuda_version": torch.version.cuda,
+            "hip_version": getattr(torch.version, "hip", None),
             "cuda_available": torch.cuda.is_available(),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
             "ffmpeg": ffmpeg,
@@ -213,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         context["env"] = info
         problems = []
         if not torch.cuda.is_available():
-            problems.append("CUDA 不可用")
+            problems.append("显卡不可用（CUDA 或 ROCm）")
         if not ffmpeg:
             problems.append("找不到 ffmpeg")
         if not audio_files:

@@ -59,3 +59,8 @@ sheetsage-asr-*/
 
 # 重构/计划执行的工作区记录（可随时丢弃）
 .superpowers/
+
+# ───────────────────────────── ROCm（A 卡）
+# 独立环境 + 它下载的 AMD 轮子缓存；.env-backend 记录这台机器用哪个后端
+wheels-rocm/
+.env-backend

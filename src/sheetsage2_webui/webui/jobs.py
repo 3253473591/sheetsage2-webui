@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..bootstrap import PROJECT_ROOT
+from ..backend import detect_backend
 from ..fsutil import move_into, write_text_atomic
 from ..meta import write_meta
 from ..meta_watch import MetaWatcher
@@ -288,6 +289,9 @@ class JobManager:
             pending = sum(1 for j in self._jobs.values() if j.state == "queued")
             return {"data_root": str(self.root), "max_upload_mb": self.max_upload_mb,
                     "params_locked": self.lock_params,
+                    # 诊断包（env.json）里也带上后端：A 卡用户发回日志时，`hip` 有没有值
+                    # 决定了是"装成 CUDA 版了"还是"ROCm 跑起来了"。
+                    "backend": detect_backend(),
                     "queue": {"pending": pending, "running": running,
                               "paused": self.paused},
                     "disk": self.disk_info()}

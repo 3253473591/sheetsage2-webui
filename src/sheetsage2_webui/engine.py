@@ -274,8 +274,12 @@ class SheetSage2Engine:
         return self._model.transcribe(str(audio), output_dir=out, **call)
 
     def _effective_dtype(self) -> str:
-        # bf16 只在 CUDA 上有实际收益；CPU 上走 fp32，避免慢且精度可疑。
-        return self.config.dtype if self._device.startswith("cuda") else "fp32"
+        # bf16 只在显卡上有实际收益；CPU 上走 fp32，避免慢且精度可疑。
+        # A 卡（ROCm）上还有一层：RDNA2 一类卡**没有 bf16 指令**，硬用会直接报错，
+        # 所以 `backend.effective_dtype` 会把它换成 fp16（显存还是省一半）。
+        from .backend import effective_dtype
+
+        return effective_dtype(self.config.dtype, device=self._device)
 
     @property
     def effective_dtype(self) -> str:

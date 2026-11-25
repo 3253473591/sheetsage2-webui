@@ -570,8 +570,16 @@ class AsrEngine:
         import torch
         from qwen_asr import Qwen3ASRModel
 
+        # A 卡（ROCm）上 RDNA2 一类没有 bf16 指令：硬用 bfloat16 会在加载/前向时炸，
+        # 所以这里也走一遍探测，不支持就落 float16（精度够、显存一样省一半）。
+        name = self.config.dtype
+        if name == "bfloat16":
+            from .backend import bf16_supported
+
+            if str(self.config.device) != "cpu" and not bf16_supported():
+                name = "float16"
         dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
-                 "float32": torch.float32}[self.config.dtype]
+                 "float32": torch.float32}[name]
         kwargs = asr_load_kwargs(self.config, dtype)
         self._model = Qwen3ASRModel.from_pretrained(str(self.config.asr_model), **kwargs)
         return self
