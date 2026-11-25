@@ -75,6 +75,7 @@ const {
   uploadFiles: uploadBatchFiles,
   resumeRemaining: resumeBatchRemaining,
   deleteBatch: deleteBatchGroup,
+  resume: resumeBatchQueue,
 } = batch
 
 const player = useAudioPlayer()
@@ -337,6 +338,13 @@ function toggleTheme(): void {
       <main class="main">
         <div class="workspace">
           <div class="ws-inner">
+            <div v-if="batchPaused && !activeBatch" class="warn-box">
+              <b>队列已暂停</b>：新任务不会开始（「暂停」是整条队列的，在批次页点过就会这样）。
+              <button class="btn-secondary" :disabled="batchBusy"
+                      style="margin-left: 8px" @click="resumeBatchQueue()">
+                继续
+              </button>
+            </div>
             <div v-if="serviceDown" class="error-box" style="border-left-color: #dc2626">
               <b>后台服务已停止</b>（可能被关闭或崩溃了）。
               请重新运行 <code>webui.bat</code>，然后刷新本页。

@@ -159,6 +159,9 @@ export function useStudio() {
   async function init(): Promise<void> {
     try {
       env.value = await api.fetchEnv()
+      // 派发闸门是**队列级**的：在批次页点过「暂停」之后，单曲视图里新排的任务
+      // 会一直停在 0%，而那边看不到任何原因。这里用启动时的真值初始化一下。
+      batchApi.paused.value = Boolean(env.value?.queue?.paused)
     } catch {
       /* 顶栏信息拿不到不影响使用 */
     }

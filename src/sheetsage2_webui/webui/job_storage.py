@@ -141,7 +141,13 @@ class JobStore:
         job.artifacts_rev = int(meta.get("artifacts_rev") or 0)
         interrupted = any(run.message.startswith("上次运行被中断")
                           for run in job.stages.values())
-        job.state = DRAFT_STATE if interrupted else str(meta.get("state") or "done")
+        # 僵尸：meta 里写着 running/queued，但**没有任何阶段真的在跑**（上次进程死在一个
+        # 已经判死的阶段之后，`_finish` 没来得及落盘）。不纠正的话界面会永远显示「运行中」，
+        # 而且它一直占着 `queue.running` 那个位置。
+        saved_state = str(meta.get("state") or "done")
+        if saved_state in {"running", "queued"}:
+            interrupted = True
+        job.state = DRAFT_STATE if interrupted else saved_state
         job.message = "上次运行被中断（程序重启），可以重跑" if interrupted else "已恢复"
         job.emit("log", phase=None, message="工程已恢复（重启后从 output/ 载入）"
                  + ("；上次没跑完，可以重跑" if interrupted else ""))

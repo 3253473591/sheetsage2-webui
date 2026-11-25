@@ -130,6 +130,37 @@ def test_interrupted_stage_is_not_reported_as_running(tmp_path):
         again.shutdown()
 
 
+def test_zombie_running_state_is_reset_on_restart(tmp_path):
+    """meta 里写着 running、但阶段全已终态（进程死在一个已经判死的阶段之后）：
+
+    恢复后必须变回 `draft`——否则界面永远显示「运行中」，`queue.running` 也一直指着它。
+    """
+    root = tmp_path / "output"
+    first = JobManager(root, runners=fake_runners())
+    try:
+        job = first.create("僵尸.wav", io.BytesIO(b"x" * 1000), plan=["transcribe"])
+        deadline = time.monotonic() + 20
+        while job.state != "done" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert job.state == "done"
+        meta = json.loads((job.root / "job.json").read_text(encoding="utf-8"))
+        meta["state"] = "running"                  # 人为造出僵尸
+        (job.root / "job.json").write_text(json.dumps(meta, ensure_ascii=False),
+                                           encoding="utf-8")
+        first.shutdown(timeout=2)
+    finally:
+        first.shutdown(timeout=2)
+
+    again = JobManager(root, runners=fake_runners())
+    try:
+        restored = again.get(job.id)
+        assert restored is not None
+        assert restored.state == "draft"
+        assert "中断" in restored.message
+    finally:
+        again.shutdown()
+
+
 def test_output_folders_created_elsewhere_show_up_readonly(tmp_path):
     """`output/` 里本来就有的产物（命令行跑的）要进列表，但**只读**。"""
     root = tmp_path / "output"
