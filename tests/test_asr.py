@@ -516,3 +516,13 @@ def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
     engine = AsrEngine(AsrConfig(asr_model="x", aligner="tifa", language="Japanese"))
     assert engine._lrc_route("こんにちは", "Japanese")[0] == "tifa"
     assert AsrEngine._pick_align_mode("こんにちは") == "tifa"
+
+def test_split_mora_handles_small_kana_and_sokuon():
+    """日语的モーラ切分：小写假名并到前一拍，っ/ん/ー 各自一拍。"""
+    from sheetsage2_webui.tifa_align import split_mora
+
+    assert split_mora("かたれ") == ["か", "た", "れ"]
+    assert split_mora("きょう") == ["きょ", "う"]
+    assert split_mora("がっこう") == ["が", "っ", "こ", "う"]
+    assert split_mora("しんぶん") == ["し", "ん", "ぶ", "ん"]
+    assert split_mora("コーヒー") == ["コ", "ー", "ヒ", "ー"]

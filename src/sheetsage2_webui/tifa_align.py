@@ -248,6 +248,32 @@ def word_syllable_onsets(phones: Sequence[tuple[float, float, str]],
     return syllable_onsets(phones, start, end)
 
 
+#: 小写假名：跟在前一个假名后面，算同一モーラ。
+_SMALL_KANA = set("ゃゅょぁぃぅぇぉゎゕゖャュョァィゥェォヮヵヶ")
+
+
+def _kata_to_hira(text: str) -> str:
+    out = []
+    for char in text:
+        code = ord(char)
+        if 0x30A1 <= code <= 0x30F6:
+            out.append(chr(code - 0x60))
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def split_mora(kana: str) -> list[str]:
+    """把假名串切成モーラ：小写假名（ゃゅょ…）并到前一拍；っ/ん/ー 各自算一拍。"""
+    mora: list[str] = []
+    for char in kana:
+        if mora and char in _SMALL_KANA:
+            mora[-1] += char
+        else:
+            mora.append(char)
+    return mora
+
+
 class TifaAligner:
     """懒加载的 TIFA 对齐器。一个实例只加载一次模型，可以连续对齐很多段。"""
 
@@ -262,6 +288,7 @@ class TifaAligner:
         self._backend = None
         self._vocab = None
         self._g2p = None
+        self._tagger = None
 
     @property
     def loaded(self) -> bool:
@@ -287,6 +314,59 @@ class TifaAligner:
         self._backend, self._vocab, self._g2p = backend, vocabulary, g2p
         return self
 
+    def _expand_items(self, words, phones):
+        """TIFA 的 word 层 -> 我们要的粒度。
+
+        - 日语：MeCab 给的是词（`語れ`），但挂字要**モーラ**（か/た/れ）。
+          用 fugashi 取读音、切モーラ、把词的时间按モーラ均分。
+        - 其它语言：原样返回（汉字本来就是一字一项）。
+        """
+        if str(self.language) not in ("ja", "jpn"):
+            return [(label, start, end,
+                     word_syllable_onsets(phones, label, start, end,
+                                          language=self.language))
+                    for label, start, end in words]
+        items = []
+        for label, start, end in words:
+            mora = self._mora_of(label)
+            if not mora:
+                items.append((label, start, end, ()))
+                continue
+            step = (end - start) / len(mora)
+            for index, kana in enumerate(mora):
+                items.append((kana, start + index * step, start + (index + 1) * step, ()))
+        return items
+
+    def _mora_of(self, word: str) -> list[str]:
+        """词的假名读音 -> モーラ列表；拿不到读音就原样切。"""
+        reading = ""
+        try:
+            reading = self._reading(word)
+        except Exception:                  # noqa: BLE001 - 读音失败就退回原字
+            reading = ""
+        if not reading:
+            reading = _kata_to_hira(word)
+        return split_mora(reading)
+
+    def _reading(self, word: str) -> str:
+        if self._tagger is None:
+            dicdir = unidic_dir()
+            if dicdir is None:
+                return ""
+            import fugashi
+            rc = dicdir / "mecabrc"
+            self._tagger = fugashi.Tagger(f'-r "{rc.as_posix()}" -d "{dicdir.as_posix()}"')
+        tokens = self._tagger(word)
+        if not tokens:
+            return ""
+        parts = []
+        for token in tokens:
+            feature = getattr(token, "feature", None)
+            reading = (getattr(feature, "pron", None) or getattr(feature, "kana", None)
+                       or getattr(token, "surface", ""))
+            parts.append(str(reading))
+        return _kata_to_hira("".join(parts))
+
     def _apply_unidic(self) -> None:
         """日语：有本地 UniDic 就把 `unidic_dir` 塞给 japanese-mecab 转换器。"""
         if str(self.language) not in ("ja", "jpn"):
@@ -301,6 +381,7 @@ class TifaAligner:
 
     def release(self) -> None:
         self._backend = self._vocab = self._g2p = None
+        self._tagger = None
         import gc
 
         gc.collect()
@@ -366,9 +447,5 @@ class TifaAligner:
                 grid = Path(grid_dir) / f"{key}.TextGrid"
                 if grid.is_file():
                     words, phones = parse_grid_tiers(grid)
-                    results[owner_index] = [
-                        (label, start, end,
-                         word_syllable_onsets(phones, label, start, end,
-                                              language=self.language))
-                        for label, start, end in words]
+                    results[owner_index] = self._expand_items(words, phones)
         return results
