@@ -49,6 +49,37 @@ cd web; npm install; npm run build; cd ..
 
 4 GB 显存也能跑，启动时选「4G 特供」模式即可（参数与显存预算由服务端定好）。
 
+### 日语 / 韩语：可选的对齐器（Qwen3-ForcedAligner）
+
+随包的 TIFA 只有中/粤/英的 G2P，**日文、韩文**要靠一个额外的对齐器出时间。
+
+**装法一：自动下载**（推荐）
+
+双击 `02_models.bat` → 选 **2（日语/韩语特供）**。约 +1.8 GB，走 ModelScope（国内源）。
+
+**装法二：网盘手动装**（网络不稳时用）
+
+1. 下载 `Qwen3-ForcedAligner-0.6B.7z`：<!-- 蓝奏云链接待填 -->
+2. 解压到程序目录下的 `models\`，最终路径必须是：
+
+```
+SheetSage2-Studio\
+  models\
+    Qwen3-ForcedAligner-0.6B\
+      config.json
+      model.safetensors      <- 约 1.75 GB
+      tokenizer_config.json
+      ...
+```
+
+3. 确认 `models\Qwen3-ForcedAligner-0.6B\config.json` 存在即可。
+
+**怎么验证生效**：打开页面 → 上传歌 → 「识别歌词」→ 语言选 **日语** 或 **韩语**。
+没装的话会明确提示「没装日语/韩语对齐器」，不会静默失败。
+
+**已知限制**：日语的逐字时间还在优化（实测中位误差约 100ms），韩语同理；
+中文 / 粤语 / 英文**不需要**这个对齐器。
+
 ## 一次完整的用法
 
 1. **拖入音频** —— 支持 wav / mp3 / flac 等；一次拖两个文件时第二个会当成"干声"（人声轨）；
