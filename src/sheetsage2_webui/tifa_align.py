@@ -81,8 +81,17 @@ def unidic_dir() -> Path | None:
     root = Path(__file__).resolve().parents[2]
     candidates += [root / "models" / "unidic", root / "models" / "unidic" / "dicdir"]
     for candidate in candidates:
-        if (candidate / "sys.dic").is_file() and (candidate / "mecabrc").is_file():
-            return candidate
+        if not (candidate / "sys.dic").is_file():
+            continue
+        rc = candidate / "mecabrc"
+        if not rc.is_file():
+            # UniDic 官方 zip 里没有 mecabrc（MeCab 默认去系统目录找），
+            # fugashi 又要求 `-r` 指向的文件存在，所以这里补一个最小的。
+            try:
+                rc.write_text(f"dicdir = {candidate.as_posix()}\n", encoding="utf-8")
+            except OSError:
+                return None
+        return candidate
     return None
 
 
