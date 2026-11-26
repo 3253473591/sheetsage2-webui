@@ -421,7 +421,12 @@ def test_read_lrc_strips_speaker_prefix(tmp_path):
     assert "男：" not in text and "合：" not in text
     assert "One two three" in text and "一起唱" in text
 
-def test_pick_align_mode_routes_korean_to_qwen():
+def _no_unidic(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(tmp_path / "no-such-unidic"))
+
+
+def test_pick_align_mode_routes_korean_to_qwen(tmp_path, monkeypatch):
+    _no_unidic(monkeypatch, tmp_path)
     """韩文不能被当成中文交给 TIFA。"""
     from sheetsage2_webui.asr import AsrEngine
 
@@ -464,12 +469,21 @@ def test_lrc_aligner_kind_picks_tifa_for_chinese_and_english(tmp_path):
     assert engine.lrc_aligner_kind("The wind stops here", "English") == "tifa"
 
 
-def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path):
-    """日/韩没有 TIFA G2P，要对齐器（挂在 ASR 模型里）——这两种必须加载识别模型。"""
+def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path, monkeypatch):
+    """没有 UniDic 时：日/韩都要 Qwen 对齐器；有 UniDic 时日语可以走 TIFA。"""
     engine = AsrEngine(AsrConfig(asr_model=tmp_path))
+    monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(tmp_path / "no-such"))
     assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
     # 用户显式指定日语时也要走对齐器（哪怕字面是汉字）
     assert engine.lrc_aligner_kind("晚风停在旧站台", "Japanese") == "qwen"
+    # 韩语始终要 Qwen（TIFA 1.0 没有韩语 G2P）
+    assert engine.lrc_aligner_kind("사랑해요", "Korean") == "qwen"
+
+    dicdir = tmp_path / "unidic"
+    dicdir.mkdir()
+    (dicdir / "sys.dic").write_bytes(b"x")
+    monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(dicdir))
+    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "tifa"
 
 def test_read_lrc_decodes_html_entities(tmp_path):
     """韩文 LRC 常把整行存成 &#45432; 这种数字实体，不解码会变成一串数字挂到音符上。"""
@@ -487,7 +501,7 @@ def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
     from sheetsage2_webui import tifa_align
     from sheetsage2_webui.asr import AsrConfig, AsrEngine
 
-    monkeypatch.delenv("SHEETSAGE_UNIDIC_DIR", raising=False)
+    monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(tmp_path / "no-such"))
     assert tifa_align.unidic_dir() is None
     assert tifa_align.ja_g2p_available() is False
 

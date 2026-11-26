@@ -74,12 +74,14 @@ def unidic_dir() -> Path | None:
     查找顺序：环境变量 `SHEETSAGE_UNIDIC_DIR` → `models/unidic` → `models/unidic/dicdir`。
     日文 G2P 需要它（g2pflow 的 `japanese-mecab` 转换器）。
     """
-    candidates: list[Path] = []
     env = os.environ.get("SHEETSAGE_UNIDIC_DIR")
     if env:
-        candidates.append(Path(env))
-    root = Path(__file__).resolve().parents[2]
-    candidates += [root / "models" / "unidic", root / "models" / "unidic" / "dicdir"]
+        # 显式指定就**只认它**：测试里用这个把"没有词典"钉死，
+        # 也不会因为开发机上装了 models/unidic 而串味。
+        candidates = [Path(env)]
+    else:
+        root = Path(__file__).resolve().parents[2]
+        candidates = [root / "models" / "unidic", root / "models" / "unidic" / "dicdir"]
     for candidate in candidates:
         if not (candidate / "sys.dic").is_file():
             continue
