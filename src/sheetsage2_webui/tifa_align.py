@@ -21,6 +21,9 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+import os
+import sys
+import types
 from typing import Sequence
 
 #: TIFA 官方建议的上下文上限（秒）。切片超过这个就不保证稳定。
@@ -63,6 +66,54 @@ def ensure_available() -> None:
 
     for name in _REQUIRED_IMPORTS:
         importlib.import_module(name)
+
+
+def unidic_dir() -> Path | None:
+    """本地 UniDic 词典目录（`sys.dic` + `mecabrc` 都在才算）。
+
+    查找顺序：环境变量 `SHEETSAGE_UNIDIC_DIR` → `models/unidic` → `models/unidic/dicdir`。
+    日文 G2P 需要它（g2pflow 的 `japanese-mecab` 转换器）。
+    """
+    candidates: list[Path] = []
+    env = os.environ.get("SHEETSAGE_UNIDIC_DIR")
+    if env:
+        candidates.append(Path(env))
+    root = Path(__file__).resolve().parents[2]
+    candidates += [root / "models" / "unidic", root / "models" / "unidic" / "dicdir"]
+    for candidate in candidates:
+        if (candidate / "sys.dic").is_file() and (candidate / "mecabrc").is_file():
+            return candidate
+    return None
+
+
+def ja_g2p_available() -> bool:
+    """日文 G2P 能不能用：有 UniDic 词典就行（不要求 pip 装过 unidic 包）。"""
+    return unidic_dir() is not None
+
+
+def _ensure_unidic_module(dicdir: Path) -> None:
+    """g2pflow 会 `import unidic` 只为拿 `DICDIR`；没装包时给一个只暴露 DICDIR 的桩。
+
+    真正读词典用的是传进去的 `unidic_dir`，所以桩不影响对齐质量。
+    """
+    if "unidic" in sys.modules:
+        return
+    try:
+        import unidic  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    module = types.ModuleType("unidic")
+    module.DICDIR = str(dicdir)
+    download = types.ModuleType("unidic.download")
+
+    def download_version(*_args, **_kwargs):  # pragma: no cover - 桩不会被调用
+        raise RuntimeError("UniDic 由 models/unidic 提供，不需要联网下载")
+
+    download.download_version = download_version
+    module.download = download
+    sys.modules["unidic"] = module
+    sys.modules["unidic.download"] = download
 
 
 def default_model_path() -> Path:
@@ -225,6 +276,18 @@ class TifaAligner:
         self._backend, self._vocab, self._g2p = backend, vocabulary, g2p
         return self
 
+    def _apply_unidic(self) -> None:
+        """日语：有本地 UniDic 就把 `unidic_dir` 塞给 japanese-mecab 转换器。"""
+        if str(self.language) not in ("ja", "jpn"):
+            return
+        dicdir = unidic_dir()
+        if dicdir is None:
+            return
+        for converter in getattr(self._g2p, "converters", ()):
+            if getattr(converter, "id", "") == "japanese-mecab":
+                converter.kwargs.setdefault("unidic_dir", str(dicdir))
+        _ensure_unidic_module(dicdir)
+
     def release(self) -> None:
         self._backend = self._vocab = self._g2p = None
         import gc
@@ -249,6 +312,7 @@ class TifaAligner:
         if not items:
             return []
         self.load()
+        self._apply_unidic()
         from inference.api import run_inference
         from inference.callbacks import SaveTextGridCallback
         from inference.data import AudioTextDataset

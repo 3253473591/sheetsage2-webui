@@ -481,3 +481,24 @@ def test_read_lrc_decodes_html_entities(tmp_path):
     text = read_lrc(path)
     assert "노민지 @ SM LVYIN Studio" in text
     assert "&#" not in text
+
+def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
+    """有本地 UniDic 时：日语走 TIFA（不要求 pip 装 unidic 包）。"""
+    from sheetsage2_webui import tifa_align
+    from sheetsage2_webui.asr import AsrConfig, AsrEngine
+
+    monkeypatch.delenv("SHEETSAGE_UNIDIC_DIR", raising=False)
+    assert tifa_align.unidic_dir() is None
+    assert tifa_align.ja_g2p_available() is False
+
+    dicdir = tmp_path / "unidic"
+    dicdir.mkdir()
+    (dicdir / "sys.dic").write_bytes(b"x")
+    (dicdir / "mecabrc").write_text("", encoding="utf-8")
+    monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(dicdir))
+
+    assert tifa_align.unidic_dir() == dicdir
+    assert tifa_align.ja_g2p_available() is True
+    engine = AsrEngine(AsrConfig(asr_model="x", aligner="tifa", language="Japanese"))
+    assert engine._lrc_route("こんにちは", "Japanese")[0] == "tifa"
+    assert AsrEngine._pick_align_mode("こんにちは") == "tifa"
