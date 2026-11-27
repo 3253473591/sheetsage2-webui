@@ -363,11 +363,34 @@ class RunnerSession:
                                          on_slice=on_slice, language=language,
                                          lyrics_source=lyrics_source)
         if official_lines is not None:
-            from ..lyrics import retime_lines_by_chars
+            from ..lyrics import anchor_lyric_lines, retime_lines_by_chars
 
-            run.chars = retime_lines_by_chars(official_lines, run.chars)
-            run.text = "\n".join(line.text for line in official_lines)
-            run.warnings.append("TXT 无时间戳：识别只用于取时间轴，歌词字面为官方词")
+            retimed = retime_lines_by_chars(official_lines, run.chars)
+            official_text = "\n".join(line.text for line in official_lines)
+            # 无时间戳 TXT 二阶段：已通过编辑距离锚定出每行起止时间，若 TIFA 就绪且支持该语种，
+            # 直接用 40M TIFA 逐行精对齐一次，把精度拉齐到接近 LRC。
+            realigned_chars = None
+            if (engine.lrc_aligner_kind(official_text, language) == "tifa"
+                    and engine.alignment_ready()[0]):
+                anchored = anchor_lyric_lines(official_lines, run.chars)
+                if anchored:
+                    try:
+                        progress.log(f"TXT 官方词已锚定 {len(anchored)} 行，启动 TIFA 二次精对齐")
+                        realigned = engine.transcribe_sections(
+                            audio_path, sections, language=language,
+                            lyrics_source=anchored)
+                        if realigned.chars and len(realigned.chars) >= 0.7 * len(retimed):
+                            realigned_chars = realigned.chars
+                    except Exception as exc:          # noqa: BLE001 - 二次精对齐失败不拖垮任务
+                        run.warnings.append(
+                            f"TXT 二次 TIFA 精对齐跳过（退回序列锚定时间）：{type(exc).__name__}: {exc}")
+            if realigned_chars is not None:
+                run.chars = realigned_chars
+                run.warnings.append("TXT 无时间戳：已按识别锚点切行并用 TIFA 二次精对齐")
+            else:
+                run.chars = retimed
+                run.warnings.append("TXT 无时间戳：识别用于序列锚定取时间轴，歌词字面为官方词")
+            run.text = official_text
         progress.check()
         if not run.chars:
             hint = ("；上传的干声如果和这首不是同一首歌，或者长度对不上，就会这样"

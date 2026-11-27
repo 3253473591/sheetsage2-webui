@@ -142,7 +142,7 @@ function start(): void {
         <template v-if="scan">
           <div class="scan-summary">
             <span><b>{{ total }}</b> 首</span>
-            <span><b>{{ withLyrics }}</b> 首带 LRC（逐行对齐）</span>
+            <span><b>{{ withLyrics }}</b> 首带歌词（LRC/TXT）</span>
             <span :class="{ dim: !withoutLyrics }"><b>{{ withoutLyrics }}</b> 首走语音识别</span>
             <span v-if="estimate">预计 <b>{{ estimate }}</b>（串行）</span>
             <span class="dim">{{ formatSpan(scan.total_seconds) }} 音频 ·
@@ -150,7 +150,7 @@ function start(): void {
           </div>
 
           <div v-if="withoutLyrics" class="batch-banner warn">
-            <b>{{ withoutLyrics }} 首没有同名 LRC</b>：会走语音识别——比精确对齐慢，词也可能不对。
+            <b>{{ withoutLyrics }} 首没有同名歌词（LRC/TXT）</b>：会走语音识别——比精确对齐慢，词也可能不对。
           </div>
           <div v-if="problems.length" class="batch-banner warn">
             <b>有 {{ problems.length }} 处要注意</b>：{{ problems.slice(0, 3).join('；') }}
@@ -209,7 +209,7 @@ function start(): void {
                 </div>
               </template>
               <span class="p-label">歌词源</span>
-              <div class="ro">按文件夹里的同名 LRC（{{ withLyrics }}/{{ total }}）——这一行只读</div>
+              <div class="ro">按文件夹同名歌词（LRC 优先于 TXT，{{ withLyrics }}/{{ total }}）——这一行只读</div>
             </div>
           </div>
         </template>

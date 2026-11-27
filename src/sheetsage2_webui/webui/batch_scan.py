@@ -223,8 +223,11 @@ def _pair_lyrics(stem: str, candidates: list[Path],
     candidates = sorted(candidates, key=lambda path: (path.suffix.lower() != ".lrc",
                                                       path.name.casefold()))
     chosen = candidates[0]
-    note = (f"「{stem}」有 {len(candidates)} 个同名歌词，用了 {chosen.name}"
-            if len(candidates) > 1 else None)
+    # 同名同时存在 .lrc 与 .txt 时按规则静默优先用 .lrc，不算异常告警；
+    # 只有同后缀出现多个文件时才提示。
+    same_ext = [p for p in candidates if p.suffix.lower() == chosen.suffix.lower()]
+    note = (f"「{stem}」有 {len(same_ext)} 个同名歌词，用了 {chosen.name}"
+            if len(same_ext) > 1 else None)
     try:
         text = read_lrc(chosen)
     except OSError as exc:

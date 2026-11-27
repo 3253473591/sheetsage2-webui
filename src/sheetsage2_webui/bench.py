@@ -36,7 +36,9 @@ from .lyrics import DEFAULT_TOLERANCE, assign_lyrics, note_spans_seconds
 from .timeline import from_stored_measures
 
 MARKERS = frozenset({"-", "+", "·", "・", "•"})
-DEFAULT_MAX_OFFSET = 3.0
+#: 全局时间偏移搜索上限（秒）。实测部分人工谱与原音频差 >3s（如《巴拉莱卡》+3.12s），
+#: 放宽到 5s 避免把真实偏移截断成 0% exact。
+DEFAULT_MAX_OFFSET = 5.0
 DEFAULT_OFFSET_STEP = 0.02
 #: 和声/ad-lib 词：人工谱写了、但 LRC/识别文本里没有时不计入分母（见 `score_alignment`）。
 ADLIB_TOKENS = frozenset({
@@ -65,6 +67,8 @@ class Char:
     end: float
     #: 英文词内部「第二、三…个音节」的起点（混唱的 `+` 靠它）。
     parts: tuple[float, ...] = ()
+    #: 对齐器声学置信度（0~1，可选；老样本为 None）。
+    confidence: float | None = None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -227,10 +231,17 @@ def read_manual(folder: Path) -> list[Note]:
 
 def read_chars(path: Path) -> list[Char]:
     data = _read_json(path)
-    return [Char(str(item["text"]), float(item["start"]), float(item["end"]),
-                 tuple(float(value) for value in item.get("parts") or ()))
-            for item in data.get("chars") or []
-            if str(item.get("text") or "").strip()]
+    out: list[Char] = []
+    for item in data.get("chars") or []:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        raw_conf = item.get("confidence")
+        conf = float(raw_conf) if raw_conf is not None else None
+        out.append(Char(str(item["text"]), float(item["start"]), float(item["end"]),
+                        tuple(float(value) for value in item.get("parts") or ()),
+                        conf))
+    return out
 
 
 def read_project_notes(path: Path) -> list[Note]:
@@ -521,8 +532,10 @@ def _shifted(chars: Sequence[Char], offset: float) -> list[Char]:
     out = []
     for char in chars:
         parts = tuple(getattr(char, "parts", ()) or ())
+        confidence = getattr(char, "confidence", None)
         out.append(Char(char.text, char.start + offset, char.end + offset,
-                        tuple(value + offset for value in parts)))
+                        tuple(value + offset for value in parts),
+                        confidence))
     return out
 
 
@@ -626,12 +639,28 @@ def product_score(manual: Sequence[Note], auto: Sequence[Note],
 
     与 `score_alignment` 的区别只在音符序列：那边用人工音（对齐-only），
     这边用 `project.json` 的音（用户真正拿到的）。音符本身错了也会算进来。
+
+    时间轴口径：`auto` 音符与 `chars` 来自**同一份音频**，两者之间偏移为 0，
+    所以挂字时不能给 `chars` 加 `offset`；`offset` 是 `manual` 相对音频的全局偏移，
+    只用来把 `auto` 音符平移到 `manual` 时间轴上做音符映射。
     """
     spans = [(note.start, note.end) for note in auto]
-    fill = assign_lyrics(spans, _shifted(chars, offset))
+    fill = assign_lyrics(spans, chars)
     manual_heads = normalize_heads([note.lyric for note in manual])
-    generated_heads = normalize_heads(fill.lyrics)
-    mapping = map_notes(auto, manual, tolerance=tolerance)
+    char_texts = {str(char.text).strip().lower() for char in chars}
+    manual_heads = [
+        (index, text) for index, text in manual_heads
+        if not (text.strip().lower() in ADLIB_TOKENS
+                and text.strip().lower() not in char_texts)
+    ]
+    manual_heads = normalize_latin_heads(manual_heads)
+    generated_heads = normalize_latin_heads(normalize_heads(fill.lyrics))
+    shifted_auto = (
+        [Note(note.start + offset, note.end + offset, note.pitch, note.lyric)
+         for note in auto]
+        if offset else auto
+    )
+    mapping = map_notes(shifted_auto, manual, tolerance=tolerance)
     matched = exact = pm1 = 0
     for left, right in align_tokens([text for _, text in manual_heads],
                                     [text for _, text in generated_heads]):

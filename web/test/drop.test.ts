@@ -6,7 +6,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  collectFiles, folderNameOfEntries, groupForUpload, splitDroppedFiles, type DirEntryLike,
+  collectFiles, decodeLyricsBytes, folderNameOfEntries, groupForUpload,
+  splitDroppedFiles, type DirEntryLike,
 } from '../src/drop'
 
 function file(name: string): File {
@@ -84,11 +85,20 @@ describe('拖文件夹：整批文件 → 一首一首', () => {
       file('02 - 乙.lrc'),
       file('cover.jpg'),
       file('03 - 丙.mp3'),
+      file('04 - 丁.wav'),
+      file('04 - 丁.txt'),
+      file('05 - 戊.wav'),
+      file('05 - 戊.lrc'),
+      file('05 - 戊.txt'),
     ])
-    expect(pairs.map((pair) => pair.name)).toEqual(['01 - 甲', '02 - 乙', '03 - 丙'])
+    expect(pairs.map((pair) => pair.name)).toEqual([
+      '01 - 甲', '02 - 乙', '03 - 丙', '04 - 丁', '05 - 戊',
+    ])
     expect(pairs[0]!.lyrics?.name).toBe('01 - 甲.lrc')
-    expect(pairs[1]!.lyrics?.name).toBe('02 - 乙.lrc')     // 同时有 txt 时选 lrc
-    expect(pairs[2]!.lyrics).toBeNull()                    // 没词
+    expect(pairs[1]!.lyrics?.name).toBe('02 - 乙.lrc')     // txt 在前、lrc 在后 → 选 lrc
+    expect(pairs[2]!.lyrics).toBeNull()                    // 都没有 → null（走 ASR）
+    expect(pairs[3]!.lyrics?.name).toBe('04 - 丁.txt')     // 只有 txt → 用 txt
+    expect(pairs[4]!.lyrics?.name).toBe('05 - 戊.lrc')     // lrc 在前、txt 在后 → 仍只选 lrc
   })
 
   it('只有歌词没有音频 = 这一首不存在', () => {
@@ -111,5 +121,13 @@ describe('拖文件夹：整批文件 → 一首一首', () => {
     expect(folderNameOfEntries([entry('a.flac'), entry('b.flac')])).toBe('')
     expect(folderNameOfEntries([entry('a.flac')])).toBe('')
     expect(folderNameOfEntries([])).toBe('')
+  })
+
+  it('拖拽歌词解码：兼容 UTF-8 与 Windows 常见的 GBK 编码', () => {
+    // GBK 编码的 "[00:01.00]晚风"（晚=CD ED, 风=B7 E7）
+    const gbk = new Uint8Array([0x5b, 0x30, 0x30, 0x3a, 0x30, 0x31, 0x2e, 0x30, 0x30, 0x5d, 0xcd, 0xed, 0xb7, 0xe7])
+    expect(decodeLyricsBytes(gbk)).toBe('[00:01.00]晚风')
+    const utf8 = new TextEncoder().encode('[00:01.00]晚风')
+    expect(decodeLyricsBytes(utf8)).toBe('[00:01.00]晚风')
   })
 })

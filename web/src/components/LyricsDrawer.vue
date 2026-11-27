@@ -64,27 +64,26 @@ async function copy(): Promise<void> {
         <button class="link" @click="open = false">收起</button>
       </div>
       <p class="lyr-note">
-        粘贴官方 LRC 或 TXT 歌词，可随时复制、修改。点「应用」后，
-        <b>识别歌词将跳过语音识别</b>，直接拿这份词对齐；清空则恢复语音识别。
+        粘贴官方 LRC 或纯文本 TXT 歌词，可随时复制、修改。点「应用」后：
+        <b>带时间戳 LRC 将跳过语音识别直接逐行对齐</b>；无时间戳 TXT 会先用识别序列锚定再做二次精对齐；清空则恢复纯语音识别。
         建议先跑扒谱再粘贴——对齐用的音符来自扒谱结果。
       </p>
       <textarea
         v-model="draft"
         class="lyr-text"
         spellcheck="false"
-        :placeholder="'[00:02:16]XXXXXXXXX…（带时间戳的 LRC 可逐行精确对齐；纯 TXT 不建议）'"
+        :placeholder="'[00:02.16]歌词内容…（支持带时间戳 LRC 逐行精确对齐，也支持纯 TXT 自动锚定精对齐）'"
       />
       <div
         v-if="draft.trim() && !stats.timed"
         class="lyr-warn"
       >
-        未检测到时间戳：纯 TXT 不建议使用——对齐只能估算，行位置会漂移。
-        请用带时间戳的 LRC（[分:秒.厘秒] 词）。
+        未检测到时间戳：将先跑语音识别做序列锚定，再用 TIFA 二次精对齐（有带时间戳的 LRC 会更快更稳）。
       </div>
       <div class="lyr-meta" :class="{ warn: dirty }">
         <template v-if="draft.trim()">
           {{ stats.lines }} 行 · {{ stats.chars }} 字 ·
-          {{ stats.timed ? '带时间戳，逐行精确对齐' : '纯文本，按段落时长均分（估）' }}
+          {{ stats.timed ? '带时间戳，逐行精确对齐' : '纯文本，识别锚定 + TIFA 二次精对齐' }}
         </template>
         <template v-else>空 = 走语音识别</template>
         <span v-if="dirty"> · 有未应用的修改</span>

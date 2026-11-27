@@ -225,11 +225,16 @@ class AlignedChar:
     #: 英文词内部「第二、三…个音节」的起点时刻。用来决定延续标记是 `-`（延长当前
     #: 音节）还是 `+`（进下一个音节）。中日文是空的（一个字就是一个音节）。
     parts: tuple[float, ...] = ()
+    #: 对齐器声学置信度（来自 TIFA `similarity` 帧相似度均值；Qwen 路径为 None）。
+    confidence: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        payload = dict(text=self.text, start=round(self.start, 3), end=round(self.end, 3))
+        payload: dict[str, Any] = dict(text=self.text, start=round(self.start, 3),
+                                       end=round(self.end, 3))
         if self.parts:
             payload["parts"] = [round(value, 3) for value in self.parts]
+        if self.confidence is not None:
+            payload["confidence"] = round(float(self.confidence), 4)
         return payload
 
 
@@ -263,7 +268,10 @@ def interpolate_degenerate(chars: Sequence["AlignedChar"], *,
     **只动零长度的字**：有 start/end 的字原样保留（返回的是新列表，不改入参）。
     返回 `(新列表, 修补的字数)`。
     """
-    out = [AlignedChar(char.text, char.start, char.end) for char in chars]
+    out = [AlignedChar(char.text, char.start, char.end,
+                       tuple(getattr(char, "parts", ()) or ()),
+                       getattr(char, "confidence", None))
+           for char in chars]
     repaired = 0
     index = 0
     while index < len(out):
@@ -753,9 +761,11 @@ class AsrEngine:
             for index, span in enumerate(spans):
                 item_text, start, end = span[0], span[1], span[2]
                 parts = span[3] if len(span) > 3 else ()
+                confidence = span[4] if len(span) > 4 else None
                 label = labels[index] if labels else item_text
                 chars.append(AlignedChar(label, offset + start, offset + end,
-                                         tuple(offset + value for value in parts)))
+                                         tuple(offset + value for value in parts),
+                                         confidence))
         return chars
 
     @staticmethod

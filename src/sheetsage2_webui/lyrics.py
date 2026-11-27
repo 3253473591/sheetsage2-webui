@@ -83,6 +83,15 @@ RUN_DEFICIT_CAP = 2
 LEAD_ORPHAN_COST = 0.1
 #: 音节起点判到音符上的容差（秒）。见上面第 4 条。
 SYLLABLE_EPSILON = 0.1
+#: 对齐器声学置信度低于这个阈值时，才把该词时间视为不可信（走平台区、靠结构拉回）。
+#: 取代旧的「时长 > 音节数×0.35s 就抹平距离」启发式——正常拖长音（0.5~1.5s）不该被抹平。
+LOW_CONFIDENCE_THRESHOLD = 0.25
+#: 音符间超过这个休止时长（秒）视为换气/断句：前一个字/词的延音不应轻易跨休止吞掉新句首音。
+REST_SKIP_GAP = 0.25
+#: 跳过一个紧跟在休止符（> REST_SKIP_GAP）之后的音符时的附加代价。
+REST_SKIP_PENALTY = 0.25
+#: 第二遍补延音标记时，超过词 end 且与前一音之间存在大于该时长的休止，停止继续补标记。
+CONTINUATION_MAX_GAP = 0.50
 
 
 @dataclass
@@ -197,12 +206,59 @@ def _syllable_count(text: str, parts: Sequence[float]) -> int:
 
 
 def _is_inflated(start: float, end: float, syllables: int) -> bool:
-    """词窗口是不是被对齐器**拉长**了（Viterbi 把一个词摊到后面几个词的音频上）。
-
-    实测漂移区的词：'you' 1.4s / 'choice' 1.55s / 'i' 0.51s——都是单音节词占着
-    几倍于一个音节的窗口。窗口超过「音节数 × 0.35s」就当不可信。
-    """
+    """保留兼容：判断词窗口是否明显超过单音节典型时长（不再直接用于抹平距离梯度）。"""
     return (end - start) > syllables * HEAD_TRUST_SECONDS
+
+
+def _is_low_confidence(char: Any) -> bool:
+    """该字/词的对齐器声学置信度是否过低（仅在携带 `confidence` 时生效）。"""
+    conf = getattr(char, "confidence", None)
+    if conf is None:
+        return False
+    return float(conf) < LOW_CONFIDENCE_THRESHOLD
+
+
+def _match_syllable_notes(parts: Sequence[float],
+                          note_onsets: Sequence[float]) -> set[int]:
+    """把词内 `M = len(parts)` 个后续音节起点，严格单调 1-to-1 匹配到 `K = len(note_onsets)` 个续音。
+
+    替代旧的 `while parts[cursor] <= onset + 0.10` 贪心扫描：
+    - 旧做法只要 `part` 比音符晚 0.12s（超容差 20ms）就彻底丢弃 `+`（实测 125 例）；
+    - 或两个 `parts` 落在同一音容差内被一次吞光，后续音全变成 `-`（实测 35 例）。
+    当 `M >= K` 时每个续音都是新音节（全 `+`）；当 `M < K` 时用 DP 选总时间差最小的 `M` 个音写 `+`。
+    返回应写 `+` 的 `note_onsets` 下标集合。
+    """
+    m = len(parts)
+    k = len(note_onsets)
+    if m == 0 or k == 0:
+        return set()
+    if m >= k:
+        return set(range(k))
+    inf = float("inf")
+    dp = [[inf] * (k + 1) for _ in range(m + 1)]
+    take = [[False] * (k + 1) for _ in range(m + 1)]
+    for col in range(k + 1):
+        dp[0][col] = 0.0
+    for row in range(1, m + 1):
+        part_time = parts[row - 1]
+        for col in range(row, k + 1):
+            skip_cost = dp[row][col - 1]
+            match_cost = dp[row - 1][col - 1] + abs(part_time - note_onsets[col - 1])
+            if match_cost < skip_cost:
+                dp[row][col] = match_cost
+                take[row][col] = True
+            else:
+                dp[row][col] = skip_cost
+    chosen: set[int] = set()
+    row, col = m, k
+    while row > 0 and col > 0:
+        if take[row][col]:
+            chosen.add(col - 1)
+            row -= 1
+            col -= 1
+        else:
+            col -= 1
+    return chosen
 
 
 class _RunShape:
@@ -330,6 +386,10 @@ def _align_chars_dp(order: Sequence[int], spans: Sequence[tuple[float, float]],
     返回 `(头表 {字下标: 音符下标}, 跳过的字下标)`。
     """
     onsets = [spans[note][0] for note in order]
+    ends = [spans[note][1] for note in order]
+    gaps_before = ([0.0] + [max(0.0, onsets[i] - ends[i - 1])
+                            for i in range(1, len(onsets))]
+                   if onsets else [])
     note_count = len(onsets)
     if not note_count:
         return {}, list(range(len(chars)))
@@ -373,14 +433,19 @@ def _align_chars_dp(order: Sequence[int], spans: Sequence[tuple[float, float]],
             distance = min(gap, cap)
             head_cost = infinity
             head_from = -1
+            rest_pen = 0.0
             for mid in range(0, min(position, ideal + DP_RUN_CAP) + 1):
-                value = prev[position - mid]
+                u = position - mid
+                if mid > 0 and step > 0 and gaps_before[u] > REST_SKIP_GAP:
+                    rest_pen += REST_SKIP_PENALTY
+                value = prev[u]
                 if value == infinity:
                     continue
                 shape = (DP_RUN_EXCESS_COST * max(0, mid - ideal)
-                         + DP_RUN_DEFICIT_COST * max(0, ideal - mid))
+                         + DP_RUN_DEFICIT_COST * max(0, ideal - mid)
+                         + rest_pen)
                 if value + shape < head_cost:
-                    head_cost, head_from = value + shape, position - mid
+                    head_cost, head_from = value + shape, u
             tail = position - (ideal + DP_RUN_CAP) - 1
             if tail >= 0 and prefix[tail] != infinity:
                 value = prefix[tail] + DP_RUN_EXCESS_COST * DP_RUN_CAP
@@ -451,7 +516,7 @@ def _align_latin_words(order: Sequence[int], spans: Sequence[tuple[float, float]
         else:
             syllables = _syllable_count(text, parts)
         words.append((index, text, start, end, syllables,
-                      _is_inflated(start, end, syllables)))
+                      _is_low_confidence(char)))
     if not words:
         return {}, []
 
@@ -982,34 +1047,42 @@ def assign_lyrics(
         next_word_start = (ordered_heads[position + 1][1][1]
                            if position + 1 < len(ordered_heads)
                            and _is_latin(ordered_heads[position + 1][1][0]) else None)
-        # 先把"属于这个词的延音音"挑出来，再决定哪些写 `+`。
-        # 窗口终点：CJK 用**下一个字的起点**，而不是这个字自己的 end。
-        # TIFA 对一部分字给出接近零的时长（实测粤语《你唔爱我啦》"系" 0.02s），
-        # 按 end 截断会让一个字后面的延音全丢（marker 0/72）。字一直唱到下一个字
-        # 开唱为止，所以用 next_start 才是对的。
+        # 窗口终点：中英文统一延到下一个词/字的起点（无下一词则到轨尾）。
+        # 此前仅对非英文放开，导致英文 TIFA end 偏短时 44 处真实续音被留空；
+        # 同时加一条跨休止保护：已经越过本词 end 且与前一音之间有 > CONTINUATION_MAX_GAP
+        # 的明显休止时停止延续，避免把间奏/新乐句孤立音错标成延音。
         next_start = (ordered_heads[position + 1][1][1]
                       if position + 1 < len(ordered_heads) else None)
-        window_end = (next_start if (next_start is not None and not _is_latin(text))
-                      else end)
+        window_end = next_start if next_start is not None else end
         candidates: list[int] = []
+        prev_end_sec = spans[head][1]
         for note in order:
             if note <= head or note >= limit or note in taken:
                 continue
-            if spans[note][0] >= window_end:
+            note_start, note_end = spans[note]
+            if note_start >= window_end:
                 break     # 转音必须落在字的时间窗内；容差只用来找"头"，不放大窗口
             if (next_word_start is not None
-                    and spans[note][0] >= next_word_start):
+                    and note_start >= next_word_start):
                 break     # 已经唱到下一个词了：这个音留给它，不当延音
+            if note_start >= end and (note_start - prev_end_sec) > CONTINUATION_MAX_GAP:
+                break     # 已越过本词结束时间且出现明显休止：不再跨休止延续
             if only_empty and lyrics[note].strip():
+                prev_end_sec = max(prev_end_sec, note_end)
                 continue
             candidates.append(note)
+            prev_end_sec = max(prev_end_sec, note_end)
 
         # 没有 `parts` 的英文词：按粗估音节数在"头 + 延音"上均分边界。
         # 实测人工谱里 `+` 被写成 `-` 的有 101 处、反向只有 9 处 —— 以前"保守写 `-`"
         # 是错的方向；now 只要音数 ≥ 2 就按音节均分（hello 2 音节 / 3 个音 → `- +`）。
         total = len(candidates) + 1
         boundaries: set[int] = set()
-        if not parts and _is_latin(text):
+        plus_positions: set[int] = set()
+        if parts and candidates:
+            plus_positions = _match_syllable_notes(
+                parts, [spans[note][0] for note in candidates])
+        elif not parts and _is_latin(text):
             # 没有音节信息时按粗估音节数在「头 + 延音」上均分边界。
             # 注意：8 首人工谱的标注约定并不一致（`+` 占比 44.8%~89.5%），所以这里的
             # 取舍不可能对所有歌都对；严格 marker 要按"与写法无关"的 `marker_any` 一起看。
@@ -1017,14 +1090,11 @@ def assign_lyrics(
             for index in range(1, syllables):
                 boundaries.add(round(index * total / syllables))
 
-        cursor = 0
-        for ordinal, note in enumerate(candidates, start=1):
+        for idx_cand, note in enumerate(candidates):
+            ordinal = idx_cand + 1
             new_syllable = False
             if parts:
-                while (cursor < len(parts)
-                       and parts[cursor] <= spans[note][0] + SYLLABLE_EPSILON):
-                    cursor += 1
-                    new_syllable = True
+                new_syllable = idx_cand in plus_positions
             elif _is_japanese(text):
                 # 日语没有音节起点，按拍唱：每个音都是下一拍
                 new_syllable = True
@@ -1045,33 +1115,194 @@ def assign_lyrics(
     return fill
 
 
-def retime_lines_by_chars(lines: Sequence[Any], chars: Sequence[Any]) -> list[Any]:
-    """无时间戳的官方词（TXT）借用已对齐字符的时间：两串字符按比例位对位。
+_LINE_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9]+(?:['\u2019-][A-Za-z0-9]+)*|[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7a3]"
+)
 
-    识别文本靠不住但**时间靠得住**——TIFA 把识别文本对到音频上，每个被唱的
-    音节都有时刻；误听不改音节数（中文尤甚）。官方词的总字数与识别字数按比例
-    位对位（官方第 j 个字拿识别第 j×N/M 个字的时刻），字面换成官方词、
-    时间保持识别的。识别多听/漏听一两个字时错位不超过那一两个字；
-    但识别在某个区间**整段多听了内容**（桥段和声、说唱）时，官方词会整体
-    后移——这是按位映射的原理上限，要逐行精确请用带时间戳的 LRC。
-    """
-    from .asr import AlignedChar
 
-    spoken = [c for c in chars if str(c.text or "").strip()]
+def _tokenize_lyric_line(text: str) -> list[str]:
+    """把一行歌词切成对齐单元：拉丁词整词保留，中日韩方块字/假名逐字切开，忽略纯标点。"""
+    tokens = _LINE_TOKEN_RE.findall(str(text or ""))
+    if tokens:
+        return tokens
+    return [ch for ch in str(text or "") if ch.strip()]
+
+
+def _norm_token(text: str) -> str:
+    return str(text or "").strip().lower().replace("\u2019", "'")
+
+
+def _align_token_sequences(official: Sequence[str],
+                           spoken: Sequence[str]) -> list[tuple[int, int]]:
+    """官方词序列与识别词序列的全局编辑距离对齐，返回精确匹配的 `(官方下标, 识别下标)` 锚点。"""
+    n, m = len(official), len(spoken)
+    if not n or not m:
+        return []
+    # 只在完全相等时给 0 代价，替换给 1.5（宁可跳过错听字，也不乱配成假锚点）
+    direction = [[0] * (m + 1) for _ in range(n + 1)]
+    prev = [float(j) for j in range(m + 1)]
+    for i in range(1, n + 1):
+        curr = [float(i)] + [0.0] * m
+        o_tok = official[i - 1]
+        row = direction[i]
+        for j in range(1, m + 1):
+            diag = prev[j - 1] + (0.0 if o_tok == spoken[j - 1] else 1.5)
+            up = prev[j] + 1.0
+            left = curr[j - 1] + 1.0
+            if diag <= up and diag <= left:
+                curr[j] = diag
+                row[j] = 0
+            elif up <= left:
+                curr[j] = up
+                row[j] = 1
+            else:
+                curr[j] = left
+                row[j] = 2
+        prev = curr
+    pairs: list[tuple[int, int]] = []
+    i, j = n, m
+    while i > 0 and j > 0:
+        step = direction[i][j]
+        if step == 0:
+            if official[i - 1] == spoken[j - 1]:
+                pairs.append((i - 1, j - 1))
+            i -= 1
+            j -= 1
+        elif step == 1:
+            i -= 1
+        else:
+            j -= 1
+    pairs.reverse()
+    return pairs
+
+
+def _retime_official_with_lines(lines: Sequence[Any], chars: Sequence[Any]
+                                ) -> tuple[list[Any], list[int]]:
+    """核心实现：返回 `(对齐后的 AlignedChar 列表, 每个字所属的原始行下标)`。"""
+    from .asr import AlignedChar, MAX_REPAIR_CHAR_SECONDS
+
+    spoken = [c for c in chars if str(getattr(c, "text", "") or "").strip()]
     official: list[tuple[int, str]] = []
-    for index, line in enumerate(lines):
-        for ch in line.text:
-            if ch.strip():
-                official.append((index, ch))
+    for line_index, line in enumerate(lines):
+        for token in _tokenize_lyric_line(getattr(line, "text", "")):
+            official.append((line_index, token))
     if not official or not spoken:
-        return list(chars)
+        return list(chars), [0] * len(chars)
+
+    o_norm = [_norm_token(tok) for _, tok in official]
+    s_norm = [_norm_token(c.text) for c in spoken]
+    anchors = _align_token_sequences(o_norm, s_norm)
+
     total = len(official)
-    out: list[Any] = []
-    for position, (index, ch) in enumerate(official):
-        k = min(int(position / total * len(spoken)), len(spoken) - 1)
-        spoken_char = spoken[k]
-        out.append(AlignedChar(ch, spoken_char.start, spoken_char.end))
-    return out
+    line_ids = [line_index for line_index, _ in official]
+
+    if not anchors:
+        # 完全没有共同字（极端情况）：退回按比例位对位，不崩
+        out: list[Any] = []
+        for pos, (_line_idx, tok) in enumerate(official):
+            k = min(int(pos / total * len(spoken)), len(spoken) - 1)
+            sc = spoken[k]
+            out.append(AlignedChar(tok, sc.start, sc.end,
+                                   tuple(getattr(sc, "parts", ()) or ()),
+                                   getattr(sc, "confidence", None)))
+        return out, line_ids
+
+    # 估计单字平均时长，用于首尾锚点外推兜底
+    durs = [max(0.0, float(c.end) - float(c.start)) for c in spoken
+            if float(c.end) > float(c.start) + 1e-6]
+    avg_dur = (min(max(sum(durs) / len(durs), 0.15), 0.50) if durs else 0.25)
+
+    out_items: list[Any] = [None] * total
+
+    def _fill_gap(o_start: int, o_end: int, t_left: float, t_right: float) -> None:
+        count = o_end - o_start
+        if count <= 0:
+            return
+        if t_right <= t_left + 1e-6:
+            t_right = t_left + min(avg_dur, 0.15) * count
+        step = min((t_right - t_left) / count, MAX_REPAIR_CHAR_SECONDS)
+        for offset in range(count):
+            tok = official[o_start + offset][1]
+            s = max(0.0, t_left + step * offset)
+            e = max(s, t_left + step * (offset + 1))
+            out_items[o_start + offset] = AlignedChar(tok, s, e)
+
+    # 先填精确锚点
+    for o_idx, s_idx in anchors:
+        sc = spoken[s_idx]
+        out_items[o_idx] = AlignedChar(
+            official[o_idx][1], float(sc.start), float(sc.end),
+            tuple(getattr(sc, "parts", ()) or ()),
+            getattr(sc, "confidence", None),
+        )
+
+    # 首锚点之前
+    first_o, first_s = anchors[0]
+    if first_o > 0:
+        t_right = float(spoken[first_s].start)
+        if first_s > 0:
+            t_left = float(spoken[0].start)
+        else:
+            t_left = max(0.0, t_right - avg_dur * first_o)
+        _fill_gap(0, first_o, t_left, t_right)
+
+    # 相邻锚点之间
+    for (o_a, s_a), (o_b, s_b) in zip(anchors, anchors[1:]):
+        if o_b <= o_a + 1:
+            continue
+        t_left = float(spoken[s_a].end)
+        t_right = float(spoken[s_b].start)
+        if t_right <= t_left + 1e-6:
+            t_left = float(spoken[s_a].start)
+            t_right = float(spoken[s_b].end)
+        _fill_gap(o_a + 1, o_b, t_left, t_right)
+
+    # 末锚点之后
+    last_o, last_s = anchors[-1]
+    if last_o + 1 < total:
+        t_left = float(spoken[last_s].end)
+        if last_s + 1 < len(spoken):
+            t_right = float(spoken[-1].end)
+        else:
+            t_right = t_left + avg_dur * (total - last_o - 1)
+        _fill_gap(last_o + 1, total, t_left, t_right)
+
+    return out_items, line_ids
+
+
+def retime_lines_by_chars(lines: Sequence[Any], chars: Sequence[Any]) -> list[Any]:
+    """无时间戳的官方词（TXT）借用已对齐字符的时间：**序列锚定 + 锚间插值**。
+
+    旧实现用全局字数比例 `k = j * N / M` 硬映射：只要 ASR 在桥段多听和声或漏听一段 rap，
+    整首歌的官方词都会整体漂移。现在先做官方词 ↔ 识别词的全局编辑距离对齐，把精确匹配的字
+    当硬锚点直接继承真实时间戳，只在相邻锚点之间做局部时间插值；同时英文整词保留不再拆成字母。
+    """
+    retimed, _line_ids = _retime_official_with_lines(lines, chars)
+    return retimed
+
+
+def anchor_lyric_lines(lines: Sequence[Any], chars: Sequence[Any]) -> list[Any]:
+    """把无时间戳的官方 TXT 行锚定成带行首时间的 `LyricLine` 列表（供 TIFA 二次逐行精对齐）。"""
+    from .asr import LyricLine
+
+    retimed, line_ids = _retime_official_with_lines(lines, chars)
+    if not retimed or not lines:
+        return []
+    first_start: dict[int, float] = {}
+    for item, line_index in zip(retimed, line_ids):
+        if line_index not in first_start:
+            first_start[line_index] = float(item.start)
+    anchored: list[LyricLine] = []
+    last_time = 0.0
+    for idx, line in enumerate(lines):
+        text = str(getattr(line, "text", "") or "").strip()
+        if not text:
+            continue
+        start = first_start.get(idx, last_time)
+        start = max(last_time, start)
+        anchored.append(LyricLine(start=start, text=text))
+        last_time = start
+    return anchored
 
 
 def note_spans_seconds(timeline: Timeline, notes: Sequence[Mapping[str, Any]]

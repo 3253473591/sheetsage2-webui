@@ -14,7 +14,7 @@
 import { computed, ref, type Ref } from 'vue'
 import * as api from '@/api'
 import { resolveUploadTarget, type PendingUpload } from '@/batch'
-import { groupForUpload } from '@/drop'
+import { groupForUpload, readLyricsFile } from '@/drop'
 import type { BatchDetail, BatchInfo, BatchScan, JobOptions, JobRow, PhaseKey } from '@/types'
 
 /** 有行在跑时的轮询间隔。批量视图只是"看进度"，1.5s 足够。 */
@@ -218,7 +218,7 @@ export function useBatch(deps: BatchDeps) {
     try {
       for (const [index, pair] of pairs.entries()) {
         uploadProgress.value = { done: index, total: pairs.length, name: pair.name }
-        const lyrics = pair.lyrics ? await pair.lyrics.text() : undefined
+        const lyrics = pair.lyrics ? await readLyricsFile(pair.lyrics) : undefined
         const body = await api.uploadBatchFile(pair.audio, {
           lyrics,
           batchId: batchId ?? undefined,

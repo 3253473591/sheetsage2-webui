@@ -35,14 +35,16 @@ def playback(*measures):
 
 
 class Char:
-    """替身：只要有 .text / .start / .end（可选 .parts）就行。"""
+    """替身：只要有 .text / .start / .end（可选 .parts / .confidence）就行。"""
 
     def __init__(self, text: str, start: float, end: float,
-                 parts: tuple[float, ...] = ()) -> None:
+                 parts: tuple[float, ...] = (),
+                 confidence: float | None = None) -> None:
         self.text = text
         self.start = start
         self.end = end
         self.parts = parts
+        self.confidence = confidence
 
 
 def spans(*pairs) -> list[tuple[float, float]]:
@@ -217,6 +219,7 @@ def test_inflated_word_does_not_push_the_rest_of_the_phrase_late():
     """TIFA 把 'you' 拉长到 1.4s、后面三个词整体晚 1.1s：按序列结构拉回连续的音。
 
     实测 Poison "you want me baby that's"——旧算法整句推迟 3 个音。
+    `baby` 带双音节 `parts=(57.1,)`，1-to-1 音节匹配把它的第 2 个音正确标为 `+`。
     """
     notes = spans((55.11, 55.31), (55.31, 55.51), (55.51, 55.71),
                   (55.71, 55.91), (56.11, 56.31), (56.51, 56.71))
@@ -224,19 +227,89 @@ def test_inflated_word_does_not_push_the_rest_of_the_phrase_late():
              Char("me", 56.70, 56.89), Char("baby", 56.89, 57.68, parts=(57.1,)),
              Char("that's", 57.68, 58.05)]
     fill = assign_lyrics(notes, chars)
-    assert fill.lyrics == ["you", "want", "me", "baby", MELISMA, "that's"]
+    assert fill.lyrics == ["you", "want", "me", "baby", CONTINUATION, "that's"]
 
 
 def test_english_head_cannot_drift_far_before_the_word():
     """词头不许比词的开始早 1.5s 以上：延音段形状代价不能把词拽到几秒前的音上。
 
     实测 Poison 'any' 曾被拽早 3.2s（它前面有一段没有词的音阶走句）。
-    第二个音在 'ah' 的时间窗之外，留给导出侧当延音（svp.py 会补 `-`）。
+    无缝相接的第二个音归 'ah' 的延音 `-`，'boom' 稳定落在第 3 个音上。
     """
     notes = spans((10.0, 10.2), (10.2, 10.4), (12.0, 12.2))
     chars = [Char("ah", 10.0, 10.15), Char("boom", 11.9, 12.15)]
     fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["ah", MELISMA, "boom"]
+
+
+def test_held_english_word_keeps_distance_gradient():
+    """正常唱长超过 0.35s 的英文词不该被抹平距离梯度（旧 `_is_inflated` 会把它推歪）。"""
+    notes = spans((53.10, 53.53), (53.53, 53.74), (53.74, 54.10))
+    chars = [Char("but", 53.10, 53.55), Char("your", 53.55, 54.06)]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["but", "your", MELISMA]
+
+
+def test_parts_monotonic_dp_matches_late_syllable_and_avoids_double_consume():
+    """音节 `parts` 轻微滞后或挤在同一音容差内时，1-to-1 DP 仍能正确标 `+`。"""
+    # 2 音节词 1 个续音，part 比音符晚 0.15s（超旧 0.10s 容差）仍应标 `+`
+    notes = spans((0.0, 0.3), (0.3, 0.6))
+    fill = assign_lyrics(notes, [Char("captain", 0.0, 0.6, parts=(0.45,))])
+    assert fill.lyrics == ["captain", CONTINUATION]
+
+    # 3 音节词 2 个续音，两个 parts 都落在第 1 个续音容差内，不该被一次吞光
+    notes3 = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9))
+    fill3 = assign_lyrics(notes3, [Char("everywhere", 0.0, 0.9, parts=(0.28, 0.38))])
+    assert fill3.lyrics == ["everywhere", CONTINUATION, CONTINUATION]
+
+
+def test_continuation_does_not_cross_long_rest_past_word_end():
+    """越过词 end 后遇到明显休止（>0.5s），孤立音不该被标成延音。"""
+    notes = spans((10.0, 10.2), (10.9, 11.1), (12.6, 12.8))
+    chars = [Char("ah", 10.0, 10.15), Char("boom", 12.5, 12.75)]
+    fill = assign_lyrics(notes, chars)
     assert fill.lyrics == ["ah", "", "boom"]
+
+
+def test_retime_lines_by_chars_anchors_matching_tokens_across_asr_insertion():
+    """无时间戳 TXT：ASR 中段多听和声/幻觉词时，序列锚定只局部插值，不拖垮后续整首。"""
+    from sheetsage2_webui.asr import LyricLine
+    from sheetsage2_webui.lyrics import anchor_lyric_lines, retime_lines_by_chars
+
+    official = [LyricLine(-1.0, "春眠不觉晓"), LyricLine(-1.0, "处处闻啼鸟")]
+    # ASR 在两句之间多听了 4 个杂音字 "啊哦嗯哈"，且把 "觉" 听错成 "脚"
+    spoken = [
+        Char("春", 1.0, 1.2), Char("眠", 1.2, 1.4), Char("不", 1.4, 1.6),
+        Char("脚", 1.6, 1.8), Char("晓", 1.8, 2.0),
+        Char("啊", 3.0, 3.2), Char("哦", 3.2, 3.4), Char("嗯", 3.4, 3.6), Char("哈", 3.6, 3.8),
+        Char("处", 5.0, 5.2), Char("处", 5.2, 5.4), Char("闻", 5.4, 5.6),
+        Char("啼", 5.6, 5.8), Char("鸟", 5.8, 6.0),
+    ]
+    retimed = retime_lines_by_chars(official, spoken)
+    assert [c.text for c in retimed] == list("春眠不觉晓处处闻啼鸟")
+    # 第二句首字 "处" 必须锚定在 5.0s，而不是被中间 4 个杂音字拖到 3.x 秒
+    assert retimed[5].start == pytest.approx(5.0)
+    # 错听字 "觉" 在 "不"(1.6) 和 "晓"(1.8) 之间局部插值
+    assert 1.59 <= retimed[3].start <= 1.61 and 1.79 <= retimed[3].end <= 1.81
+
+    anchored = anchor_lyric_lines(official, spoken)
+    assert [(line.text, round(line.start, 2)) for line in anchored] == [
+        ("春眠不觉晓", 1.0), ("处处闻啼鸟", 5.0)]
+
+
+def test_retime_lines_by_chars_keeps_english_words_intact():
+    """无时间戳英文 TXT：按整词切分，不再拆成单字母。"""
+    from sheetsage2_webui.asr import LyricLine
+    from sheetsage2_webui.lyrics import retime_lines_by_chars
+
+    official = [LyricLine(-1.0, "Hello, world!")]
+    spoken = [Char("hello", 1.0, 1.5, parts=(1.25,), confidence=0.88),
+              Char("world", 1.6, 2.1, confidence=0.91)]
+    retimed = retime_lines_by_chars(official, spoken)
+    assert [c.text for c in retimed] == ["Hello", "world"]
+    assert retimed[0].parts == (1.25,)
+    assert retimed[0].confidence == pytest.approx(0.88)
+    assert retimed[1].start == pytest.approx(1.6)
 
 
 def test_latin_melisma_stops_before_the_next_word_start():

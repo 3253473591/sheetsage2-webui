@@ -82,6 +82,36 @@ export function groupForUpload(files: File[]): UploadPair[] {
   }))
 }
 
+/**
+ * 解码拖拽进来的歌词文件字节（兼容 UTF-8 / UTF-16 / GBK / Big5 / Shift-JIS / EUC-KR）。
+ *
+ * 浏览器原生的 `File.text()` 只按 UTF-8 解码，Windows 上常见的 GBK `.lrc`/`.txt`
+ * 会解成乱码；这里与后端 `asr.read_lrc` 保持同一套候选编码回退。
+ */
+export function decodeLyricsBytes(bytes: Uint8Array): string {
+  if (bytes.length >= 2) {
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return new TextDecoder('utf-16le').decode(bytes)
+    }
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return new TextDecoder('utf-16be').decode(bytes)
+    }
+  }
+  for (const encoding of ['utf-8', 'gb18030', 'gbk', 'big5', 'shift-jis', 'euc-kr']) {
+    try {
+      return new TextDecoder(encoding, { fatal: true }).decode(bytes)
+    } catch {
+      continue
+    }
+  }
+  return new TextDecoder('utf-8').decode(bytes)
+}
+
+export async function readLyricsFile(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer()
+  return decodeLyricsBytes(new Uint8Array(buffer))
+}
+
 /** `FileSystemEntry` 的最小形状（浏览器给的是只读对象，测试里用假的即可）。 */
 export interface DirEntryLike {
   isFile: boolean

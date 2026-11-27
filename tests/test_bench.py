@@ -202,6 +202,18 @@ def test_product_score_penalises_wrong_notes():
     assert product["note_match_rate"] == 1.0
 
 
+def test_product_score_shifts_auto_to_manual_not_chars_to_auto():
+    """`auto` 与 `chars` 来自同一音频（相对偏移 0）；`offset` 只平移 `auto` 去对齐 `manual`。"""
+    # manual 比音频整体晚 1.5s；auto 与 chars 都在音频时间轴上对齐
+    manual = [_note(2.5, 2.9, "你"), _note(3.0, 3.4, "好")]
+    auto = [_note(1.0, 1.4, ""), _note(1.5, 1.9, "")]
+    chars = [Char("你", 1.0, 1.2), Char("好", 1.5, 1.7)]
+
+    product = product_score(manual, auto, chars, offset=1.5)
+    assert product["exact"] == 2
+    assert product["note_match_rate"] == 1.0
+
+
 
 def test_adlib_tokens_absent_from_the_text_are_excluded():
     """人工谱写了 `oh`、但 lyrics.json 里没有：不算挂字错，从分母剔掉并报数。"""

@@ -138,13 +138,13 @@ export function lrcBadge(item: Pick<BatchScanItem, 'lrc_kind' | 'lrc_lines'>): {
     case 'txt':
       return {
         short: 'TXT',
-        text: '纯文本没有时间戳：仍要跑语音识别，字面用官方词',
+        text: '纯文本（无时间戳）：语音识别锚定 + TIFA 二次精对齐，字面用官方词',
         tone: 'warn',
       }
     default:
       return {
         short: '无词',
-        text: '没有同名 LRC：走语音识别（慢一些，词也可能不对）',
+        text: '没有同名歌词（LRC/TXT）：走语音识别',
         tone: 'idle',
       }
   }

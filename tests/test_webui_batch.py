@@ -52,6 +52,35 @@ def test_scan_pairs_the_lrc_with_the_same_name(tmp_path):
     assert result.problems == []
 
 
+def test_scan_lyric_pairing_priority_rules(tmp_path):
+    """批量同名歌词三条规则：都没有走 ASR、有谁用谁、两个都有只用 LRC。"""
+    folder = tmp_path / "batch"
+    # 1. 两个都没有 → ASR (none)
+    write(folder / "01_none.wav")
+    # 2a. 只有 LRC → 用 LRC
+    write(folder / "02_only_lrc.wav")
+    write(folder / "02_only_lrc.lrc", LRC_TEXT.encode("utf-8"))
+    # 2b. 只有 TXT → 用 TXT
+    write(folder / "03_only_txt.wav")
+    write(folder / "03_only_txt.txt", "纯文本第一行\n纯文本第二行\n".encode("utf-8"))
+    # 3. 两个都有 → 只用 LRC（忽略 TXT）
+    write(folder / "04_both.wav")
+    write(folder / "04_both.txt", "纯文本不应被选中\n".encode("utf-8"))
+    write(folder / "04_both.lrc", LRC_TEXT.encode("utf-8"))
+
+    result = batch_scan.scan_folder(folder)
+    by_name = {item.name: item for item in result.items}
+    assert by_name["01_none"].lrc is None and by_name["01_none"].lrc_kind == "none"
+    assert by_name["02_only_lrc"].lrc.name == "02_only_lrc.lrc"
+    assert by_name["02_only_lrc"].lrc_kind == "lrc"
+    assert by_name["03_only_txt"].lrc.name == "03_only_txt.txt"
+    assert by_name["03_only_txt"].lrc_kind == "txt"
+    assert by_name["04_both"].lrc.name == "04_both.lrc"
+    assert by_name["04_both"].lrc_kind == "lrc"
+    assert by_name["04_both"].problem is None
+    assert result.problems == []
+
+
 def test_scan_marks_japanese_and_korean_lrc(tmp_path):
     folder = tmp_path / "batch"
     write(folder / "ja.wav")

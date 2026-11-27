@@ -526,3 +526,29 @@ def test_split_mora_handles_small_kana_and_sokuon():
     assert split_mora("がっこう") == ["が", "っ", "こ", "う"]
     assert split_mora("しんぶん") == ["し", "ん", "ぶ", "ん"]
     assert split_mora("コーヒー") == ["コ", "ー", "ヒ", "ー"]
+
+
+def test_extract_alignment_from_result_preserves_skipped_and_confidence():
+    """内存提取 TIFA 结果：保留被跳过的零宽词（confidence=0）并算出正常词的帧相似度置信度。"""
+    import numpy as np
+    from sheetsage2_webui.tifa_align import extract_alignment_from_result
+
+    # 10 帧 (timestep=0.1s -> 1.0s), 3 个音素分属 3 个词，其中第 2 个词被跳过 (span [3,3])
+    sim = np.zeros((10, 3), dtype=np.float32)
+    sim[0:3, 0] = 0.8
+    sim[5:9, 2] = 0.6
+    result = {
+        "spans": np.array([[0, 3], [3, 3], [5, 9]]),
+        "words": np.array([1, 2, 3]),
+        "groups": np.array([1, 2, 3]),
+        "phonemes": ["zh/l", "zh/zh", "zh/d"],
+        "texts": ["流", "转", "等"],
+        "spectrogram": np.zeros((10, 80), dtype=np.float32),
+        "similarity": sim,
+    }
+    words, phones = extract_alignment_from_result(result, timestep=0.1, skip_handling="preserve")
+    assert [w[0] for w in words] == ["流", "转", "等"]
+    assert words[0][3] == pytest.approx(0.8, abs=1e-3)
+    assert words[1][3] == pytest.approx(0.0, abs=1e-3)      # 零宽跳过词置信度为 0，不再丢字
+    assert words[2][3] == pytest.approx(0.6, abs=1e-3)
+    assert len(phones) == 3

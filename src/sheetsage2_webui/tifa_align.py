@@ -24,7 +24,7 @@ from pathlib import Path
 import os
 import sys
 import types
-from typing import Sequence
+from typing import Any, Sequence
 
 #: TIFA 官方建议的上下文上限（秒）。切片超过这个就不保证稳定。
 MAX_ALIGN_SECONDS = 50.0
@@ -248,6 +248,142 @@ def word_syllable_onsets(phones: Sequence[tuple[float, float, str]],
     return syllable_onsets(phones, start, end)
 
 
+def _to_list(value: Any) -> list[Any]:
+    return value.tolist() if hasattr(value, "tolist") else list(value)
+
+
+def _preserve_zero_spans(
+    spans: Sequence[tuple[float, float]],
+    groups: Sequence[int],
+    total_duration: float,
+) -> list[tuple[float, float]]:
+    """在允许的空档内给 0 宽跳过音素保留 1ms 区间，避免静默丢字。"""
+    original = [(int(round(a * 1000)), int(round(b * 1000))) for a, b in spans]
+    duration_ms = int(round(total_duration * 1000))
+    intervals: list[tuple[int, int]] = []
+    n = len(original)
+    i = 0
+    while i < n:
+        left = intervals[-1][1] if intervals else 0
+        onset, offset = original[i]
+        if offset > onset:
+            onset = max(onset, left)
+            intervals.append((onset, max(offset, onset + 1)))
+            i += 1
+            continue
+        end = i + 1
+        while end < n and original[end][0] >= original[end][1]:
+            end += 1
+        right = max(left, original[end][0] if end < n else duration_ms)
+        gap_index = i
+        while gap_index <= end:
+            if gap_index == 0 or gap_index == n or groups[gap_index - 1] != groups[gap_index]:
+                break
+            gap_index += 1
+        left_count = min(gap_index, end) - i
+        right_count = end - i - left_count
+        for k in range(left_count):
+            intervals.append((left + k, left + k + 1))
+        right_start = max(left + left_count, right - right_count)
+        for k in range(right_count):
+            intervals.append((right_start + k, right_start + k + 1))
+        i = end
+    return [(a / 1000.0, b / 1000.0) for a, b in intervals]
+
+
+def extract_alignment_from_result(
+    result: dict[str, Any],
+    *,
+    timestep: float,
+    skip_handling: str = "preserve",
+) -> tuple[list[tuple[str, float, float, float | None]],
+           list[tuple[float, float, str]]]:
+    """直接从 TIFA 内存推理输出提取 `(词列表[(label, start, end, confidence)], phones)`。
+
+    相比写临时 TextGrid 再正则回读：
+    1. 保留 `result["similarity"]` 计算出的逐词声学置信度（跳过音素置信度为 0.0）；
+    2. `skip_handling="preserve"` 不再静默丢弃零宽词，避免漏字及 `_labels_for` 长度错配；
+    3. 零磁盘 TextGrid I/O。
+    """
+    raw_spans = _to_list(result["spans"])
+    n = len(raw_spans)
+    if n == 0:
+        return [], []
+    words_ids = [int(v) for v in _to_list(result["words"])]
+    groups = [int(v) for v in _to_list(result["groups"])]
+    phonemes = [str(p) for p in result["phonemes"]]
+    texts = [str(t) for t in result["texts"]]
+
+    # 逐音素声学置信度：按预测帧区间对 similarity[:, idx] 取均值（与 TIFA compute_confidence 同口径）
+    similarity = result.get("similarity")
+    phone_confs: list[float | None] = [None] * n
+    if similarity is not None:
+        t_max = int(similarity.shape[0])
+        for idx in range(n):
+            f0 = max(0, int(round(raw_spans[idx][0])))
+            f1 = min(t_max, int(round(raw_spans[idx][1])))
+            if f1 > f0:
+                col = similarity[f0:f1, idx]
+                val = float(col.float().mean().item()) if hasattr(col, "float") else (
+                    sum(float(x) for x in col) / len(col))
+                phone_confs[idx] = val
+            else:
+                phone_confs[idx] = 0.0
+
+    sec_spans = [(round(float(a) * timestep, 3), round(float(b) * timestep, 3))
+                 for a, b in raw_spans]
+    spec = result.get("spectrogram")
+    total_duration = (round(int(spec.shape[0]) * timestep, 3)
+                      if spec is not None else max((b for _, b in sec_spans), default=0.0))
+
+    if skip_handling == "omit":
+        keep = [i for i in range(n) if sec_spans[i][1] > sec_spans[i][0]]
+        if not keep:
+            return [], []
+        sec_spans = [sec_spans[i] for i in keep]
+        words_ids = [words_ids[i] for i in keep]
+        groups = [groups[i] for i in keep]
+        phonemes = [phonemes[i] for i in keep]
+        phone_confs = [phone_confs[i] for i in keep]
+        n = len(keep)
+    else:
+        sec_spans = _preserve_zero_spans(sec_spans, groups, total_duration)
+
+    eps = 0.001
+    phone_intervals: list[tuple[float, float, str]] = []
+    for idx in range(n):
+        onset, offset = sec_spans[idx]
+        if phone_intervals and onset < phone_intervals[-1][1]:
+            onset = phone_intervals[-1][1]
+        if offset <= onset:
+            offset = onset + eps
+        phone_intervals.append((onset, offset, phonemes[idx]))
+
+    word_rows: list[tuple[str, float, float, float | None]] = []
+    i = 0
+    while i < n:
+        owner = words_ids[i]
+        j = i + 1
+        while j < n and words_ids[j] == owner:
+            j += 1
+        label = texts[owner - 1].strip()
+        onset = phone_intervals[i][0]
+        offset = phone_intervals[j - 1][1]
+        if word_rows and onset < word_rows[-1][2]:
+            onset = word_rows[-1][2]
+        if offset <= onset:
+            offset = onset + eps
+        confs = [phone_confs[k] for k in range(i, j) if phone_confs[k] is not None]
+        word_conf = (round(sum(confs) / len(confs), 4) if confs else None)
+        if label and label != "SP" and offset - onset > 1e-6:
+            word_rows.append((label, onset, offset, word_conf))
+        i = j
+
+    phones_clean = [(a, b, p) for a, b, p in phone_intervals
+                    if p.strip() and p.strip() != "SP" and b - a > 1e-6]
+    return word_rows, phones_clean
+
+
 #: 小写假名：跟在前一个假名后面，算同一モーラ。
 _SMALL_KANA = set("ゃゅょぁぃぅぇぉゎゕゖャュョァィゥェォヮヵヶ")
 
@@ -319,22 +455,30 @@ class TifaAligner:
 
         - 日语：MeCab 给的是词（`語れ`），但挂字要**モーラ**（か/た/れ）。
           用 fugashi 取读音、切モーラ、把词的时间按モーラ均分。
-        - 其它语言：原样返回（汉字本来就是一字一项）。
+        - 其它语言：原样返回（汉字本来就是一字一项），并透传 `confidence`。
         """
         if str(self.language) not in ("ja", "jpn"):
-            return [(label, start, end,
-                     word_syllable_onsets(phones, label, start, end,
-                                          language=self.language))
-                    for label, start, end in words]
+            out = []
+            for row in words:
+                label, start, end = row[0], row[1], row[2]
+                conf = row[3] if len(row) > 3 else None
+                out.append((label, start, end,
+                            word_syllable_onsets(phones, label, start, end,
+                                                 language=self.language),
+                            conf))
+            return out
         items = []
-        for label, start, end in words:
+        for row in words:
+            label, start, end = row[0], row[1], row[2]
+            conf = row[3] if len(row) > 3 else None
             mora = self._mora_of(label)
             if not mora:
-                items.append((label, start, end, ()))
+                items.append((label, start, end, (), conf))
                 continue
             step = (end - start) / len(mora)
             for index, kana in enumerate(mora):
-                items.append((kana, start + index * step, start + (index + 1) * step, ()))
+                items.append((kana, start + index * step, start + (index + 1) * step,
+                              (), conf))
         return items
 
     def _mora_of(self, word: str) -> list[str]:
@@ -394,22 +538,23 @@ class TifaAligner:
 
     # ------------------------------------------------------------------ 对齐
     def align_many(self, items: Sequence[tuple[Path, str]]
-                   ) -> list[list[tuple[str, float, float, tuple[float, ...]]]]:
+                   ) -> list[list[tuple[str, float, float, tuple[float, ...], float | None]]]:
         """给多段 (音频, 文本) 一次对齐完。
 
-        每段返回 `(文本, 起, 止, 音节起点)`；第四项只对**拉丁词**有意义（用来区分
-        「接着上一个音节唱」和「进下一个音节」），汉字/假名词是空元组。中文歌里夹的
-        英文词也会切（TIFA 的 `language=[zh, en]` 让它们走英文 G2P）。
+        每段返回 `(文本, 起, 止, 音节起点, 声学置信度)`；第四项只对**拉丁词**有意义
+        （用来区分「接着上一个音节唱」和「进下一个音节」），第五项来自 TIFA 的
+        `similarity` 帧相似度均值（直接内存回调采集，不再写临时 TextGrid）。
         """
         if not items:
             return []
         self.load()
         self._apply_unidic()
+        import lightning.pytorch.callbacks as _pl_callbacks
         from inference.api import run_inference
-        from inference.callbacks import SaveTextGridCallback
         from inference.data import AudioTextDataset
 
-        results: list[list[tuple[str, float, float, tuple[float, ...]]]] = [[] for _ in items]
+        results: list[list[tuple[str, float, float, tuple[float, ...], float | None]]] = [
+            [] for _ in items]
         # 文本要写成同名 .txt 放在音频旁边，AudioTextDataset 靠同名查找
         filemap: dict[str, Path] = {}
         owners: dict[str, int] = {}
@@ -420,32 +565,41 @@ class TifaAligner:
             filemap[key] = audio
             owners[key] = index
 
-        with tempfile.TemporaryDirectory(prefix="tifa-grid-") as grid_dir:
-            dataset = AudioTextDataset(
-                filemap=filemap, g2p_config=self._g2p, g2p_root=self.model.parent,
-                vocabulary=self._vocab, audio_sample_rate=self._backend.sample_rate,
-                # 英文 LSTM 转换器一并激活：中文/粤语切片混着英文词（"Oh my god"）时，
-                # 只传 zh 会让 G2P 抛 G2PConversionError，而数据集把异常吞成 skip——
-                # 整个切片静默出不了 TextGrid（实测《爱x无限大》5 段里 3 段全灭）。
-                # 模型 config 里本来就配了 en 转换器，只是被语言过滤挡住了；
-                # 拉丁词由它认领，汉字照走拼音，纯中文不受影响。
-                language=[self.language, "en"],
-                # 默认的 "discard" 会因为**一个**没见过的音素丢掉整段
-                # （实测粤语《富士山下》「调」的 eu 就让整个 50s 窗口归零）。
-                # 丢掉那条发音路径就行，其余照常对齐。
-                oov_handling="force",
-            )
-            callbacks = [SaveTextGridCallback(
-                output_dir=Path(grid_dir), language=self.language,
-                timestep=self._backend.timestep, skip_handling="omit",
-                save_pfml=False, fill="SP")]
-            with _LOCK:
-                run_inference(backend=self._backend, dataset=dataset,
-                              callbacks=callbacks, batch_size=self.batch_size,
-                              num_workers=0, precision=self.precision, mode="predict")
-            for key, owner_index in owners.items():
-                grid = Path(grid_dir) / f"{key}.TextGrid"
-                if grid.is_file():
-                    words, phones = parse_grid_tiers(grid)
-                    results[owner_index] = self._expand_items(words, phones)
+        collected: dict[str, tuple[list[tuple[str, float, float, float | None]],
+                                   list[tuple[float, float, str]]]] = {}
+        timestep = self._backend.timestep
+
+        class _CollectAlignmentCallback(_pl_callbacks.Callback):
+            def on_predict_batch_end(self, trainer, pl_module, outputs, batch,
+                                     *args, **kwargs) -> None:
+                for item in outputs or ():
+                    ident = str(item.get("identifier") or "")
+                    if ident:
+                        collected[ident] = extract_alignment_from_result(
+                            item, timestep=timestep, skip_handling="preserve")
+
+        dataset = AudioTextDataset(
+            filemap=filemap, g2p_config=self._g2p, g2p_root=self.model.parent,
+            vocabulary=self._vocab, audio_sample_rate=self._backend.sample_rate,
+            # 英文 LSTM 转换器一并激活：中文/粤语切片混着英文词（"Oh my god"）时，
+            # 只传 zh 会让 G2P 抛 G2PConversionError，而数据集把异常吞成 skip——
+            # 整个切片静默出不了对齐结果（实测《爱x无限大》5 段里 3 段全灭）。
+            # 模型 config 里本来就配了 en 转换器，只是被语言过滤挡住了；
+            # 拉丁词由它认领，汉字照走拼音，纯中文不受影响。
+            language=[self.language, "en"],
+            # 默认的 "discard" 会因为**一个**没见过的音素丢掉整段
+            # （实测粤语《富士山下》「调」的 eu 就让整个 50s 窗口归零）。
+            # 丢掉那条发音路径就行，其余照常对齐。
+            oov_handling="force",
+        )
+        callbacks = [_CollectAlignmentCallback()]
+        with _LOCK:
+            run_inference(backend=self._backend, dataset=dataset,
+                          callbacks=callbacks, batch_size=self.batch_size,
+                          num_workers=0, precision=self.precision, mode="predict")
+        for key, owner_index in owners.items():
+            entry = collected.get(key)
+            if entry is not None:
+                words, phones = entry
+                results[owner_index] = self._expand_items(words, phones)
         return results
