@@ -666,19 +666,14 @@ class AsrEngine:
 
     @staticmethod
     def _pick_align_mode(text: str) -> str:
-        """第一次拿到文字时定语种：日语走 Qwen 时间戳，其余走 TIFA。
+        """第一次拿到文字时定语种：日语/韩语走 Qwen 对齐器，其余走 TIFA。
 
-        ASR 经常把日文歌判成 Chinese，所以**看字**（假名）而不是看它报的语言。
+        ASR 经常把日文歌判成 Chinese，所以**看字**（假名/谚文）而不是看它报的语言。
         """
         from .tifa_align import guess_language
 
         script = guess_language(text)
         if script in ("ja", "ko"):
-            if script == "ja":
-                from .tifa_align import ja_g2p_available
-
-                if ja_g2p_available():
-                    return "tifa"
             return script
         return "tifa"
 
@@ -858,11 +853,6 @@ class AsrEngine:
         script = guess_language(text or "")
         if sticky == "zh" and script != "zh":
             sticky = script
-        if sticky == "ja":
-            from .tifa_align import ja_g2p_available
-
-            if ja_g2p_available():
-                return "tifa", sticky          # 本地有 UniDic：日语走 TIFA
         return ("qwen" if sticky in ("ja", "ko") else "tifa"), sticky
 
     def lrc_aligner_kind(self, text: str, language: str | None = None) -> str:
@@ -1045,22 +1035,16 @@ class AsrEngine:
                 # 缺可选模型不能把整条链路做死：退回 Qwen，并让用户在详情里看到原因
                 run.warnings.append(reason)
                 tifa_mode = False
-        # **日语/韩语专用**：TIFA 1.0 没有日语/韩语的离线 G2P，这两种歌只能走 Qwen 对齐器。
-        # 显式指定了就提前判，省得白跑一遍识别；没装对齐器直接停，别产出半套歌词。
+        # **日语/韩语专用**：默认统一走 Qwen 对齐器（TIFA 日语依赖额外 fugashi+UniDic，
+        # 且实测日英混唱/整词均分效果差；韩语则无 G2P）。显式指定时提前校验，没装直接停。
         if tifa_mode and wanted_language in ("Japanese", "Korean"):
-            from .tifa_align import ja_g2p_available
-
-            if wanted_language == "Japanese" and ja_g2p_available():
-                # 本地有 UniDic：日语走 TIFA，不用加载 1.8G 的 Qwen 对齐器。
-                run.warnings.append("日语：使用本地 UniDic 词典，TIFA 直接对齐")
-            else:
-                name = "日语" if wanted_language == "Japanese" else "韩语"
-                if not self._qwen_aligner_ready():
-                    raise JaAlignerMissing(
-                        f"这首歌指定为{name}，但没装{name}对齐器（随包的 TIFA 不支持{name}）。"
-                        "双击 02_models.bat，选 2（日语特供）补下模型，再重跑「识别歌词」。")
-                tifa_mode = False
-                run.warnings.append(f"{name}：TIFA 不支持{name} G2P，这次用 Qwen 对齐器")
+            name = "日语" if wanted_language == "Japanese" else "韩语"
+            if not self._qwen_aligner_ready():
+                raise JaAlignerMissing(
+                    f"这首歌指定为{name}，但没装{name}对齐器（默认日语/韩语走 Qwen 对齐器）。"
+                    "双击 02_models.bat，选 2（日语/韩语特供）补下模型，再重跑「识别歌词」。")
+            tifa_mode = False
+            run.warnings.append(f"{name}：本次使用 Qwen 对齐器")
         #: 逐段对齐：`unknown` → 还没遇到带文字的切片；`tifa` 边走边出；
         #: `ja` 等最后用 Qwen 时间戳（TIFA 没有日语 G2P）。
         mode = "unknown"

@@ -80,35 +80,6 @@ SheetSage2-Studio\
 **已知限制**：日语的逐字时间还在优化（实测中位误差约 100ms），韩语同理；
 中文 / 粤语 / 英文**不需要**这个对齐器。
 
-### 日语（可选）：UniDic 词典
-
-日语 G2P 需要 **UniDic 词典**（约 554 MB），随包不带、pip 镜像也不覆盖。
-
-1. 下载 **UniDic-CWJ 3.1.0**（官方，任何浏览器都能下）：
-   `https://clrd.ninjal.ac.jp/unidic_archive/cwj/3.1.0/unidic-cwj-3.1.0.zip`
-   （`python -m unidic download` 下的也是这个文件；如果以后有网盘镜像，解开后目录一样即可）
-2. 解压后把里面的 `unidic-cwj-3.1.0\` 整个目录放到程序目录下、**改名为 `unidic`**，最终是：
-
-```
-SheetSage2-Studio\
-  models\
-    unidic\
-      sys.dic
-      mecabrc
-      ...
-```
-
-3. 确认 `models\unidic\sys.dic` 和 `models\unidic\mecabrc` 都在即可。
-
-**生效方式**：识别/填词时语言选「日语」，日志里会出现
-「日语：使用本地 UniDic 词典，TIFA 直接对齐」。
-也可以把词典放别处，用环境变量 `SHEETSAGE_UNIDIC_DIR` 指过去。
-
-没放词典时，日语会退回 Qwen 对齐器（需要另装 1.8 GB 的那个）。
-
-**已知限制**：日语的逐字时间还在验证（Qwen 对齐器实测中位误差约 100ms）；
-中文 / 粤语 / 英文**不需要**这个词典。
-
 ## 一次完整的用法
 
 1. **拖入音频** —— 支持 wav / mp3 / flac 等；一次拖两个文件时第二个会当成"干声"（人声轨）；

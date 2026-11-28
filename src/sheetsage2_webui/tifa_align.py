@@ -98,8 +98,10 @@ def unidic_dir() -> Path | None:
 
 
 def ja_g2p_available() -> bool:
-    """日文 G2P 能不能用：有 UniDic 词典就行（不要求 pip 装过 unidic 包）。"""
-    return unidic_dir() is not None
+    """日文 G2P 能不能用：本地有 UniDic 词典且已安装 `fugashi`（不要求 pip 装 unidic）。"""
+    import importlib.util
+
+    return unidic_dir() is not None and importlib.util.find_spec("fugashi") is not None
 
 
 def _ensure_unidic_module(dicdir: Path) -> None:
@@ -471,6 +473,14 @@ class TifaAligner:
         for row in words:
             label, start, end = row[0], row[1], row[2]
             conf = row[3] if len(row) > 3 else None
+            # 日英混唱里的纯拉丁词保持整词 + 音节起点，不要交给 fugashi 按字母拼读成假名或剁成单字母
+            if any("a" <= ch.lower() <= "z" for ch in label) and all(
+                ord(ch) < 0x3000 for ch in label
+            ):
+                items.append((label, start, end,
+                              word_syllable_onsets(phones, label, start, end, language="en"),
+                              conf))
+                continue
             mora = self._mora_of(label)
             if not mora:
                 items.append((label, start, end, (), conf))

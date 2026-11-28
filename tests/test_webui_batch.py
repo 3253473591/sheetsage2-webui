@@ -726,9 +726,8 @@ def test_pause_does_not_interrupt_the_running_stage(tmp_path):
 
 
 # --------------------------------------------- LRC 模式下不加载识别模型（批量提速）
-def test_lrc_with_tifa_does_not_load_the_asr_model(tmp_path, monkeypatch):
-    """中/英/粤的 LRC 只要 TIFA（40M）；没有 UniDic 时日语和韩语要对齐器，照常加载。"""
-    monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(tmp_path / "no-such-unidic"))
+def test_lrc_with_tifa_does_not_load_the_asr_model(tmp_path):
+    """中/英/粤的 LRC 只要 TIFA（40M）；日语和韩语统一走 Qwen 对齐器，照常加载。"""
     from sheetsage2_webui.asr import AsrConfig, LyricLine
     from sheetsage2_webui.tifa_align import default_model_path
     from sheetsage2_webui.webui.runner import RunnerSession

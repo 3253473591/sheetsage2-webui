@@ -470,7 +470,7 @@ def test_lrc_aligner_kind_picks_tifa_for_chinese_and_english(tmp_path):
 
 
 def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path, monkeypatch):
-    """没有 UniDic 时：日/韩都要 Qwen 对齐器；有 UniDic 时日语可以走 TIFA。"""
+    """日/韩默认统一走 Qwen 对齐器，即使本地放了 UniDic 也不自动切去 TIFA。"""
     engine = AsrEngine(AsrConfig(asr_model=tmp_path))
     monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(tmp_path / "no-such"))
     assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
@@ -483,7 +483,8 @@ def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path, monkeypat
     dicdir.mkdir()
     (dicdir / "sys.dic").write_bytes(b"x")
     monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(dicdir))
-    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "tifa"
+    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
+    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", "Japanese") == "qwen"
 
 def test_read_lrc_decodes_html_entities(tmp_path):
     """韩文 LRC 常把整行存成 &#45432; 这种数字实体，不解码会变成一串数字挂到音符上。"""
@@ -497,7 +498,8 @@ def test_read_lrc_decodes_html_entities(tmp_path):
     assert "&#" not in text
 
 def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
-    """有本地 UniDic 时：日语走 TIFA（不要求 pip 装 unidic 包）。"""
+    """UniDic 探测仍保留，但默认路由下日语始终走 Qwen 对齐器（不自动劫持到 TIFA）。"""
+    import importlib.util
     from sheetsage2_webui import tifa_align
     from sheetsage2_webui.asr import AsrConfig, AsrEngine
 
@@ -512,10 +514,28 @@ def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
     monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(dicdir))
 
     assert tifa_align.unidic_dir() == dicdir
-    assert tifa_align.ja_g2p_available() is True
+    expected_ja_g2p = importlib.util.find_spec("fugashi") is not None
+    assert tifa_align.ja_g2p_available() is expected_ja_g2p
     engine = AsrEngine(AsrConfig(asr_model="x", aligner="tifa", language="Japanese"))
-    assert engine._lrc_route("こんにちは", "Japanese")[0] == "tifa"
-    assert AsrEngine._pick_align_mode("こんにちは") == "tifa"
+    assert engine._lrc_route("こんにちは", "Japanese")[0] == "qwen"
+    assert AsrEngine._pick_align_mode("こんにちは") == "ja"
+
+
+def test_tifa_ja_expand_items_preserves_latin_words():
+    """TIFA 在 ja 模式下遇到混唱英文词，不能按字母切碎或交给 fugashi 拼成假名。"""
+    from sheetsage2_webui.tifa_align import TifaAligner
+
+    aligner = TifaAligner(language="ja")
+    words = [("kiss", 1.0, 1.4, 0.6), ("baby", 1.4, 2.0, 0.7)]
+    phones = [
+        (1.0, 1.1, "en/k"), (1.1, 1.25, "en/ih"), (1.25, 1.4, "en/s"),
+        (1.4, 1.5, "en/b"), (1.5, 1.7, "en/ey"), (1.7, 1.8, "en/b"), (1.8, 2.0, "en/iy"),
+    ]
+    expanded = aligner._expand_items(words, phones)
+    assert [row[0] for row in expanded] == ["kiss", "baby"]
+    assert expanded[0][3] == ()
+    assert expanded[1][3] == (1.7,)
+    assert expanded[1][4] == 0.7
 
 def test_split_mora_handles_small_kana_and_sokuon():
     """日语的モーラ切分：小写假名并到前一拍，っ/ん/ー 各自一拍。"""
