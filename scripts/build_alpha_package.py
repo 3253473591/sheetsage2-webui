@@ -295,7 +295,7 @@ def sha256_of(path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="打 SheetSage2 内测包")
-    parser.add_argument("--name", default="SheetSage2-Studio-V2.0.0", help="包名")
+    parser.add_argument("--name", default="SheetSage2-Studio-V2.0.1", help="包名")
     parser.add_argument("--python-runtime", type=Path, default=DEFAULT_PYTHON_RUNTIME,
                         help="便携 CPython 目录（默认取 uv 装的那份）")
     parser.add_argument("--ffmpeg", type=Path, default=DEFAULT_FFMPEG,

@@ -842,3 +842,43 @@ def test_ja_repair_inserts_isolated_devoiced_mora_and_skips_low_conf_or_long_gap
     assert notes[1]["repaired"] == "insert" and notes[1]["pitch"] == 66
     for a, b in zip(notes, notes[1:]):
         assert a["tick"] + a["dur"] <= b["tick"]
+
+
+def test_cjk_repair_splits_long_merged_hanzi_and_never_inserts_or_merges():
+    """中/粤语安全规则：长合拍汉字（两侧均 ≥80ms 且高置信）按 TIFA 切分且重填幂等；
+    短音不并字，空档不补音，低置信不切分。
+    """
+    import copy
+
+    # 3 颗原始音符：0.0-0.5s (高置信合拍 你+好), 0.5-0.6s (极短 100ms 切不开), 1.5-1.75s (空档里的 缝 不补音)
+    project = _ja_project([(0, 1920, 60), (1920, 384, 62), (5760, 960, 64)])
+    chars = [
+        Char("你", 0.0, 0.25, confidence=0.8),
+        Char("好", 0.25, 0.48, confidence=0.7),        # 切后 250ms / 250ms -> 切 1 刀
+        Char("快", 0.50, 0.55, confidence=0.8),
+        Char("跑", 0.55, 0.60, confidence=0.8),        # 50ms < 80ms -> 不切也不并字
+        Char("缝", 0.90, 1.05, confidence=0.8),        # 空档 -> 绝不补音
+        Char("尾", 1.50, 1.75, confidence=0.8),
+    ]
+    res1 = fill_project(project, chars)
+    notes1 = copy.deepcopy(project["tracks"][0]["notes"])
+    assert [n["lyric"] for n in notes1] == ["你", "好", "快", "尾"]
+    assert res1["fill"]["reasons"].get("cjk_split") == 1
+    assert res1["fill"]["reasons"].get("ja_insert") is None
+    assert res1["fill"]["reasons"].get("ja_merge") is None
+    for a, b in zip(notes1, notes1[1:]):
+        assert a["tick"] + a["dur"] <= b["tick"]
+
+    # 低置信度被吞字不切分
+    low_proj = _ja_project([(0, 1920, 60)])
+    low_res = fill_project(low_proj, [
+        Char("你", 0.0, 0.25, confidence=0.8),
+        Char("好", 0.25, 0.48, confidence=0.15),
+    ])
+    assert len(low_proj["tracks"][0]["notes"]) == 1
+    assert low_res["fill"]["reasons"].get("cjk_split") is None
+
+    # 二次重填完全幂等
+    fill_project(project, chars)
+    assert project["tracks"][0]["notes"] == notes1
+

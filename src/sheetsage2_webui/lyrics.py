@@ -1622,6 +1622,113 @@ def _repair_japanese_notes(
     fill.lyrics = [str(n.get("lyric") or "") for n in notes]
 
 
+#: 中/粤语安全长合拍切分（不动空档、不并字）的护栏参数：
+#: - 仅当被吞汉字落在前一个已挂字汉字音符内、TIFA 置信度达标且切后两侧均 ≥ 80ms 时才切一刀；
+#: - 绝不在音符空档凭空补音（中/粤无日语母音无声化），也绝不把两个汉字并到同一音符。
+CJK_SPLIT_MIN_CONFIDENCE = 0.35
+CJK_SPLIT_MIN_HALF_SECONDS = 0.080
+CJK_SPLIT_MIN_CHAR_DURATION = 0.050
+
+
+def _is_cjk_hanzi(text: str) -> bool:
+    return len(text) == 1 and "\u4e00" <= text <= "\u9fff"
+
+
+def _repair_cjk_merged_notes(
+    timeline: Timeline,
+    notes: list[dict[str, Any]],
+    chars: Sequence[Any],
+    fill: LyricFill,
+) -> None:
+    """中/粤语安全规则：仅对高置信度的同音高长合拍（如快歌/说唱中被 SheetSage2 合并的连字）
+    按 TIFA 边界切分为两颗同音高音符；不动空档，不并字，每颗原始音符最多切 1 刀。
+    """
+    if not notes or not chars:
+        return
+    texts = [str(getattr(c, "text", "") or "").strip() for c in chars]
+    # 日语走上面的方案 B，纯英文不切音符
+    if any(_is_japanese(t) for t in texts):
+        return
+    if not any(_is_cjk_hanzi(t) for t in texts):
+        return
+
+    spans = note_spans_seconds(timeline, notes)
+    order = _build_order(spans)
+    dp_heads, skipped_list = _align_chars_dp(order, spans, chars)
+    if not skipped_list:
+        return
+
+    split_done: set[int] = set()
+    added_notes: list[dict[str, Any]] = []
+    repaired_absorbed: list[str] = []
+
+    for ci in sorted(set(skipped_list)):
+        char = chars[ci]
+        text = str(getattr(char, "text", "") or "").strip()
+        if not _is_cjk_hanzi(text):
+            continue
+        conf = getattr(char, "confidence", None)
+        if conf is not None and float(conf) < CJK_SPLIT_MIN_CONFIDENCE:
+            continue
+        c_start = float(getattr(char, "start", 0.0))
+        c_end = max(c_start, float(getattr(char, "end", c_start)))
+        if c_end - c_start < CJK_SPLIT_MIN_CHAR_DURATION:
+            continue
+
+        prev_note_idx = dp_heads.get(ci - 1)
+        if prev_note_idx is None or prev_note_idx in split_done:
+            continue
+        p_start, p_end = spans[prev_note_idx]
+        p_note = notes[prev_note_idx]
+        p_lyric = str(p_note.get("lyric") or "").strip()
+        if not _is_cjk_hanzi(p_lyric):
+            continue
+        if not (p_start - 1e-6 <= c_start <= p_end + 1e-6):
+            continue
+
+        left_dur_sec = c_start - p_start
+        right_dur_sec = p_end - c_start
+        if (left_dur_sec < CJK_SPLIT_MIN_HALF_SECONDS
+                or right_dur_sec < CJK_SPLIT_MIN_HALF_SECONDS):
+            continue
+
+        orig_tick = int(p_note.get("tick", 0))
+        orig_dur = int(p_note.get("dur", 0))
+        orig_end_tick = orig_tick + orig_dur
+        orig_raw_tick = int(p_note.get("raw_tick", orig_tick))
+        orig_raw_dur = int(p_note.get("raw_dur", orig_dur))
+        cut_tick = _snap_sv_tick(timeline.sec_to_tick(c_start))
+        if not (orig_tick < cut_tick < orig_end_tick):
+            continue
+
+        p_note["orig_dur"] = orig_dur
+        p_note["orig_raw_dur"] = orig_raw_dur
+        p_note["dur"] = cut_tick - orig_tick
+        if "raw_dur" in p_note:
+            p_note["raw_dur"] = max(4, cut_tick - orig_raw_tick)
+        added_notes.append({
+            "tick": cut_tick,
+            "dur": orig_end_tick - cut_tick,
+            "pitch": int(p_note.get("pitch", 60)),
+            "raw_tick": cut_tick,
+            "raw_dur": orig_end_tick - cut_tick,
+            "lyric": text,
+            "repaired": "split",
+        })
+        split_done.add(prev_note_idx)
+        fill.reasons["cjk_split"] = fill.reasons.get("cjk_split", 0) + 1
+        repaired_absorbed.append(text)
+
+    if added_notes:
+        notes.extend(added_notes)
+        notes.sort(key=lambda n: (int(n.get("tick", 0)), int(n.get("pitch", 0))))
+    if repaired_absorbed:
+        for ch in repaired_absorbed:
+            if ch in fill.absorbed_chars:
+                fill.absorbed_chars.remove(ch)
+    fill.lyrics = [str(n.get("lyric") or "") for n in notes]
+
+
 def fill_project(project: Mapping[str, Any], chars: Sequence[Any], *,
                  track_id: str = "vocal", tolerance: float = DEFAULT_TOLERANCE,
                  only_empty: bool = False) -> dict[str, Any]:
@@ -1647,5 +1754,6 @@ def fill_project(project: Mapping[str, Any], chars: Sequence[Any], *,
         note["lyric"] = lyric
     if not only_empty:
         _repair_japanese_notes(timeline, notes, chars, fill)
+        _repair_cjk_merged_notes(timeline, notes, chars, fill)
     return {"found": True, "track": track_id, "notes": len(notes),
             "fill": fill.as_dict(), "lyrics": fill.lyrics}
