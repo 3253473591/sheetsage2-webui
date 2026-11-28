@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from ...asr import read_lrc
 from .. import batch_scan
 from ..batch_scan import MAX_BATCH, scan_folder
-from ..job_errors import ImportedProject, UploadRejected
+from ..job_errors import ImportedProject, StageNotReady, UploadRejected
 from ..job_models import TERMINAL_STATES, Job, batches_of
 from ..job_options import validate_options
 from ..preflight import ALIGNER_MODEL_DIR
