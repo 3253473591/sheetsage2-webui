@@ -1334,6 +1334,294 @@ def note_spans_seconds(timeline: Timeline, notes: Sequence[Mapping[str, Any]]
     return spans
 
 
+#: 日语声学修补（方案 B）的护栏参数：
+#: - 置信度门限：过滤 TIFA 漂移/低置信噪声，只修补真实唱出来的拍子；
+#: - 切分最小时长：切开后前后两颗音符各自至少这么长（避免切出 30ms 碎片）；
+#: - 短合并并字：总长太短切不开时，把拨音/元音/无声化短拍并进前音（SynthV 日语原生支持 `ない`/`べん`）；
+#: - 补短音：仅针对孤立漏检的极短音拍（连续 ≥3 拍缺失视为整句漏扒，绝不凭空造音高）。
+JA_REPAIR_MIN_CONFIDENCE = 0.25
+JA_SPLIT_MIN_HALF_SECONDS = 0.065
+JA_INSERT_MIN_SECONDS = 0.055
+JA_INSERT_MAX_SECONDS = 0.28
+JA_INSERT_MAX_GAP_SECONDS = 0.25
+_JA_MERGEABLE_MORA = frozenset({
+    "ん", "あ", "い", "う", "え", "お",
+    "く", "き", "し", "す", "ひ", "ふ", "つ", "ち", "ぷ", "ぴ",
+})
+
+
+def _snap_sv_tick(tick: float) -> int:
+    """对齐到 4 tick（SVP 的 480 PPQ = 我们 1920 PPQ ÷ 4），确保导出零叠音。"""
+    return max(0, int(round(tick / 4.0)) * 4)
+
+
+def _undo_repaired_notes(notes: list[dict[str, Any]]) -> None:
+    """重填歌词前还原上一次日语声学修补改动，保证多次「重新识别」完全幂等。"""
+    if not any(n.get("repaired") or "orig_dur" in n for n in notes):
+        return
+    restored: list[dict[str, Any]] = []
+    for note in notes:
+        kind = note.get("repaired")
+        if kind == "insert":
+            continue
+        if kind == "split" and restored:
+            parent = restored[-1]
+            if "orig_dur" in parent:
+                parent["dur"] = int(parent.pop("orig_dur"))
+            else:
+                parent["dur"] = int(parent.get("dur", 0)) + int(note.get("dur", 0))
+            if "orig_raw_dur" in parent:
+                parent["raw_dur"] = int(parent.pop("orig_raw_dur"))
+            elif "raw_dur" in parent:
+                parent["raw_dur"] = int(parent["raw_dur"]) + int(note.get("raw_dur", note.get("dur", 0)))
+            continue
+        note.pop("repaired", None)
+        restored.append(note)
+    for note in restored:
+        note.pop("orig_dur", None)
+        note.pop("orig_raw_dur", None)
+    notes[:] = restored
+
+
+def _is_mora_split_japanese(chars: Sequence[Any]) -> bool:
+    texts = [str(getattr(c, "text", "") or "").strip() for c in chars]
+    has_kana = any(_is_japanese(t) for t in texts)
+    if not has_kana:
+        return False
+    return not any(_is_japanese(t) and _mora_count(t) > 1 for t in texts)
+
+
+def _repair_japanese_notes(
+    timeline: Timeline,
+    notes: list[dict[str, Any]],
+    chars: Sequence[Any],
+    fill: LyricFill,
+) -> None:
+    """方案 B（混合修补）：用 TIFA 10ms 声学拍边界修补 SheetSage2 在日语上的两类漏检：
+
+    1. **同音高合拍**（如 `ず+ん`、`む+ひ`、`な+い`、`べ+ん`）：
+       - 音符够长（切后两侧均 ≥ 65ms）→ 按 TIFA 第二拍起点一刀切成两颗同音高音符；
+       - 音符太短切不开 → 并字到该音符（`ない` / `べん` / `ずん`），不丢拍也不碎谱。
+    2. **孤立漏检的极短无声化拍**（如 `く` / `し` / `ひ` / `つ` 落在音符紧邻空档）：
+       - 仅修补置信度达标（≥ 0.25）、非整句缺失（连续跳过 < 3 拍）、距邻音 ≤ 0.25s 的短拍；
+       - 在空档处补一颗继承相邻音高的短音符（严格截断不叠音）。
+    """
+    if not notes or not chars or not _is_mora_split_japanese(chars):
+        return
+
+    spans = note_spans_seconds(timeline, notes)
+    order = _build_order(spans)
+    dp_heads, skipped_list = _align_chars_dp(order, spans, chars)
+    if not skipped_list:
+        return
+    skipped_set = set(skipped_list)
+
+    # 按时间序建邻接音符查询，确保切分/补音绝不越界叠音
+    pos_in_order = {note_idx: pos for pos, note_idx in enumerate(order)}
+
+    def _next_track_start(note_idx: int) -> float | None:
+        pos = pos_in_order.get(note_idx)
+        if pos is None or pos + 1 >= len(order):
+            return None
+        return spans[order[pos + 1]][0]
+
+    def _prev_track_end(note_idx: int) -> float | None:
+        pos = pos_in_order.get(note_idx)
+        if pos is None or pos <= 0:
+            return None
+        return spans[order[pos - 1]][1]
+
+    # 识别「连续 ≥3 拍缺失」的大段空白（如整句漏扒/轻声念白），绝不凭空造音符
+    long_missing: set[int] = set()
+    run_buf: list[int] = []
+    for idx in sorted(skipped_set):
+        if run_buf and idx == run_buf[-1] + 1:
+            run_buf.append(idx)
+        else:
+            if len(run_buf) >= 3:
+                long_missing.update(run_buf)
+            run_buf = [idx]
+    if len(run_buf) >= 3:
+        long_missing.update(run_buf)
+
+    # 每个原始音符最多切 1 刀，避免碎片化；记录新增音符统一合并回列表
+    split_done: set[int] = set()
+    merged_notes: set[int] = set()
+    added_notes: list[dict[str, Any]] = []
+    repaired_absorbed: list[str] = []
+    repaired_dropped: list[str] = []
+
+    for ci in sorted(skipped_set):
+        if ci in long_missing:
+            continue
+        char = chars[ci]
+        text = str(getattr(char, "text", "") or "").strip()
+        if not (_is_japanese(text) and _mora_count(text) == 1):
+            continue
+        conf = getattr(char, "confidence", None)
+        if conf is not None and float(conf) < JA_REPAIR_MIN_CONFIDENCE:
+            continue
+        c_start = float(getattr(char, "start", 0.0))
+        c_end = max(c_start, float(getattr(char, "end", c_start)))
+        c_dur = c_end - c_start
+
+        prev_note_idx = dp_heads.get(ci - 1)
+        next_note_idx = dp_heads.get(ci + 1)
+
+        # ---- 情况 1：落在前一个已挂字音符内（或紧贴其尾端 ≤ 60ms） → 切分或并字 ----
+        if prev_note_idx is not None and prev_note_idx not in split_done:
+            p_start, p_end = spans[prev_note_idx]
+            p_note = notes[prev_note_idx]
+            p_lyric = str(p_note.get("lyric") or "").strip()
+            inside_prev = p_start - 1e-6 <= c_start <= p_end + 1e-6
+            tail_touch = (p_end < c_start <= p_end + 0.06) and c_dur <= JA_INSERT_MAX_SECONDS
+            if inside_prev and _is_japanese(p_lyric) and _mora_count(p_lyric) == 1:
+                next_t = _next_track_start(prev_note_idx)
+                right_end_sec = p_end
+                if c_end > p_end:
+                    right_end_sec = min(c_end, next_t) if next_t is not None else c_end
+                    right_end_sec = max(right_end_sec, p_end)
+                left_dur_sec = c_start - p_start
+                right_dur_sec = right_end_sec - c_start
+                if (left_dur_sec >= JA_SPLIT_MIN_HALF_SECONDS
+                        and right_dur_sec >= JA_SPLIT_MIN_HALF_SECONDS):
+                    orig_tick = int(p_note.get("tick", 0))
+                    orig_dur = int(p_note.get("dur", 0))
+                    orig_raw_tick = int(p_note.get("raw_tick", orig_tick))
+                    orig_raw_dur = int(p_note.get("raw_dur", orig_dur))
+                    cut_tick = _snap_sv_tick(timeline.sec_to_tick(c_start))
+                    end_tick = _snap_sv_tick(timeline.sec_to_tick(right_end_sec))
+                    # 严格落在父音符起点之后、不越过下一音符起点
+                    next_tick_limit = (
+                        int(notes[order[pos_in_order[prev_note_idx] + 1]].get("tick", end_tick))
+                        if pos_in_order[prev_note_idx] + 1 < len(order) else None
+                    )
+                    if next_tick_limit is not None:
+                        end_tick = min(end_tick, next_tick_limit)
+                    if cut_tick > orig_tick and end_tick > cut_tick:
+                        p_note["orig_dur"] = orig_dur
+                        p_note["orig_raw_dur"] = orig_raw_dur
+                        p_note["dur"] = cut_tick - orig_tick
+                        if "raw_dur" in p_note:
+                            p_note["raw_dur"] = max(4, cut_tick - orig_raw_tick)
+                        new_note: dict[str, Any] = {
+                            "tick": cut_tick,
+                            "dur": end_tick - cut_tick,
+                            "pitch": int(p_note.get("pitch", 60)),
+                            "raw_tick": cut_tick,
+                            "raw_dur": end_tick - cut_tick,
+                            "lyric": text,
+                            "repaired": "split",
+                        }
+                        added_notes.append(new_note)
+                        split_done.add(prev_note_idx)
+                        fill.reasons["ja_split"] = fill.reasons.get("ja_split", 0) + 1
+                        repaired_absorbed.append(text)
+                        continue
+                # 切开太碎 → 走同音并字（仅允许 1+1=2 拍，如 ない / べん / ずん / おく）
+                if prev_note_idx not in merged_notes and (
+                    text in _JA_MERGEABLE_MORA or c_dur <= 0.16
+                ):
+                    p_note["lyric"] = p_lyric + text
+                    merged_notes.add(prev_note_idx)
+                    fill.reasons["ja_merge"] = fill.reasons.get("ja_merge", 0) + 1
+                    repaired_absorbed.append(text)
+                    continue
+            elif tail_touch and prev_note_idx not in merged_notes and _is_japanese(p_lyric) and _mora_count(p_lyric) == 1:
+                # 紧贴前音尾端但落进空档：尝试优先补短音（走下面情况 2），不够空档再并字
+                pass
+
+        # ---- 情况 2：落在相邻音符之间的空档里（孤立短拍 / 无声化音） → 补一颗同音高短音符 ----
+        if not (JA_INSERT_MIN_SECONDS <= c_dur <= JA_INSERT_MAX_SECONDS):
+            continue
+        anchor_idx: int | None = None
+        min_gap = float("inf")
+        if prev_note_idx is not None:
+            gap_prev = abs(c_start - spans[prev_note_idx][1])
+            if gap_prev < min_gap:
+                min_gap, anchor_idx = gap_prev, prev_note_idx
+        if next_note_idx is not None:
+            gap_next = abs(spans[next_note_idx][0] - c_end)
+            if gap_next < min_gap:
+                min_gap, anchor_idx = gap_next, next_note_idx
+        if anchor_idx is None or min_gap > JA_INSERT_MAX_GAP_SECONDS:
+            continue
+
+        # 计算该空档严格不叠音的合法区间 [left_bound, right_bound]
+        left_bound = 0.0
+        right_bound: float | None = None
+        for note_i in order:
+            ns, ne = spans[note_i]
+            if ne <= c_start + 0.02:
+                left_bound = max(left_bound, ne)
+            elif ns >= c_start - 0.02:
+                right_bound = ns if right_bound is None else min(right_bound, ns)
+                break
+        slot_start = max(c_start, left_bound)
+        slot_end = min(c_end, right_bound) if right_bound is not None else c_end
+        if slot_end - slot_start < JA_INSERT_MIN_SECONDS:
+            # 空档略窄但前面有余量时轻微前移（≤ 40ms），仍严格不叠音
+            if right_bound is not None and right_bound - left_bound >= JA_INSERT_MIN_SECONDS:
+                slot_end = min(c_end, right_bound)
+                slot_start = max(left_bound, slot_end - max(c_dur, JA_INSERT_MIN_SECONDS))
+        if slot_end - slot_start >= JA_INSERT_MIN_SECONDS:
+            s_tick = _snap_sv_tick(timeline.sec_to_tick(slot_start))
+            e_tick = _snap_sv_tick(timeline.sec_to_tick(slot_end))
+            # 再做一次 tick 域严格不重叠校验
+            for note_i in order:
+                nt = int(notes[note_i].get("tick", 0))
+                ne_t = nt + int(notes[note_i].get("dur", 0))
+                if ne_t <= s_tick:
+                    continue
+                if nt >= e_tick:
+                    break
+                # 与某现有音符有 tick 交叉 → 截断
+                if nt <= s_tick < ne_t:
+                    s_tick = ne_t
+                if s_tick < nt < e_tick:
+                    e_tick = nt
+            if e_tick - s_tick >= 4:
+                pitch = int(notes[anchor_idx].get("pitch", 60))
+                added_notes.append({
+                    "tick": s_tick,
+                    "dur": e_tick - s_tick,
+                    "pitch": pitch,
+                    "raw_tick": s_tick,
+                    "raw_dur": e_tick - s_tick,
+                    "lyric": text,
+                    "repaired": "insert",
+                })
+                fill.reasons["ja_insert"] = fill.reasons.get("ja_insert", 0) + 1
+                repaired_dropped.append(text)
+                continue
+        # 空档确实放不下且紧邻前音：退回并字（如 1+1=2 拍）
+        if (prev_note_idx is not None and prev_note_idx not in merged_notes
+                and prev_note_idx not in split_done and text in _JA_MERGEABLE_MORA):
+            p_note = notes[prev_note_idx]
+            p_lyric = str(p_note.get("lyric") or "").strip()
+            if _is_japanese(p_lyric) and _mora_count(p_lyric) == 1:
+                p_note["lyric"] = p_lyric + text
+                merged_notes.add(prev_note_idx)
+                fill.reasons["ja_merge"] = fill.reasons.get("ja_merge", 0) + 1
+                repaired_dropped.append(text)
+
+    if added_notes:
+        notes.extend(added_notes)
+        notes.sort(key=lambda n: (int(n.get("tick", 0)), int(n.get("pitch", 0))))
+    # 同步刷新 fill 统计与 lyrics 列表
+    if repaired_absorbed:
+        for ch in repaired_absorbed:
+            if ch in fill.absorbed_chars:
+                fill.absorbed_chars.remove(ch)
+    if repaired_dropped:
+        for ch in repaired_dropped:
+            if ch in fill.dropped_chars:
+                fill.dropped_chars.remove(ch)
+                fill.dropped = max(0, fill.dropped - 1)
+                fill.assigned += 1
+    fill.lyrics = [str(n.get("lyric") or "") for n in notes]
+
+
 def fill_project(project: Mapping[str, Any], chars: Sequence[Any], *,
                  track_id: str = "vocal", tolerance: float = DEFAULT_TOLERANCE,
                  only_empty: bool = False) -> dict[str, Any]:
@@ -1349,11 +1637,15 @@ def fill_project(project: Mapping[str, Any], chars: Sequence[Any], *,
         return {"found": False, "reason": f"没有轨道 {track_id}"}
 
     notes = track.get("notes", [])
+    if not only_empty:
+        _undo_repaired_notes(notes)
     spans = note_spans_seconds(timeline, notes)
     existing = [str(note.get("lyric") or "") for note in notes]
     fill = assign_lyrics(spans, chars, tolerance=tolerance, existing=existing,
                          only_empty=only_empty)
     for note, lyric in zip(notes, fill.lyrics):
         note["lyric"] = lyric
+    if not only_empty:
+        _repair_japanese_notes(timeline, notes, chars, fill)
     return {"found": True, "track": track_id, "notes": len(notes),
             "fill": fill.as_dict(), "lyrics": fill.lyrics}

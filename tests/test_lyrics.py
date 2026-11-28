@@ -762,3 +762,83 @@ def test_split_mode_is_not_the_default_path():
     assert len(onset.lyrics) == len(spans)                      # onset 不新增音符
     assert onset.lyrics == ["一"]                               # "二" 被挤占
     assert len(onset.absorbed_chars) == 1
+
+
+# ---------------------------------------------------- 日语方案 B：声学切分 / 并字 / 补短音
+def _ja_project(note_specs: Sequence[tuple[int, int, int]]) -> dict:
+    """构造 120 BPM（1 拍 = 0.5s = 1920 tick）的最小工程，方便测日语声学修补。"""
+    notes = [{"tick": t, "dur": d, "pitch": p, "raw_tick": t, "raw_dur": d}
+             for t, d, p in note_specs]
+    return {
+        "timeline": {"measures": [
+            {"index": 0, "start": 0.0, "end": 2.0, "tick_start": 0, "tick_end": 7680,
+             "numerator": 4, "denominator": 4, "is_pickup": False},
+            {"index": 1, "start": 2.0, "end": 4.0, "tick_start": 7680, "tick_end": 15360,
+             "numerator": 4, "denominator": 4, "is_pickup": False},
+        ]},
+        "tracks": [{"id": "vocal", "notes": notes}],
+    }
+
+
+def test_ja_repair_splits_long_merged_note_and_is_idempotent():
+    """长同音合拍（如 ず+ん 在 0.0-0.5s 合并成一颗音符）按 TIFA 边界切为两颗同音高音符，且重填幂等。"""
+    import copy
+
+    # 3 颗原始音符：し (0.0-0.25s), ず+ん (0.25-0.75s = 500ms), だ (0.75-1.0s)
+    project = _ja_project([(0, 960, 61), (960, 1920, 62), (2880, 960, 61)])
+    chars = [
+        Char("し", 0.0, 0.25, confidence=0.7),
+        Char("ず", 0.25, 0.50, confidence=0.7),
+        Char("ん", 0.50, 0.72, confidence=0.6),
+        Char("だ", 0.75, 1.00, confidence=0.7),
+    ]
+    res1 = fill_project(project, chars)
+    notes1 = copy.deepcopy(project["tracks"][0]["notes"])
+    assert [n["lyric"] for n in notes1] == ["し", "ず", "ん", "だ"]
+    assert res1["fill"]["reasons"].get("ja_split") == 1
+    assert notes1[1]["pitch"] == notes1[2]["pitch"] == 62
+    for a, b in zip(notes1, notes1[1:]):
+        assert a["tick"] + a["dur"] <= b["tick"]
+
+    # 再次调用 fill_project 必须完全幂等（先还原再修补，不累加碎片）
+    fill_project(project, chars)
+    assert project["tracks"][0]["notes"] == notes1
+
+
+def test_ja_repair_merges_short_compound_when_too_short_to_split():
+    """音符太短（如 100ms 的 ない）切开会碎成 50ms，改为单音并字 `ない`（SynthV 日语原生支持）。"""
+    # 0.0-0.10s (384 tick) 极短音符 + 0.10-0.35s 下一音符
+    project = _ja_project([(0, 384, 64), (384, 960, 62)])
+    chars = [
+        Char("な", 0.0, 0.05, confidence=0.7),
+        Char("い", 0.05, 0.10, confidence=0.6),
+        Char("の", 0.10, 0.35, confidence=0.7),
+    ]
+    res = fill_project(project, chars)
+    notes = project["tracks"][0]["notes"]
+    assert len(notes) == 2
+    assert [n["lyric"] for n in notes] == ["ない", "の"]
+    assert res["fill"]["reasons"].get("ja_merge") == 1
+
+
+def test_ja_repair_inserts_isolated_devoiced_mora_and_skips_low_conf_or_long_gaps():
+    """紧邻空档的孤立高置信无声化短拍（く）补短音；低置信噪声与整句长缺失（≥3拍）不乱补。"""
+    # 0.0-0.25s (お), 空档 0.25-0.60s (く 在 0.30-0.46s), 0.60-0.85s (こ)
+    # 后面 2.0-2.25s (て)，中间放 3 个连续漏拍不该补音
+    project = _ja_project([(0, 960, 66), (2304, 960, 64), (7680, 960, 62)])
+    chars = [
+        Char("お", 0.0, 0.25, confidence=0.7),
+        Char("く", 0.30, 0.46, confidence=0.45),       # 孤立高置信短拍 -> 应补短音
+        Char("こ", 0.60, 0.85, confidence=0.7),
+        Char("み", 1.10, 1.25, confidence=0.5),        # 连续 3 拍整句缺失 -> 不补
+        Char("つ", 1.25, 1.40, confidence=0.5),
+        Char("け", 1.40, 1.55, confidence=0.5),
+        Char("て", 2.00, 2.25, confidence=0.7),
+    ]
+    res = fill_project(project, chars)
+    notes = project["tracks"][0]["notes"]
+    assert [n["lyric"] for n in notes] == ["お", "く", "こ", "て"]
+    assert res["fill"]["reasons"].get("ja_insert") == 1
+    assert notes[1]["repaired"] == "insert" and notes[1]["pitch"] == 66
+    for a, b in zip(notes, notes[1:]):
+        assert a["tick"] + a["dur"] <= b["tick"]
