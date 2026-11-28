@@ -356,17 +356,39 @@ def test_continuation_marker_picks_by_script():
     assert continuation_marker("你") == MELISMA
     assert continuation_marker("hello") == CONTINUATION
     assert continuation_marker("abc") == CONTINUATION
-    # 日文是多音节词语言（ありがとう 按拍唱），延续写 `+`；中粤韩一字一音写 `-`
-    assert continuation_marker("あ") == CONTINUATION
+    # 单拍假名（あ / きょ / ラ）只有一拍，拖音必须写 `-`（避免非法 `ラ + +`）；
+    # 未拆的多拍假名词（ありがとう）才写 `+`；中粤韩一字一音写 `-`
+    assert continuation_marker("あ") == MELISMA
+    assert continuation_marker("きょ") == MELISMA
+    assert continuation_marker("ラ") == MELISMA
     assert continuation_marker("ありがとう") == CONTINUATION
     assert continuation_marker("한") == MELISMA
 
 
+def test_single_mora_japanese_melisma_uses_dash_not_plus():
+    """单拍假名跨多个音符时必须写 `-` 而不是 `+`（SynthV 日语不接受 `ラ + +`）。"""
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.2))
+    fill = assign_lyrics(notes, [Char("か", 0.0, 0.9), Char("ラ", 0.9, 1.2)])
+    assert fill.lyrics == ["か", MELISMA, MELISMA, "ラ"]
+
+
 def test_japanese_word_spans_notes_with_plus():
-    """日语词跨多个音：每个音都是下一拍 → `ありがとう + +`（用户人工修谱的写法）。"""
+    """未拆的多拍日语词跨多个音：前 mora-1 个音写 `+`，超出拍数写 `-`。"""
     notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9))
     fill = assign_lyrics(notes, [Char("ありがとう", 0.0, 0.9)])
     assert fill.lyrics == ["ありがとう", CONTINUATION, CONTINUATION]
+
+
+def test_mora_japanese_mixed_with_english_uses_dash_for_kana_and_plus_for_en():
+    """逐拍平假名 + 英文混唱：假名走一拍一音与 `-`，英文词按音节起点标 `+`。"""
+    notes = spans((0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.2), (1.2, 1.5))
+    chars = [
+        Char("な", 0.0, 0.3),
+        Char("み", 0.3, 0.9),
+        Char("baby", 0.9, 1.5, parts=(1.2,)),
+    ]
+    fill = assign_lyrics(notes, chars)
+    assert fill.lyrics == ["な", "み", MELISMA, "baby", CONTINUATION]
 
 
 def test_japanese_lyrics_with_kanji_go_through_the_word_path():

@@ -298,14 +298,18 @@ def extract_alignment_from_result(
     *,
     timestep: float,
     skip_handling: str = "preserve",
+    language: str | None = None,
 ) -> tuple[list[tuple[str, float, float, float | None]],
            list[tuple[float, float, str]]]:
-    """直接从 TIFA 内存推理输出提取 `(词列表[(label, start, end, confidence)], phones)`。
+    """直接从 TIFA 内存推理输出提取 `(词/拍列表[(label, start, end, confidence)], phones)`。
 
     相比写临时 TextGrid 再正则回读：
-    1. 保留 `result["similarity"]` 计算出的逐词声学置信度（跳过音素置信度为 0.0）；
+    1. 保留 `result["similarity"]` 计算出的逐词/逐拍声学置信度（跳过音素置信度为 0.0）；
     2. `skip_handling="preserve"` 不再静默丢弃零宽词，避免漏字及 `_labels_for` 长度错配；
-    3. 零磁盘 TextGrid I/O。
+    3. 日语模式（`language in ("ja", "jpn")`）下直接利用 TIFA 声学解码出的 `groups` +
+       `group_scripts` 提取**真实声学逐拍（モーラ）边界**并转为平假名，同时自动跳过
+       无音高促音 `cl`、保留 `en/` 混唱英文整词，不再做二次 `fugashi` 整词机械均分；
+    4. 零磁盘 TextGrid I/O。
     """
     raw_spans = _to_list(result["spans"])
     n = len(raw_spans)
@@ -315,6 +319,8 @@ def extract_alignment_from_result(
     groups = [int(v) for v in _to_list(result["groups"])]
     phonemes = [str(p) for p in result["phonemes"]]
     texts = [str(t) for t in result["texts"]]
+    group_scripts = [str(s) for s in (result.get("group_scripts") or ())]
+    ja_mode = str(language or "") in ("ja", "jpn") and bool(group_scripts)
 
     # 逐音素声学置信度：按预测帧区间对 similarity[:, idx] 取均值（与 TIFA compute_confidence 同口径）
     similarity = result.get("similarity")
@@ -368,22 +374,103 @@ def extract_alignment_from_result(
         j = i + 1
         while j < n and words_ids[j] == owner:
             j += 1
-        label = texts[owner - 1].strip()
-        onset = phone_intervals[i][0]
-        offset = phone_intervals[j - 1][1]
-        if word_rows and onset < word_rows[-1][2]:
-            onset = word_rows[-1][2]
-        if offset <= onset:
-            offset = onset + eps
-        confs = [phone_confs[k] for k in range(i, j) if phone_confs[k] is not None]
-        word_conf = (round(sum(confs) / len(confs), 4) if confs else None)
-        if label and label != "SP" and offset - onset > 1e-6:
-            word_rows.append((label, onset, offset, word_conf))
+        word_is_ja = ja_mode and any(
+            phonemes[k].startswith(("ja/", "jpn/")) for k in range(i, j)
+        )
+        if word_is_ja:
+            # 按 TIFA 声学 group（= 真实モーラ边界）拆拍，不再整词均分
+            gi = i
+            while gi < j:
+                gid = groups[gi]
+                gj = gi + 1
+                while gj < j and groups[gj] == gid:
+                    gj += 1
+                script = (group_scripts[gid - 1].strip().lower()
+                          if 1 <= gid <= len(group_scripts) else "")
+                # 促音 cl 是无音高的闭塞停顿（~50ms），在 SynthV 日语里不单独占音符
+                is_sokuon = (script == "cl" or all(
+                    _phone_name(phonemes[k]).lower() == "cl" for k in range(gi, gj)
+                ))
+                if not is_sokuon and script and script != "sp":
+                    label = _romaji_to_hira(script)
+                    onset = phone_intervals[gi][0]
+                    offset = phone_intervals[gj - 1][1]
+                    if word_rows and onset < word_rows[-1][2]:
+                        onset = word_rows[-1][2]
+                    if offset <= onset:
+                        offset = onset + eps
+                    confs = [phone_confs[k] for k in range(gi, gj)
+                             if phone_confs[k] is not None]
+                    mora_conf = (round(sum(confs) / len(confs), 4) if confs else None)
+                    if label and offset - onset > 1e-6:
+                        word_rows.append((label, onset, offset, mora_conf))
+                gi = gj
+        else:
+            label = texts[owner - 1].strip()
+            onset = phone_intervals[i][0]
+            offset = phone_intervals[j - 1][1]
+            if word_rows and onset < word_rows[-1][2]:
+                onset = word_rows[-1][2]
+            if offset <= onset:
+                offset = onset + eps
+            confs = [phone_confs[k] for k in range(i, j) if phone_confs[k] is not None]
+            word_conf = (round(sum(confs) / len(confs), 4) if confs else None)
+            if label and label != "SP" and offset - onset > 1e-6:
+                word_rows.append((label, onset, offset, word_conf))
         i = j
 
     phones_clean = [(a, b, p) for a, b, p in phone_intervals
                     if p.strip() and p.strip() != "SP" and b - a > 1e-6]
     return word_rows, phones_clean
+
+
+#: TIFA 日语词典（`japanese_dict_full.txt`）全量罗马音 -> SynthV 平假名モーラ映射。
+#: 促音 `cl` 在提取阶段跳过，不占独立音符；`n`（拨音）保留为 `ん`。
+_ROMAJI_TO_HIRA: dict[str, str] = {
+    "a": "あ", "i": "い", "u": "う", "e": "え", "o": "お", "n": "ん",
+    "ka": "か", "ki": "き", "ku": "く", "ke": "け", "ko": "こ",
+    "kwa": "くぁ", "kwi": "くぃ", "kwu": "くぅ", "kwe": "くぇ", "kwo": "くぉ",
+    "sa": "さ", "si": "し", "su": "す", "se": "せ", "so": "そ",
+    "sha": "しゃ", "shi": "し", "shu": "しゅ", "she": "しぇ", "sho": "しょ",
+    "cha": "ちゃ", "chi": "ち", "chu": "ちゅ", "che": "ちぇ", "cho": "ちょ",
+    "tsa": "つぁ", "tsi": "つぃ", "tsu": "つ", "tse": "つぇ", "tso": "つぉ",
+    "ta": "た", "ti": "てぃ", "tu": "とぅ", "te": "て", "to": "と",
+    "na": "な", "ni": "に", "nu": "ぬ", "ne": "ね", "no": "の",
+    "ha": "は", "hi": "ひ", "hu": "ふ", "he": "へ", "ho": "ほ",
+    "fa": "ふぁ", "fi": "ふぃ", "fu": "ふ", "fe": "ふぇ", "fo": "ふぉ",
+    "ma": "ま", "mi": "み", "mu": "む", "me": "め", "mo": "も",
+    "ya": "や", "yi": "い", "yu": "ゆ", "ye": "いぇ", "yo": "よ",
+    "ra": "ら", "ri": "り", "ru": "る", "re": "れ", "ro": "ろ",
+    "la": "ら", "li": "り", "lu": "る", "le": "れ", "lo": "ろ",
+    "wa": "わ", "wi": "うぃ", "wu": "う", "we": "うぇ", "wo": "を",
+    "ga": "が", "gi": "ぎ", "gu": "ぐ", "ge": "げ", "go": "ご",
+    "gwa": "ぐぁ", "gwi": "ぐぃ", "gwu": "ぐぅ", "gwe": "ぐぇ", "gwo": "ぐぉ",
+    "ja": "じゃ", "ji": "じ", "ju": "じゅ", "je": "じぇ", "jo": "じょ",
+    "jya": "じゃ", "jyi": "じ", "jyu": "じゅ", "jye": "じぇ", "jyo": "じょ",
+    "za": "ざ", "zi": "じ", "zu": "ず", "ze": "ぜ", "zo": "ぞ",
+    "da": "だ", "di": "でぃ", "du": "どぅ", "de": "で", "do": "ど",
+    "ba": "ば", "bi": "び", "bu": "ぶ", "be": "べ", "bo": "ぼ",
+    "va": "ゔぁ", "vi": "ゔぃ", "vu": "ゔ", "ve": "ゔぇ", "vo": "ゔぉ",
+    "pa": "ぱ", "pi": "ぴ", "pu": "ぷ", "pe": "ぺ", "po": "ぽ",
+    "kya": "きゃ", "kyi": "きぃ", "kyu": "きゅ", "kye": "きぇ", "kyo": "きょ",
+    "tya": "てゃ", "tyi": "てぃ", "tyu": "てゅ", "tye": "てぇ", "tyo": "てょ",
+    "dya": "でゃ", "dyi": "でぃ", "dyu": "でゅ", "dye": "でぇ", "dyo": "でょ",
+    "nya": "にゃ", "nyi": "にぃ", "nyu": "にゅ", "nye": "にぇ", "nyo": "にょ",
+    "hya": "ひゃ", "hyi": "ひぃ", "hyu": "ひゅ", "hye": "ひぇ", "hyo": "ひょ",
+    "mya": "みゃ", "myi": "みぃ", "myu": "みゅ", "mye": "みぇ", "myo": "みょ",
+    "rya": "りゃ", "ryi": "りぃ", "ryu": "りゅ", "rye": "りぇ", "ryo": "りょ",
+    "gya": "ぎゃ", "gyi": "ぎぃ", "gyu": "ぎゅ", "gye": "ぎぇ", "gyo": "ぎょ",
+    "bya": "びゃ", "byi": "びぃ", "byu": "びゅ", "bye": "びぇ", "byo": "びょ",
+    "pya": "ぴゃ", "pyi": "ぴぃ", "pyu": "ぴゅ", "pye": "ぴぇ", "pyo": "ぴょ",
+}
+
+
+def _romaji_to_hira(script: str) -> str:
+    """TIFA 日语 group_script（罗马音）-> SynthV 平假名モーラ。"""
+    key = script.strip().lower()
+    if key in _ROMAJI_TO_HIRA:
+        return _ROMAJI_TO_HIRA[key]
+    return _kata_to_hira(script.strip())
 
 
 #: 小写假名：跟在前一个假名后面，算同一モーラ。
@@ -481,6 +568,11 @@ class TifaAligner:
                               word_syllable_onsets(phones, label, start, end, language="en"),
                               conf))
                 continue
+            # 已由 extract_alignment_from_result 从 group_scripts 拆好的单拍平假名直接透传，
+            # 保留真实声学边界，不再二次调 fugashi 整词均分
+            if all(0x3040 <= ord(ch) <= 0x309F for ch in label) and len(split_mora(label)) == 1:
+                items.append((label, start, end, (), conf))
+                continue
             mora = self._mora_of(label)
             if not mora:
                 items.append((label, start, end, (), conf))
@@ -530,7 +622,7 @@ class TifaAligner:
             return
         for converter in getattr(self._g2p, "converters", ()):
             if getattr(converter, "id", "") == "japanese-mecab":
-                converter.kwargs.setdefault("unidic_dir", str(dicdir))
+                converter.kwargs["unidic_dir"] = str(dicdir.resolve())
         _ensure_unidic_module(dicdir)
 
     def release(self) -> None:
@@ -579,6 +671,8 @@ class TifaAligner:
                                    list[tuple[float, float, str]]]] = {}
         timestep = self._backend.timestep
 
+        lang_code = self.language
+
         class _CollectAlignmentCallback(_pl_callbacks.Callback):
             def on_predict_batch_end(self, trainer, pl_module, outputs, batch,
                                      *args, **kwargs) -> None:
@@ -586,7 +680,8 @@ class TifaAligner:
                     ident = str(item.get("identifier") or "")
                     if ident:
                         collected[ident] = extract_alignment_from_result(
-                            item, timestep=timestep, skip_handling="preserve")
+                            item, timestep=timestep, skip_handling="preserve",
+                            language=lang_code)
 
         dataset = AudioTextDataset(
             filemap=filemap, g2p_config=self._g2p, g2p_root=self.model.parent,

@@ -166,8 +166,12 @@ def _mora_count(text: str) -> int:
 
 
 def continuation_marker(text: str) -> str:
-    """后续音节用哪个标记：英文/日文是多音节词，写 `+`；中粤韩一字一音，写 `-`。"""
-    return CONTINUATION if _is_latin(text) or _is_japanese(text) else MELISMA
+    """后续音节用哪个标记：英文多音节词与未拆的多拍假名词写 `+`；中粤韩及单拍假名（か/きょ/ラ）写 `-`。"""
+    if _is_latin(text):
+        return CONTINUATION
+    if _is_japanese(text) and _mora_count(text) > 1:
+        return CONTINUATION
+    return MELISMA
 
 
 def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
@@ -867,14 +871,20 @@ def assign_lyrics(
         # DP/贪心两条路径都会）。清空再填，旧词一个不留。
         lyrics[:] = [""] * len(spans)
         texts = [str(getattr(char, "text", "") or "").strip() for char in chars]
-        has_kana = any(_is_japanese(text) for text in texts)
-        if any(texts) and all(
-                _is_latin(text) or _is_japanese(text) or has_kana
-                for text in texts if text):
+        # 纯英文 或 未拆的多拍日语词（如 ありがとう）走词级 DP；
+        # 已拆成单拍假名（か/きょ/ん）的日语（含日英混唱）与中/粤/韩同口径，走一拍一音的单调 DP
+        # （内嵌英文段若带 TIFA 音节起点 `parts` 会由 `_realign_latin_runs` 自动切分）。
+        has_multi_mora_kana = any(
+            _is_japanese(text) and _mora_count(text) > 1 for text in texts
+        )
+        if any(texts) and (
+            all(_is_latin(text) for text in texts if text)
+            or has_multi_mora_kana
+        ):
             dp_heads, skipped_words = _align_latin_words(order, spans, chars)
             dp_skipped = set(skipped_words)
         elif any(texts):
-            # 中文/粤语（一字一音节）：逐字贪心会被 ±0.2~0.4s 的字时间抖动带成整段
+            # 中文/粤语/单拍日语（一字/一拍一音节）：逐字贪心会被 ±0.2~0.4s 的字时间抖动带成整段
             # 错位，改用整体单调 DP（见 `_align_chars_dp`）。
             dp_heads, skipped_chars = _align_chars_dp(order, spans, chars)
             dp_skipped = set(skipped_chars)
@@ -1096,8 +1106,9 @@ def assign_lyrics(
             if parts:
                 new_syllable = idx_cand in plus_positions
             elif _is_japanese(text):
-                # 日语没有音节起点，按拍唱：每个音都是下一拍
-                new_syllable = True
+                # 单拍假名（か / きょ / ラ）：只有 1 拍，拖音一定是 `-`，避免非法 `ラ + +`；
+                # 未拆的多拍假名词（ありがとう = 5 拍）：前 mora-1 个音是下一拍 `+`，超出后是延音 `-`
+                new_syllable = ordinal < _mora_count(text)
             elif ordinal in boundaries:
                 new_syllable = True
             lyrics[note] = CONTINUATION if new_syllable else MELISMA

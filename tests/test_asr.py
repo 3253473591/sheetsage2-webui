@@ -470,7 +470,9 @@ def test_lrc_aligner_kind_picks_tifa_for_chinese_and_english(tmp_path):
 
 
 def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path, monkeypatch):
-    """日/韩默认统一走 Qwen 对齐器，即使本地放了 UniDic 也不自动切去 TIFA。"""
+    """没有 UniDic 时：日/韩走 Qwen 对齐器；本地具备 UniDic + fugashi 时日语走 TIFA 声学逐拍对齐。"""
+    import importlib.util
+
     engine = AsrEngine(AsrConfig(asr_model=tmp_path))
     monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(tmp_path / "no-such"))
     assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
@@ -483,8 +485,9 @@ def test_lrc_aligner_kind_picks_qwen_for_japanese_and_korean(tmp_path, monkeypat
     dicdir.mkdir()
     (dicdir / "sys.dic").write_bytes(b"x")
     monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(dicdir))
-    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == "qwen"
-    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", "Japanese") == "qwen"
+    expected = "tifa" if importlib.util.find_spec("fugashi") is not None else "qwen"
+    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", None) == expected
+    assert engine.lrc_aligner_kind("君が僕の心臓じゃないせいで", "Japanese") == expected
 
 def test_read_lrc_decodes_html_entities(tmp_path):
     """韩文 LRC 常把整行存成 &#45432; 这种数字实体，不解码会变成一串数字挂到音符上。"""
@@ -498,7 +501,7 @@ def test_read_lrc_decodes_html_entities(tmp_path):
     assert "&#" not in text
 
 def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
-    """UniDic 探测仍保留，但默认路由下日语始终走 Qwen 对齐器（不自动劫持到 TIFA）。"""
+    """有本地 UniDic 且装了 fugashi 时：日语走 TIFA 声学逐拍对齐；否则走 Qwen。"""
     import importlib.util
     from sheetsage2_webui import tifa_align
     from sheetsage2_webui.asr import AsrConfig, AsrEngine
@@ -514,11 +517,39 @@ def test_unidic_dir_detection_and_ja_routing(tmp_path, monkeypatch):
     monkeypatch.setenv("SHEETSAGE_UNIDIC_DIR", str(dicdir))
 
     assert tifa_align.unidic_dir() == dicdir
-    expected_ja_g2p = importlib.util.find_spec("fugashi") is not None
-    assert tifa_align.ja_g2p_available() is expected_ja_g2p
+    has_fugashi = importlib.util.find_spec("fugashi") is not None
+    assert tifa_align.ja_g2p_available() is has_fugashi
     engine = AsrEngine(AsrConfig(asr_model="x", aligner="tifa", language="Japanese"))
-    assert engine._lrc_route("こんにちは", "Japanese")[0] == "qwen"
-    assert AsrEngine._pick_align_mode("こんにちは") == "ja"
+    assert engine._lrc_route("こんにちは", "Japanese")[0] == ("tifa" if has_fugashi else "qwen")
+    assert AsrEngine._pick_align_mode("こんにちは") == ("tifa" if has_fugashi else "ja")
+
+
+def test_extract_alignment_ja_uses_acoustic_mora_groups_and_skips_sokuon():
+    """日语模式直接按 TIFA group_scripts 取真实声学逐拍平假名，跳过促音 cl，保住混唱英文词。"""
+    import numpy as np
+    from sheetsage2_webui.tifa_align import extract_alignment_from_result
+
+    # 模拟「億劫 kiss」：o [0,2], cl [2,3], k [3,4] u [4,7], kiss [7,10]
+    sim = np.full((10, 7), 0.7, dtype=np.float32)
+    result = {
+        "spans": np.array([[0, 2], [2, 3], [3, 4], [4, 7], [7, 8], [8, 9], [9, 10]]),
+        "words": np.array([1, 1, 1, 1, 2, 2, 2]),
+        "groups": np.array([1, 2, 3, 3, 4, 4, 4]),
+        "phonemes": ["ja/o", "ja/cl", "ja/k", "ja/u", "en/k", "en/ih", "en/s"],
+        "group_scripts": ["o", "cl", "ku", "kiss"],
+        "texts": ["億劫", "kiss"],
+        "spectrogram": np.zeros((10, 80), dtype=np.float32),
+        "similarity": sim,
+    }
+    words, _phones = extract_alignment_from_result(
+        result, timestep=0.1, skip_handling="preserve", language="ja"
+    )
+    assert [w[0] for w in words] == ["お", "く", "kiss"]
+    assert (words[0][1], words[0][2]) == pytest.approx((0.0, 0.2))
+    assert (words[1][1], words[1][2]) == pytest.approx((0.3, 0.7))
+    assert (words[2][1], words[2][2]) == pytest.approx((0.7, 1.0))
+    # 日语模式 _labels_for 不应用原汉字覆盖 TIFA 声学假名
+    assert AsrEngine._labels_for("目を見", words, "ja") == []
 
 
 def test_tifa_ja_expand_items_preserves_latin_words():
